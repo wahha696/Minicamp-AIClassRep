@@ -1,8 +1,9 @@
-// 业务路由：今日 / 事件查询 / 事件详情 / 改状态。主人是 B。
-// 导出（B4）、群管理（B5）、演示（B6）后续补。
-import type { Hono } from 'hono';
+// 业务路由：今日 / 事件查询 / 事件详情 / 改状态 / 导出 .ics。主人是 B。
+// 群管理（B5）、演示（B6）后续补。
+import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import { db } from '../db/index.js';
+import { buildIcs } from '../ics.js';
 import type {
   EventDTO,
   EventDetailDTO,
@@ -168,6 +169,19 @@ function parseId(raw: string): number | null {
   return Number.isInteger(n) && n > 0 ? n : null;
 }
 
+/** 导出响应的固定头（FR-9.1） */
+const ICS_HEADERS = {
+  'Content-Type': 'text/calendar; charset=utf-8',
+  'Content-Disposition': 'attachment; filename="classrep.ics"',
+};
+
+/** 事件 → .ics 响应；一条可导出的都没有时 404 */
+function icsResponse(c: Context, events: EventDTO[]): Response {
+  const ics = buildIcs(events);
+  if (ics === null) return c.body('', 404, { 'Content-Type': 'text/plain; charset=utf-8' });
+  return c.body(ics, 200, ICS_HEADERS);
+}
+
 // ===== 路由
 
 export function registerBusinessRoutes(app: Hono): void {
@@ -190,6 +204,28 @@ export function registerBusinessRoutes(app: Hono): void {
     const hi = to ?? Number.MAX_SAFE_INTEGER;
     if (hi <= lo) return c.json({ error: 'to 必须大于 from' }, 400);
     return c.json(selectEventsInRange(lo, hi));
+  });
+
+  // 导出 .ics：from/to 同 /api/events（省略的那侧不设限）；一条可导出的都没有 → 404
+  // 注意：这条必须注册在 /api/events/:id 之前
+  app.get('/api/export.ics', (c) => {
+    const range = parseRange(c.req.query('from'), c.req.query('to'));
+    if (range === null) return c.json({ error: 'from/to 需要是毫秒时间戳' }, 400);
+    const { from, to } = range;
+    if (from === undefined && to === undefined) return icsResponse(c, selectAllEvents());
+    const lo = from ?? Number.MIN_SAFE_INTEGER;
+    const hi = to ?? Number.MAX_SAFE_INTEGER;
+    if (hi <= lo) return c.json({ error: 'to 必须大于 from' }, 400);
+    return icsResponse(c, selectEventsInRange(lo, hi));
+  });
+
+  // 单条导出（FR-9.2）：同 /api/export.ics 的格式，只有这一条
+  app.get('/api/events/:id/export.ics', (c) => {
+    const id = parseId(c.req.param('id'));
+    if (id === null) return c.json({ error: '事件 id 不合法' }, 400);
+    const event = getEventById(id);
+    if (event === null) return c.json({ error: '事件不存在' }, 404);
+    return icsResponse(c, [event]);
   });
 
   // 事件详情：sources 按时间升序，history 按 version 升序

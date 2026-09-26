@@ -43,13 +43,14 @@ function addEvent(
     end_at?: number | null;
     deadline_at?: number | null;
     status?: string;
+    location?: string | null;
   } = {},
 ): number {
   const now = Date.now();
   const res = db
     .prepare(
-      `INSERT INTO events (group_id, type, title, description, start_at, end_at, deadline_at, status, confidence, version, created_at, updated_at)
-       VALUES (?, ?, ?, '', ?, ?, ?, ?, 0.9, 1, ?, ?)`,
+      `INSERT INTO events (group_id, type, title, description, start_at, end_at, deadline_at, location, status, confidence, version, created_at, updated_at)
+       VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, 0.9, 1, ?, ?)`,
     )
     .run(
       opts.group_id ?? 'g1',
@@ -58,6 +59,7 @@ function addEvent(
       opts.start_at ?? null,
       opts.end_at ?? null,
       opts.deadline_at ?? null,
+      opts.location ?? null,
       opts.status ?? 'active',
       now,
       now,
@@ -447,5 +449,99 @@ describe('PATCH /api/events/:id', () => {
     expect(await patchJson(app, '/api/events/9999', { status: 'done' })).toMatchObject({
       status: 404,
     });
+  });
+});
+
+// ===== 导出 .ics（B4）
+
+describe('GET /api/export.ics', () => {
+  it('返回 text/calendar + attachment 文件名，正文是合法日历', async () => {
+    const app = freshApp();
+    const today = shanghaiToday();
+    addGroup('g1', '高数(2)班');
+    addEvent({ title: '高数小测', start_at: shTime(today, '14:00'), location: 'A301' });
+
+    const res = await app.request('/api/export.ics');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('text/calendar; charset=utf-8');
+    expect(res.headers.get('content-disposition')).toBe('attachment; filename="classrep.ics"');
+
+    const text = await res.text();
+    expect(text.startsWith('BEGIN:VCALENDAR\r\n')).toBe(true);
+    expect(text.endsWith('END:VCALENDAR\r\n')).toBe(true);
+    expect(text).toContain('TZID:Asia/Shanghai');
+    expect(text).toContain('SUMMARY:[考试]高数小测');
+    expect(text).toContain('LOCATION:A301');
+  });
+
+  it('from/to 过滤与 /api/events 一致', async () => {
+    const app = freshApp();
+    const today = shanghaiToday();
+    addGroup('g1', '高数(2)班');
+    addEvent({ title: '区间内', start_at: shTime(today, '14:00') });
+    addEvent({ title: '区间外', start_at: shTime(today, '20:00') });
+
+    const from = shTime(today, '00:00');
+    const to = shTime(today, '18:00');
+    const res = await app.request(`/api/export.ics?from=${from}&to=${to}`);
+    const text = await res.text();
+    expect(text).toContain('SUMMARY:[考试]区间内');
+    expect(text).not.toContain('区间外');
+  });
+
+  it('cancelled 的不导出；一条可导出的都没有 → 404', async () => {
+    const app = freshApp();
+    const today = shanghaiToday();
+    addGroup('g1', '高数(2)班');
+    addEvent({ title: '已取消', start_at: shTime(today, '14:00'), status: 'cancelled' });
+    addEvent({ title: '没时间的' });
+
+    expect((await app.request('/api/export.ics')).status).toBe(404);
+  });
+
+  it('from/to 不是数字 → 400', async () => {
+    const app = freshApp();
+    expect((await app.request('/api/export.ics?from=abc')).status).toBe(400);
+  });
+});
+
+describe('GET /api/events/:id/export.ics', () => {
+  it('只导出这一条', async () => {
+    const app = freshApp();
+    const today = shanghaiToday();
+    addGroup('g1', '高数(2)班');
+    const id = addEvent({ title: '要导出的', start_at: shTime(today, '14:00') });
+    addEvent({ title: '不要的', start_at: shTime(today, '15:00') });
+
+    const res = await app.request(`/api/events/${id}/export.ics`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('text/calendar; charset=utf-8');
+    const text = await res.text();
+    expect(text).toContain('UID:classrep-' + id + '@local');
+    expect(text).toContain('SUMMARY:[考试]要导出的');
+    expect(text).not.toContain('不要的');
+    expect(text.match(/BEGIN:VEVENT/g)).toHaveLength(1);
+  });
+
+  it('这条没有时间 → 404；id 不合法 → 400；不存在 → 404', async () => {
+    const app = freshApp();
+    addGroup('g1', '高数(2)班');
+    const noTime = addEvent({ title: '没时间的' });
+    expect((await app.request(`/api/events/${noTime}/export.ics`)).status).toBe(404);
+    expect((await app.request('/api/events/abc/export.ics')).status).toBe(400);
+    expect((await app.request('/api/events/9999/export.ics')).status).toBe(404);
+  });
+
+  it('这条没被 :id 详情路由抢走（路由顺序）', async () => {
+    const app = freshApp();
+    const today = shanghaiToday();
+    addGroup('g1', '高数(2)班');
+    const id = addEvent({ title: '高数小测', start_at: shTime(today, '14:00') });
+
+    const ics = await app.request(`/api/events/${id}/export.ics`);
+    expect(ics.headers.get('content-type')).toBe('text/calendar; charset=utf-8');
+    // 详情接口仍是 JSON
+    const detail = await app.request(`/api/events/${id}`);
+    expect(detail.headers.get('content-type')).toContain('application/json');
   });
 });
