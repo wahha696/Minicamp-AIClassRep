@@ -2,6 +2,7 @@
 import { NavLink, Outlet } from 'react-router-dom';
 import Avatar from './Avatar';
 import ConnectBanner from './ConnectBanner';
+import Pet from './Pet';
 import StatusLights from './StatusLights';
 
 interface NavItem {
@@ -79,6 +80,9 @@ export default function Layout() {
           </NavLink>
         ))}
       </nav>
+
+      {/* 桌宠（PET-1~6）：纯装饰浮层，交互与层级说明见 components/Pet.tsx 顶部注释 */}
+      <Pet />
     </div>
   );
 }
