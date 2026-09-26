@@ -180,17 +180,16 @@ export function registerBusinessRoutes(app: Hono): void {
     return c.json(body);
   });
 
-  // 事件列表：from/to 为毫秒，可省略；都省略时返回全部非 cancelled
+  // 事件列表：from/to 为毫秒，各自可省略（省一个 = 那一侧不设限）；都省略时返回全部非 cancelled
   app.get('/api/events', (c) => {
     const range = parseRange(c.req.query('from'), c.req.query('to'));
     if (range === null) return c.json({ error: 'from/to 需要是毫秒时间戳' }, 400);
     const { from, to } = range;
     if (from === undefined && to === undefined) return c.json(selectAllEvents());
-    if (from === undefined || to === undefined) {
-      return c.json({ error: 'from 和 to 要一起给，或者都不给' }, 400);
-    }
-    if (to <= from) return c.json({ error: 'to 必须大于 from' }, 400);
-    return c.json(selectEventsInRange(from, to));
+    const lo = from ?? Number.MIN_SAFE_INTEGER;
+    const hi = to ?? Number.MAX_SAFE_INTEGER;
+    if (hi <= lo) return c.json({ error: 'to 必须大于 from' }, 400);
+    return c.json(selectEventsInRange(lo, hi));
   });
 
   // 事件详情：sources 按时间升序，history 按 version 升序

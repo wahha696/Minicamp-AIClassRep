@@ -1,9 +1,19 @@
 // B3 验收：/api/today、/api/events、/api/events/:id、PATCH /api/events/:id
 import { Hono } from 'hono';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db, openDb } from '../db/index.js';
 import { registerBusinessRoutes } from './business.js';
 import type { EventDetailDTO, EventDTO, TodayDTO } from '../types.js';
+
+// ===== 固定时钟：「现在」钉在上海时间某天 12:00，结果不随跑测试的时刻变化
+// （否则 00:10 前 / 23:00 后跑，「未来那件」会落到明天，摘要断言就会挂）
+const FIXED_NOW = Date.parse('2026-09-23T12:00:00+08:00');
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'], now: FIXED_NOW });
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 // ===== 测试脚手架
 
@@ -155,7 +165,6 @@ describe('GET /api/today', () => {
   it('摘要：最急的是「排序时间 ≥ 现在」的第一个', async () => {
     const app = freshApp();
     const today = shanghaiToday();
-    const now = Date.now();
     addGroup('g1', '高数(2)班');
     // 两件都在今天，但都已经过去 → 回落到第一个
     addEvent({ title: '上午已过的事', type: 'meeting', start_at: shTime(today, '01:00') });
@@ -164,10 +173,8 @@ describe('GET /api/today', () => {
     const { body } = await getJson(app, '/api/today');
     const b = body as TodayDTO;
     expect(b.events).toHaveLength(2);
-    if (now < shTime(today, '23:59')) {
-      // 正常情况：两件都已过去 → 第一个（00:30 那件）
-      expect(b.summary).toBe('今天 2 件事，最急的是 00:30 凌晨已过的事');
-    }
+    // 两件都已过去（现在是 12:00）→ 回落到第一个（00:30 那件）
+    expect(b.summary).toBe('今天 2 件事，最急的是 00:30 凌晨已过的事');
   });
 
   it('摘要：未来那件优先于已过去的那件', async () => {
@@ -175,19 +182,25 @@ describe('GET /api/today', () => {
     const today = shanghaiToday();
     addGroup('g1', '高数(2)班');
     addEvent({ title: '已过去的事', start_at: shTime(today, '00:10') });
-    addEvent({ title: '稍后的事', start_at: Date.now() + 3600_000 });
+    addEvent({ title: '稍后的事', start_at: shTime(today, '14:00') });
 
     const { body } = await getJson(app, '/api/today');
     const b = body as TodayDTO;
     expect(b.events.map((e) => e.title)).toEqual(['已过去的事', '稍后的事']);
-    expect(b.summary).toBe(
-      `今天 2 件事，最急的是 ${new Intl.DateTimeFormat('zh-CN', {
-        timeZone: 'Asia/Shanghai',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false,
-      }).format(new Date(Date.now() + 3600_000))} 稍后的事`,
-    );
+    expect(b.summary).toBe('今天 2 件事，最急的是 14:00 稍后的事');
+  });
+
+  it('跨时区边界：上海 00:30（UTC 还是前一天）时「今天」按上海算', async () => {
+    vi.setSystemTime(Date.parse('2026-09-23T00:30:00+08:00'));
+    const app = freshApp();
+    addGroup('g1', '高数(2)班');
+    addEvent({ title: '上海今天', start_at: Date.parse('2026-09-23T09:00:00+08:00') });
+    addEvent({ title: '上海昨天', start_at: Date.parse('2026-09-22T23:00:00+08:00') });
+
+    const { body } = await getJson(app, '/api/today');
+    const b = body as TodayDTO;
+    expect(b.date).toBe('2026-09-23');
+    expect(b.events.map((e) => e.title)).toEqual(['上海今天']);
   });
 
   it('今天 0 点整的事件算今天，次日 0 点整的不算', async () => {
@@ -259,11 +272,20 @@ describe('GET /api/events', () => {
     expect(body as EventDTO[]).toEqual([]);
   });
 
-  it('只给一个参数 → 400', async () => {
+  it('只给一个参数 = 那一侧不设限（无时间的仍排除）', async () => {
     const app = freshApp();
-    const { status, body } = await getJson(app, '/api/events?from=1000');
-    expect(status).toBe(400);
-    expect(body).toHaveProperty('error');
+    const today = shanghaiToday();
+    addGroup('g1', '高数(2)班');
+    addEvent({ title: '早的', start_at: shTime(today, '08:00') });
+    addEvent({ title: '晚的', start_at: shTime(today, '20:00') });
+    addEvent({ title: '没时间的' });
+
+    const mid = shTime(today, '12:00');
+    const onlyFrom = await getJson(app, `/api/events?from=${mid}`);
+    expect(onlyFrom.status).toBe(200);
+    expect((onlyFrom.body as EventDTO[]).map((e) => e.title)).toEqual(['晚的']);
+    const onlyTo = await getJson(app, `/api/events?to=${mid}`);
+    expect((onlyTo.body as EventDTO[]).map((e) => e.title)).toEqual(['早的']);
   });
 
   it('from/to 不是数字 → 400；to <= from → 400', async () => {
