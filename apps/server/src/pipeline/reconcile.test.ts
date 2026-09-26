@@ -227,6 +227,7 @@ describe('listActiveEvents', () => {
     expect(list.map((e) => e.id)).toEqual([keep]);
     expect(list[0]).toEqual({
       id: keep, type: 'exam', title: '下周考试', start_at: T0, end_at: null, deadline_at: null, location: 'A301',
+      action_required: '带计算器',
     });
     expect(old).toBeGreaterThan(0);
   });

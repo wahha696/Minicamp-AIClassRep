@@ -179,7 +179,7 @@ function applyOne(groupId: string, ev: ExtractedEvent, byId: Map<string, Message
 export function listActiveEvents(groupId: string, now = Date.now()): ActiveEventBrief[] {
   return db
     .prepare(
-      `SELECT id, type, title, start_at, end_at, deadline_at, location FROM events
+      `SELECT id, type, title, start_at, end_at, deadline_at, location, action_required FROM events
        WHERE group_id = ? AND ${LIVE_SQL}
          AND COALESCE(end_at, start_at, deadline_at, updated_at) >= ?
        ORDER BY id`,
