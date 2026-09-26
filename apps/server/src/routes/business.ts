@@ -8,6 +8,7 @@ import type {
   EventDTO,
   EventDetailDTO,
   EventStatus,
+  GroupDTO,
   HistoryDTO,
   SourceMessageDTO,
   TodayDTO,
@@ -148,6 +149,7 @@ function buildSummary(events: EventDTO[], now: number): string {
 
 const EVENT_STATUSES = ['active', 'cancelled', 'done', 'pending_confirm'] as const;
 const patchEventSchema = z.object({ status: z.enum(EVENT_STATUSES) });
+const patchGroupSchema = z.object({ enabled: z.boolean() });
 
 /** '?from=&to=' → 毫秒；返回 null 表示格式不对 */
 function parseRange(from: string | undefined, to: string | undefined): { from?: number; to?: number } | null {
@@ -167,6 +169,53 @@ function parseRange(from: string | undefined, to: string | undefined): { from?: 
 function parseId(raw: string): number | null {
   const n = Number(raw);
   return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+// ===== 群（B5）
+
+interface GroupRow {
+  group_id: string;
+  name: string;
+  enabled: number;
+  message_count: number;
+  event_count: number;
+}
+
+/** 群列表带 message_count / event_count（FR-10.1） */
+function selectGroups(): GroupDTO[] {
+  const rows = db
+    .prepare(
+      `SELECT g.group_id, g.name, g.enabled,
+              (SELECT COUNT(*) FROM messages m WHERE m.group_id = g.group_id) AS message_count,
+              (SELECT COUNT(*) FROM events e WHERE e.group_id = g.group_id)   AS event_count
+         FROM groups g
+        ORDER BY g.created_at, g.group_id`,
+    )
+    .all() as unknown as GroupRow[];
+  return rows.map(toGroupDTO);
+}
+
+function getGroupById(group_id: string): GroupDTO | null {
+  const row = db
+    .prepare(
+      `SELECT g.group_id, g.name, g.enabled,
+              (SELECT COUNT(*) FROM messages m WHERE m.group_id = g.group_id) AS message_count,
+              (SELECT COUNT(*) FROM events e WHERE e.group_id = g.group_id)   AS event_count
+         FROM groups g
+        WHERE g.group_id = ?`,
+    )
+    .get(group_id) as unknown as GroupRow | undefined;
+  return row === undefined ? null : toGroupDTO(row);
+}
+
+function toGroupDTO(row: GroupRow): GroupDTO {
+  return {
+    group_id: row.group_id,
+    name: row.name,
+    enabled: row.enabled !== 0,
+    message_count: row.message_count,
+    event_count: row.event_count,
+  };
 }
 
 /** 导出响应的固定头（FR-9.1） */
@@ -286,6 +335,60 @@ export function registerBusinessRoutes(app: Hono): void {
     const event = getEventById(id);
     if (event === null) return c.json({ error: '事件不存在' }, 404);
     return c.json(event);
+  });
+
+  // 群列表（FR-10.1）
+  app.get('/api/groups', (c) => c.json(selectGroups()));
+
+  // 开 / 关某个群的监听
+  app.patch('/api/groups/:id', async (c) => {
+    const group_id = c.req.param('id');
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      return c.json({ error: '请求体不是合法 JSON' }, 400);
+    }
+    const parsed = patchGroupSchema.safeParse(raw);
+    if (!parsed.success) return c.json({ error: 'enabled 只能是 true / false' }, 400);
+
+    const res = db
+      .prepare('UPDATE groups SET enabled = ? WHERE group_id = ?')
+      .run(parsed.data.enabled ? 1 : 0, group_id);
+    if (res.changes === 0) return c.json({ error: '群不存在' }, 404);
+
+    const group = getGroupById(group_id);
+    if (group === null) return c.json({ error: '群不存在' }, 404);
+    return c.json(group);
+  });
+
+  // 删除该群的全部数据（群本身保留）：history → sources → events → messages
+  app.delete('/api/groups/:id/data', (c) => {
+    const group_id = c.req.param('id');
+    const exists = db.prepare('SELECT 1 AS ok FROM groups WHERE group_id = ?').get(group_id);
+    if (exists === undefined) return c.json({ error: '群不存在' }, 404);
+
+    const delHistory = db.prepare(
+      'DELETE FROM event_history WHERE event_id IN (SELECT id FROM events WHERE group_id = ?)',
+    );
+    const delSources = db.prepare(
+      'DELETE FROM event_sources WHERE event_id IN (SELECT id FROM events WHERE group_id = ?)',
+    );
+    const delEvents = db.prepare('DELETE FROM events WHERE group_id = ?');
+    const delMessages = db.prepare('DELETE FROM messages WHERE group_id = ?');
+
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      delHistory.run(group_id);
+      delSources.run(group_id);
+      delEvents.run(group_id);
+      delMessages.run(group_id);
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+    return c.json({ ok: true });
   });
 }
 
