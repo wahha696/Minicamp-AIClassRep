@@ -8,3 +8,9 @@ export const llmStats: { llm: PipelineStats['llm']; called: number; failed: numb
   called: 0,
   failed: 0, // 累计连不上 AI 的次数；调度器靠它判断这批要不要留着重试
 };
+
+export const jevStats: { state: 'ok' | 'error'; called: number; filtered: number } = {
+  state: 'ok',
+  called: 0,
+  filtered: 0,
+};

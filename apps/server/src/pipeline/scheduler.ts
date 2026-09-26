@@ -1,11 +1,12 @@
-// 调度（FR-5）：轮询 messages.processed=0，按群分批跑 stages（filter → extract → reconcile）。
+// 调度（FR-5）：轮询 messages.processed=0，按群分批跑 stages（filter → Jev → extract → reconcile）。
 // 别人入库后不用通知这里；同一时刻只跑一个批次；一批消息处理完置 processed=1。
 // 例外：AI 连不上（网络 / 证书 / 服务挂了）时这批不置已处理，等 LLM_RETRY_MS 后重试，免得通知白白丢掉。
 import { db } from '../db/index.js';
 import type { Message } from '../types.js';
 import { type ExtractedEvent, extractEvents } from './extract.js';
 import { isNoise } from './filter.js';
-import { llmStats } from './stats.js';
+import { filterWithJev } from './jev.js';
+import { jevStats, llmStats } from './stats.js';
 import { applyEvents, listActiveEvents } from './reconcile.js';
 
 const TICK_MS = 5_000;
@@ -23,12 +24,12 @@ export interface Batch {
   groupName: string;
   now: number;
   messages: Message[]; // 本批全部消息（按 sent_at 升序）
+  context: Message[]; // 此前最近 10 条非噪声消息
   candidates: Message[]; // 过滤后留下的
   extracted: ExtractedEvent[];
   llmFailed?: boolean; // AI 没调通：这批留着下次重试
 }
 
-/** 以后插 Jev 只需要往 stages 里加一个（架构.md §6） */
 export type Stage = (b: Batch) => void | Promise<void>;
 
 const ids = (ms: Message[]) => JSON.stringify(ms.map((m) => m.message_id));
@@ -43,25 +44,28 @@ const filterStage: Stage = (b) => {
   }
 };
 
+const jevStage: Stage = async (b) => {
+  const kept = await filterWithJev(b.candidates, b.context, b.groupName);
+  if (kept === null) return; // 未配置或失败：保留原候选，继续走 LLM
+  const keptIds = new Set(kept.map((m) => m.message_id));
+  const dropped = b.candidates.filter((m) => !keptIds.has(m.message_id));
+  if (dropped.length) {
+    const { changes } = db.prepare(
+      'UPDATE messages SET filtered_out = 1 WHERE filtered_out = 0 AND message_id IN (SELECT value FROM json_each(?))',
+    ).run(ids(dropped));
+    jevStats.filtered += Number(changes);
+  }
+  b.candidates = kept;
+};
+
 const extractStage: Stage = async (b) => {
   const first = b.candidates[0];
   if (!first) return; // 候选为空不调 LLM
-  const context = (
-    db
-      .prepare(
-        `SELECT message_id, group_id, sender_name, text, sent_at FROM messages
-         WHERE group_id = ? AND filtered_out = 0 AND sent_at < ?
-         ORDER BY sent_at DESC LIMIT ?`,
-      )
-      .all(b.groupId, b.messages[0]!.sent_at, CONTEXT) as unknown as Omit<Message, 'group_name'>[]
-  )
-    .reverse()
-    .map((m) => ({ ...m, group_name: b.groupName }));
   const failedBefore = llmStats.failed;
   b.extracted = await extractEvents({
     groupName: b.groupName,
     candidates: b.candidates,
-    context,
+    context: b.context,
     now: b.now,
     activeEvents: listActiveEvents(b.groupId, b.now),
   });
@@ -77,7 +81,7 @@ const reconcileStage: Stage = (b) => {
   applyEvents(b.groupId, b.extracted, b.candidates);
 };
 
-export const stages: Stage[] = [filterStage, extractStage, reconcileStage];
+export const stages: Stage[] = [filterStage, jevStage, extractStage, reconcileStage];
 
 // ---------- 批次 ----------
 
@@ -110,11 +114,20 @@ async function processBatch(g: PendingGroup): Promise<number> {
     .all(g.group_id, BATCH) as unknown as Omit<Message, 'group_name'>[];
   if (rows.length === 0) return 0;
 
+  const context = (
+    db.prepare(
+      `SELECT message_id, group_id, sender_name, text, sent_at FROM messages
+       WHERE group_id = ? AND filtered_out = 0 AND sent_at < ?
+       ORDER BY sent_at DESC LIMIT ?`,
+    ).all(g.group_id, rows[0]!.sent_at, CONTEXT) as unknown as Omit<Message, 'group_name'>[]
+  ).reverse().map((m) => ({ ...m, group_name: g.name }));
+
   const b: Batch = {
     groupId: g.group_id,
     groupName: g.name,
     now: Date.now(),
     messages: rows.map((m) => ({ ...m, group_name: g.name })),
+    context,
     candidates: [],
     extracted: [],
   };

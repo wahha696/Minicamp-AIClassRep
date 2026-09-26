@@ -54,8 +54,10 @@ app.get('/health', (c) => {
     db: dbState,
     qq,
     llm: stats.llm,
-    jev: 'disabled',
+    jev: stats.jev,
     filtered_count: stats.filtered_count,
+    jev_filtered_count: stats.jev_filtered_count,
+    jev_called_count: stats.jev_called_count,
     llm_called_count: stats.llm_called_count,
     uptime: Math.round((Date.now() - STARTED_AT) / 1000),
   };

@@ -387,6 +387,8 @@ export const mockApi: Api = {
       llm: 'ok',
       jev: 'disabled',
       filtered_count: filteredCount,
+      jev_filtered_count: 0,
+      jev_called_count: 0,
       llm_called_count: llmCalledCount,
       uptime: Math.floor((Date.now() - bootAt) / 1000),
     };

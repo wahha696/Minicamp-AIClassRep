@@ -39,18 +39,24 @@ describe('parseEnvFile', () => {
 });
 
 describe('env', () => {
-  it('五个键都在，且类型正确', () => {
+  it('配置键都在，且类型正确', () => {
     expect(Object.keys(env).sort()).toEqual([
       'DEMO_MODE',
+      'ENABLE_JEV',
+      'JEV_MODEL',
+      'JEV_TIMEOUT_MS',
       'LLM_API_KEY',
       'LLM_BASE_URL',
       'LLM_MODEL',
       'RAW_MSG_TTL_DAYS',
+      'TYPESAFE_API_KEY',
     ]);
     expect(typeof env.LLM_BASE_URL).toBe('string');
     expect(typeof env.LLM_API_KEY).toBe('string');
     expect(typeof env.LLM_MODEL).toBe('string');
     expect(typeof env.DEMO_MODE).toBe('boolean');
+    expect(typeof env.ENABLE_JEV).toBe('boolean');
+    expect(typeof env.TYPESAFE_API_KEY).toBe('string');
     expect(typeof env.RAW_MSG_TTL_DAYS).toBe('number');
   });
 
@@ -59,6 +65,10 @@ describe('env', () => {
       LLM_BASE_URL: '',
       LLM_API_KEY: '',
       LLM_MODEL: '',
+      ENABLE_JEV: true,
+      TYPESAFE_API_KEY: '',
+      JEV_MODEL: 'jev-latest',
+      JEV_TIMEOUT_MS: 5_000,
       DEMO_MODE: true,
       RAW_MSG_TTL_DAYS: 7,
     });
@@ -82,10 +92,14 @@ describe('env', () => {
     const parsed = parseEnvFile(raw);
     expect(Object.keys(parsed).sort()).toEqual([
       'DEMO_MODE',
+      'ENABLE_JEV',
+      'JEV_MODEL',
+      'JEV_TIMEOUT_MS',
       'LLM_API_KEY',
       'LLM_BASE_URL',
       'LLM_MODEL',
       'RAW_MSG_TTL_DAYS',
+      'TYPESAFE_API_KEY',
     ]);
     expect(parsed.LLM_API_KEY).toBe('');
   });

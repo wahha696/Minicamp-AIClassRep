@@ -6,19 +6,25 @@ import { bannerFor, ERROR_FALLBACK, lightsFromHealth, shouldRedirectToConnect } 
 
 const health = (over: Partial<HealthDTO> = {}): HealthDTO => ({
   status: 'ok', db: 'ok', qq: 'online', llm: 'ok', jev: 'disabled',
-  filtered_count: 0, llm_called_count: 0, uptime: 1, ...over,
+  filtered_count: 0, jev_filtered_count: 0, jev_called_count: 0, llm_called_count: 0, uptime: 1, ...over,
 });
 const status = (state: ConnectState, over: Partial<ConnectStatusDTO> = {}): ConnectStatusDTO => ({
   state, since: 0, first_run: false, ...over,
 });
 
 describe('状态灯', () => {
-  it('全正常：前三个绿，快判灰色「预留」', () => {
+  it('未启用快判：前三个绿，快判灰色', () => {
     const l = lightsFromHealth(health());
     expect(l.map((x) => [x.label, x.color])).toEqual([
       ['QQ', 'green'], ['数据库', 'green'], ['AI', 'green'], ['快判', 'gray'],
     ]);
-    expect(l[3].tip).toContain('预留');
+    expect(l[3].tip).toContain('已关闭');
+  });
+
+  it('快判正常为绿，失败或缺 key 为红且提示继续走 AI', () => {
+    expect(lightsFromHealth(health({ jev: 'ok' }))[3].color).toBe('green');
+    expect(lightsFromHealth(health({ jev: 'error' }))[3].tip).toContain('消息已交给 AI');
+    expect(lightsFromHealth(health({ jev: 'unconfigured' }))[3].color).toBe('red');
   });
 
   it('QQ 非 online、db 异常、llm error/unconfigured 都是红，悬停说明为中文', () => {
