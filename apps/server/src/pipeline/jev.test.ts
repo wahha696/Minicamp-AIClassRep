@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { env } from '../env.js';
 import type { Message } from '../types.js';
-import { filterWithJev } from './jev.js';
+import { JEV_BACKOFF_MS, jevAvailable, resetJevBackoff, scoreWithJev } from './jev.js';
 import { jevStats } from './stats.js';
 
 const messages: Message[] = [
@@ -16,6 +16,7 @@ beforeEach(() => {
   env.TYPESAFE_API_KEY = 'test-key';
   env.JEV_MODEL = 'jev-latest';
   jevStats.state = 'ok';
+  resetJevBackoff();
 });
 
 afterEach(() => {
@@ -27,14 +28,14 @@ afterEach(() => {
 });
 
 describe('Jev 快判', () => {
-  it('一批只调一次，逐条读取 Noul 概率并保留通知', async () => {
+  it('一批只调一次，按顺序返回每条消息的 Noul 概率', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ answers: {
       message_0: { type: 'noul', noul: 0.98 },
       message_1: { type: 'noul', noul: 0.04 },
     } }), { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
 
-    expect(await filterWithJev(messages, [], '课程群')).toEqual([messages[0]]);
+    expect(await scoreWithJev(messages, [], '课程群')).toEqual([0.98, 0.04]);
     expect(fetchMock).toHaveBeenCalledOnce();
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe('https://api.typesafe.ai/v1/systemone');
@@ -51,23 +52,35 @@ describe('Jev 快判', () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     env.TYPESAFE_API_KEY = '';
-    expect(await filterWithJev(messages, [], '课程群')).toBeNull();
+    expect(await scoreWithJev(messages, [], '课程群')).toBeNull();
     env.TYPESAFE_API_KEY = 'test-key';
     env.ENABLE_JEV = false;
-    expect(await filterWithJev(messages, [], '课程群')).toBeNull();
+    expect(await scoreWithJev(messages, [], '课程群')).toBeNull();
     env.ENABLE_JEV = true;
-    expect(await filterWithJev([], [], '课程群')).toBeNull();
+    expect(await scoreWithJev([], [], '课程群')).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('服务错误或缺少答案时交由 LLM 处理', async () => {
+  it('服务错误或缺少答案时返回 null（交由 LLM 处理）', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response('', { status: 429 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ answers: { message_0: { type: 'noul', noul: 0.9 } } }), { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
-    expect(await filterWithJev(messages, [], '课程群')).toBeNull();
-    expect(await filterWithJev(messages, [], '课程群')).toBeNull();
+    expect(await scoreWithJev(messages, [], '课程群')).toBeNull();
+    resetJevBackoff();
+    expect(await scoreWithJev(messages, [], '课程群')).toBeNull();
     expect(jevStats.state).toBe('error');
+  });
+
+  it('失败后退避一段时间不再请求，免得每批都白等一次超时', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fetchMock = vi.fn().mockResolvedValue(new Response('', { status: 529 }));
+    vi.stubGlobal('fetch', fetchMock);
+    expect(await scoreWithJev(messages, [], '课程群')).toBeNull();
+    expect(jevAvailable()).toBe(false);
+    expect(await scoreWithJev(messages, [], '课程群')).toBeNull();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(jevAvailable(Date.now() + JEV_BACKOFF_MS + 1)).toBe(true);
   });
 });

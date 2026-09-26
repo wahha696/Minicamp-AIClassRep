@@ -68,7 +68,7 @@ describe('env', () => {
       ENABLE_JEV: true,
       TYPESAFE_API_KEY: '',
       JEV_MODEL: 'jev-latest',
-      JEV_TIMEOUT_MS: 5_000,
+      JEV_TIMEOUT_MS: 3_000,
       DEMO_MODE: true,
       RAW_MSG_TTL_DAYS: 7,
     });

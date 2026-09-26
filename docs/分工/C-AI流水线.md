@@ -69,13 +69,16 @@ B 的 `db`（`node:sqlite` 的 `DatabaseSync`）、`env`、`types.ts`。我直�
 - 验收（vitest，**不调 LLM**，直接喂假的 extracted）：①先 create「高数小测 周二」再 update 到周五 → 库里 1 条、version=2、history 1 条、sources 2 条；②cancel → status=cancelled；③「高数期中」「线代期中」不合并。
 
 **C5. `scheduler.ts` + `index.ts`**
-- `startScheduler()`：每 5 秒检查一次；某群「未处理消息数 ≥ 15」或「最早一条未处理消息已等 ≥ 20 秒」→ 处理该群。同一时刻只跑一个批次（加锁）。
+- `startScheduler()`：每 1 秒检查一次。某群「未处理消息数 ≥ 15」或「最早一条未处理消息已等 ≥ 20 秒」→ 处理该群（老规则，始终兜底）。Jev 可用时先给新消息打分（`scoreWithJev`，每群最多 2 秒一次，分数缓存）：有 ≥0.8 的 → 群安静 3 秒或首条高分已等 10 秒就处理；全部 <0.2 → 立即处理（全丢，不调 LLM）；有 0.2~0.8 → 最早一条不确定消息等 8 秒后处理。不同群最多 3 个并发，同一个群不并发。
+- Jev 失败（超时 `JEV_TIMEOUT_MS` 默认 3000 / 429 / 529 等）→ 30 秒退避，期间直接用老规则、候选全交 LLM。
+- 每批日志：`群 X：N 条 → LLM k 条，等待 Xs，Jev ms，LLM ms，事件 n 个`，用来看延迟花在哪。
+- 阈值校准：`pnpm --filter server exec tsx src/pipeline/jev-calibrate.ts [剧本…]`，纯 LLM 结果当参考答案，输出召回率/丢弃率扫表，当前丢弃阈值漏正例时退出码 1。
 - 处理一个群：取该群 `processed=0` 的消息（按 sent_at 升序，最多 30 条）→ 规则过滤，噪声置 `filtered_out=1` → 剩下的作为 candidates，另取它们之前的 10 条消息作 context → `extractEvents` → `applyEvents` → 全部置 `processed=1`。例外：**AI 连不上**（网络 / 证书 / 服务挂了，SDK 已自动重试 2 次）时这批**不置 1**，调度器歇 60s 再试，免得通知丢掉；AI 能连上但输出不合法等其他错误仍置 1，避免死循环。
 - 杀毒软件（如卡巴斯基）拦截 HTTPS 会导致 Node 报 `SELF_SIGNED_CERT_IN_CHAIN`：`src/system-ca.ts` 在启动时把 Windows 系统证书并进 Node 的信任列表。
 - 候选为空则不调 LLM。
 - `runPipelineNow()`：立即把所有群处理完（循环直到没有 `processed=0`），等待正在跑的批次结束后再开始。
 - `getPipelineStats()`：`filtered_count` 从库里 `COUNT(*) WHERE filtered_out=1`；`llm_called_count` 内存累加；`llm` 状态见 C3。
-- 预留 Jev：流水线写成 `stages: Stage[]` 数组依次执行（filter → extract → reconcile），`架构.md` §6 要求以后插一个 stage 即可。
+- 流水线写成 `stages: Stage[]` 数组依次执行（filter → jev → extract → reconcile）；jev stage 复用调度阶段已打的分，只给没打过分的候选补打，`<0.2` 置 `filtered_out=1`。
 
 **C6. 调 prompt（M1 联调）**
 和 B、D 一起跑所有剧本，把错误案例记下来改 prompt，直到：改期不产生两条、取消能标记、相对时间全对、`noisy.json` 只出 2 个事件。每改一次 prompt 就把 5 个剧本全跑一遍对比。
