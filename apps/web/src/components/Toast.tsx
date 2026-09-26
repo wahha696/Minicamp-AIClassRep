@@ -3,10 +3,15 @@
 import { createContext, useCallback, useContext, useRef, useState, type ReactNode } from 'react';
 
 type Tone = 'info' | 'error';
+interface Action {
+  label: string;
+  onClick: () => void;
+}
 interface Item {
   id: number;
   text: string;
   tone: Tone;
+  action?: Action; // 可选操作按钮（如「撤销」）
   leaving: boolean; // 正在飘走（动画结束后移除）
 }
 
@@ -14,7 +19,7 @@ const MAX_VISIBLE = 2;
 const DURATION = 3000;
 const LEAVE_MS = 300; // 与 index.css 的 toast-leave 动画时长一致
 
-const ToastContext = createContext<(text: string, tone?: Tone) => void>(() => {});
+const ToastContext = createContext<(text: string, tone?: Tone, action?: Action) => void>(() => {});
 
 export function useToast() {
   return useContext(ToastContext);
@@ -41,10 +46,13 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   );
 
   const show = useCallback(
-    (text: string, tone: Tone = 'info') => {
+    (text: string, tone: Tone = 'info', action?: Action) => {
       const id = nextId.current++;
       // 同样的文案不叠两条：旧的直接换成新的
-      update((list) => [...list.filter((x) => x.leaving || x.text !== text), { id, text, tone, leaving: false }]);
+      update((list) => [
+        ...list.filter((x) => x.leaving || x.text !== text),
+        { id, text, tone, action, leaving: false },
+      ]);
       const alive = listRef.current.filter((x) => !x.leaving);
       dismiss(alive.slice(0, Math.max(0, alive.length - MAX_VISIBLE)).map((x) => x.id));
       setTimeout(() => dismiss([id]), DURATION);
@@ -68,11 +76,23 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             }
           >
             <div
-              className={`rounded-lg px-4 py-2 text-sm text-white shadow-lg ${
+              className={`flex items-center gap-3 rounded-lg px-4 py-2 text-sm text-white shadow-lg ${
                 t.tone === 'error' ? 'bg-rose-600' : 'bg-slate-800'
               }`}
             >
               {t.text}
+              {t.action && (
+                <button
+                  type="button"
+                  className="pointer-events-auto -mr-1 rounded px-1.5 py-0.5 font-medium text-sky-300 hover:bg-white/10"
+                  onClick={() => {
+                    t.action!.onClick();
+                    dismiss([t.id]);
+                  }}
+                >
+                  {t.action.label}
+                </button>
+              )}
             </div>
           </div>
         ))}

@@ -4,7 +4,9 @@ import OpenAI from 'openai';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 import { z } from 'zod';
 import { getLlmConfig } from '../llm-settings.js';
-import type { EventType, Message } from '../types.js';
+import { groupCourseName, occurrences } from '../timetable.js';
+import type { EventType, Level, Message } from '../types.js';
+import { memoryEnabled, preferenceRules } from './preferences.js';
 import { llmStats } from './stats.js';
 
 export interface ExtractedEvent {
@@ -19,6 +21,7 @@ export interface ExtractedEvent {
   location: string | null;
   action_required: string | null;
   confidence: number;
+  level: Level | null; // null = 不变（update 时）/ 用默认（create 时）
   source_message_ids: string[];
 }
 
@@ -32,9 +35,11 @@ export interface ActiveEventBrief {
   deadline_at: number | null;
   location: string | null;
   action_required: string | null; // 补充要求时 LLM 要在旧要求上合并，所以得让它看到
+  level: number;
 }
 
 export interface ExtractInput {
+  groupId: string;
   groupName: string;
   candidates: Message[];
   context: Message[];
@@ -104,6 +109,8 @@ const EventSchema = z.object({
   location: textField,
   action_required: textField,
   confidence: z.number().transform((v) => Math.min(1, Math.max(0, v))),
+  // 危机等级 1~4；缺省、越界、乱写的都当 null（update 不改 / create 用默认）
+  level: z.number().int().min(1).max(4).nullable().catch(null),
   source_message_ids: z.array(z.union([z.string(), z.number()]).transform(String)),
 }).refine((ev) => ev.action !== 'create' || ev.title !== '', {
   message: 'action=create 时 title 不能为空',
@@ -127,6 +134,7 @@ export function parseExtraction(
   if (!r.success) return { ok: false, error: z.prettifyError(r.error) };
   const events = r.data.events.map((ev) => ({
     ...ev,
+    level: ev.level as Level | null,
     source_message_ids: [...new Set(ev.source_message_ids)].filter((id) => validIds.has(id)),
   }));
   return { ok: true, events };
@@ -149,6 +157,7 @@ function fmtEvent(e: ActiveEventBrief): string {
     deadline_at: t(e.deadline_at),
     location: e.location,
     action_required: e.action_required,
+    level: e.level,
   });
 }
 
@@ -185,11 +194,78 @@ ${calendar(now)}
 5. 下面会给出本群已有的事件（带 id）。如果某条消息是对已有事件的改期、换地点、补充要求，输出 action="update"、update_of=该事件 id，并**只填变化后的字段**，没变的字段给 null（填了的字段会整个覆盖旧值：补充要求时 action_required 要写「已有事件的 action_required + 新要求」合并后的完整要求，旧要求一条都不能丢；description 除非事项内容本身变了，否则给 null）；如果是取消，输出 action="cancel"、update_of=该事件 id。名字相近但不是同一件事的（比如「高数期中」和「线代期中」）不要混为一谈。已有事件的单纯重复提醒不要输出。
 6. 同一批消息里既有原通知又有改动的，只输出一个按改动后信息填写的 create。
 7. confidence 是你对「这确实是一个需要行动的事项、且信息理解正确」的把握，0~1。
-8. source_message_ids 填提供该事项信息的消息 id（方括号里的内容，原样照抄）。
-9. 没有任何事项时输出 {"events": []}。
+8. level 是这件事的危机等级，1~4：
+   4 紧急：24 小时内要交/要考/要到场，或错过会直接影响成绩；
+   3 高：考试、计分作业、必须参加的点名活动，时间在一周内；
+   2 中：一般作业、会议、需要行动但不急的事；
+   1 低：纯通知、选修/社团活动、可去可不去的事。
+   update 时等级没变给 null。
+9. source_message_ids 填提供该事项信息的消息 id（方括号里的内容，原样照抄）。
+10. 没有任何事项时输出 {"events": []}。
 
 只输出 JSON，格式：
-{"events": [{"action": "create", "update_of": null, "type": "exam|assignment|meeting|activity|announcement|other", "title": "简短标题，如：高数第三章小测", "description": "一两句话说明", "start_at": "2026-09-18T14:00+08:00", "end_at": null, "deadline_at": null, "location": "A301", "action_required": "带计算器和学生证", "confidence": 0.9, "source_message_ids": ["消息id"]}]}`;
+{"events": [{"action": "create", "update_of": null, "type": "exam|assignment|meeting|activity|announcement|other", "title": "简短标题，如：高数第三章小测", "description": "一两句话说明", "start_at": "2026-09-18T14:00+08:00", "end_at": null, "deadline_at": null, "location": "A301", "action_required": "带计算器和学生证", "confidence": 0.9, "level": 3, "source_message_ids": ["消息id"]}]}`;
+}
+
+// ---------- 提示词附加段：长期记忆偏好 + 课表 ----------
+
+const LEVEL_TEXT: Record<number, string> = { 1: '低', 2: '中', 3: '高', 4: '紧急' };
+
+/** 记忆开关开且有规则时，提示词末尾追加用户偏好段。db 未开/读失败按无偏好处理。 */
+function preferenceSection(): string {
+  try {
+    if (!memoryEnabled()) return '';
+    const rules = preferenceRules();
+    if (rules.length === 0) return '';
+    const lines = rules.map((r) => `- ${r.text} → ${r.level} ${LEVEL_TEXT[r.level]}`).join('\n');
+    return `用户对危机等级的偏好（优先于上面的一般标准）：\n${lines}`;
+  } catch {
+    return '';
+  }
+}
+
+const WEEKDAY_SHORT = ['日', '一', '二', '三', '四', '五', '六'];
+const WEEK_MS = 7 * DAY;
+
+/** 「9/29 周二 10:00-11:40 概率论与数理统计A B座312」 */
+function fmtCourse(start: number, end: number, name: string, location: string): string {
+  const s = new Date(start + TZ_OFFSET);
+  const e = new Date(end + TZ_OFFSET);
+  const hm = (d: Date) => `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+  return `${s.getUTCMonth() + 1}/${s.getUTCDate()} 周${WEEKDAY_SHORT[s.getUTCDay()]} ${hm(s)}-${hm(e)} ${name}${location ? ' ' + location : ''}`;
+}
+
+/**
+ * 课表段：本批最早一条消息所在周的周一 → 下一周的周日（适配历史补齐的旧消息）。
+ * 本批跨度超过 3 周时只列该群对应课程（绑定了 course_name 的话），避免提示词过长。
+ * 未导入课表时返回 ''。
+ */
+function timetableSection(input: ExtractInput): string {
+  try {
+    const first = input.candidates[0]?.sent_at ?? input.now;
+    const last = input.candidates[input.candidates.length - 1]?.sent_at ?? first;
+    const monday = mondayOfTs(first);
+    let occ = occurrences(monday, monday + 2 * WEEK_MS);
+    const courseName = groupCourseName(input.groupId);
+    if (last - first > 3 * WEEK_MS && courseName) {
+      occ = occ.filter((o) => o.course.name === courseName);
+    }
+    if (occ.length === 0) return '';
+    const lines = occ.map((o) => fmtCourse(o.start, o.end, o.course.name, o.course.location));
+    const mapping = courseName
+      ? `本群对应课程：${courseName}（用户指定）`
+      : `本群对应哪门课请根据群名「${input.groupName}」判断，判断不出就当作不对应任何一门。`;
+    return `本群课表（供参考，不用提取上课本身）：\n${lines.join('\n')}\n${mapping}\n消息里的「下节课 / 这节课 / 下次课 / 课上」按该消息发送时间之后本群对应课程的第一次课解析；地点没说时默认用该课教室。`;
+  } catch {
+    return '';
+  }
+}
+
+/** 上海时区 ts 所在周的周一 0 点（毫秒） */
+function mondayOfTs(ts: number): number {
+  const dayStart = Math.floor((ts + TZ_OFFSET) / DAY) * DAY - TZ_OFFSET;
+  const wd = new Date(dayStart + TZ_OFFSET).getUTCDay(); // 0 日 … 6 六
+  return dayStart - ((wd + 6) % 7) * DAY;
 }
 
 export function buildUserPrompt(input: ExtractInput): string {
@@ -197,6 +273,8 @@ export function buildUserPrompt(input: ExtractInput): string {
   parts.push(
     '本群已有事件：\n' + (input.activeEvents.length ? input.activeEvents.map(fmtEvent).join('\n') : '（无）'),
   );
+  const timetable = timetableSection(input);
+  if (timetable) parts.push(timetable);
   if (input.context.length) {
     parts.push('之前的消息（仅供理解上下文，不要从这里提取事项）：\n' + input.context.map(fmtMsg).join('\n'));
   }
@@ -239,8 +317,9 @@ export async function extractEvents(
   }
   const llm = client ?? getClient();
   const validIds = new Set(input.candidates.map((m) => m.message_id));
+  const prefs = preferenceSection();
   const messages: ChatCompletionMessageParam[] = [
-    { role: 'system', content: buildSystemPrompt(input.now) },
+    { role: 'system', content: buildSystemPrompt(input.now) + (prefs ? `\n\n${prefs}` : '') },
     { role: 'user', content: buildUserPrompt(input) },
   ];
 

@@ -1,7 +1,7 @@
 // 今日页的两种排序（纯函数，便于单测）。
 // - 按时间：开始时间，没有就用截止时间，升序；时间待定的排最后（与后端 /api/today 的顺序一致）。
-// - 按紧急：先看离现在多近、做没做完，再看事情轻重，最后按时间。
-import type { EventDTO, EventType } from '../api/types';
+// - 按紧急（FR-12）：已完成排最后 → 危机等级降序 → urgencyTier → 时间升序。
+import type { EventDTO } from '../api/types';
 
 export type SortMode = 'time' | 'urgency';
 
@@ -10,17 +10,7 @@ export const SORT_LABEL: Record<SortMode, string> = { time: '按时间', urgency
 /** 「很快就到」的窗口：2 小时内开始 / 截止的事顶到最前 */
 export const SOON_MS = 2 * 3_600_000;
 
-/** 事情轻重：考试、作业截止最重，会议、通知其次，活动和其他最轻 */
-const TYPE_RANK: Record<EventType, number> = {
-  exam: 0,
-  assignment: 0,
-  meeting: 1,
-  announcement: 1,
-  activity: 2,
-  other: 2,
-};
-
-type Sortable = Pick<EventDTO, 'id' | 'type' | 'status' | 'start_at' | 'deadline_at'>;
+type Sortable = Pick<EventDTO, 'id' | 'status' | 'level' | 'start_at' | 'deadline_at'>;
 
 function sortTime(e: Sortable): number | null {
   return e.start_at ?? e.deadline_at;
@@ -55,8 +45,9 @@ export function sortEvents<T extends Sortable>(events: readonly T[], mode: SortM
   if (mode === 'time') return list.sort(byTime);
   return list.sort(
     (a, b) =>
+      (a.status === 'done' ? 1 : 0) - (b.status === 'done' ? 1 : 0) ||
+      b.level - a.level ||
       urgencyTier(a, now) - urgencyTier(b, now) ||
-      (TYPE_RANK[a.type] ?? TYPE_RANK.other) - (TYPE_RANK[b.type] ?? TYPE_RANK.other) ||
       byTime(a, b),
   );
 }

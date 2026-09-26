@@ -22,6 +22,8 @@ function ev(over: Partial<EventDTO> = {}): EventDTO {
     action_required: null,
     status: 'active',
     confidence: 0.9,
+    level: 2,
+    level_locked: false,
     version: 1,
     created_at: NOW,
     updated_at: NOW,

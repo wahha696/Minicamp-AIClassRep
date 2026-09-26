@@ -1,5 +1,6 @@
 // 消息入库（FR-1.4/1.5）。群不存在则登记（enabled=1）；群名变了更新；
-// 群 enabled=0 的消息直接丢弃不入库；INSERT OR IGNORE 按 message_id 去重。
+// 群 enabled=0 的消息直接丢弃不入库；按 message_id 去重——同时查 messages 和 message_seen
+// （message_seen 是清理原始消息时留下的 id，防止 30 天刷新把已处理过的旧消息再整理一遍）。
 import { db } from '../db/index.js';
 import type { Message, MessageSource } from '../types.js';
 
@@ -29,6 +30,9 @@ export function ingestMessages(msgs: Message[], source: MessageSource): { insert
        (message_id, group_id, sender_name, text, sent_at, source, processed, filtered_out, created_at)
      VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)`,
   );
+  const seenBefore = db.prepare(
+    'SELECT 1 AS ok FROM message_seen WHERE message_id = ?',
+  );
 
   let inserted = 0;
   db.exec('BEGIN IMMEDIATE');
@@ -48,6 +52,9 @@ export function ingestMessages(msgs: Message[], source: MessageSource): { insert
           known.name = msg.group_name;
         }
       }
+
+      // message_seen 里有的 id 跳过（清理已删掉原文但记得处理过）
+      if (seenBefore.get(msg.message_id) !== undefined) continue;
 
       const res = insertMessage.run(
         msg.message_id,

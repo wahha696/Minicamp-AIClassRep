@@ -67,6 +67,7 @@ const created = (input: ExtractInput): ExtractedEvent => ({
   location: 'A301',
   action_required: null,
   confidence: 0.9,
+  level: 2,
   source_message_ids: [input.candidates[0]!.message_id],
 });
 

@@ -4,6 +4,8 @@
 
 export type EventType = 'exam' | 'assignment' | 'meeting' | 'activity' | 'announcement' | 'other';
 export type EventStatus = 'active' | 'cancelled' | 'done' | 'pending_confirm';
+/** 危机等级：1 低、2 中、3 高、4 紧急 */
+export type Level = 1 | 2 | 3 | 4;
 export type ConnectState =
   | 'qq_conflict' | 'error' | 'kicked' | 'online' | 'waiting_qr' | 'reconnecting' | 'starting';
 export type MessageSource = 'onebot' | 'history' | 'demo' | 'import';
@@ -32,6 +34,8 @@ export interface EventDTO {
   action_required: string | null;
   status: EventStatus;
   confidence: number;   // 0~1
+  level: Level;
+  level_locked: boolean; // 用户手动设过 = true；AI 更新时不改 level
   version: number;
   created_at: number;
   updated_at: number;
@@ -68,6 +72,47 @@ export interface GroupDTO {
   enabled: boolean;
   message_count: number;
   event_count: number;
+  course_name: string | null; // 用户指定的对应课程名；null = AI 按群名猜
+}
+
+export interface TodoDTO {
+  id: number;
+  title: string;
+  note: string;
+  level: Level;
+  done_at: number | null;
+  created_at: number;
+}
+
+export interface TodosDTO {
+  events: EventDTO[]; // 群里提取出的待办类事件
+  manual: TodoDTO[];  // 用户手动添加的待办（未完成的）
+}
+
+export interface CourseDTO {
+  name: string;
+  teacher: string;
+  location: string;
+  weekday: 1 | 2 | 3 | 4 | 5 | 6 | 7; // 1=周一…7=周日
+  block: 1 | 2 | 3 | 4 | 5;
+  weeks: number[];
+}
+
+export interface TimetableDTO {
+  semester_start: string; // 'YYYY-MM-DD'，本学期第一周的周一
+  courses: CourseDTO[];
+}
+
+export interface LevelRuleDTO {
+  id: number;
+  text: string;
+  level: Level;
+}
+
+export interface MemoryDTO {
+  enabled: boolean;
+  rules: LevelRuleDTO[];
+  feedback_count: number;
 }
 
 export interface ConnectStatusDTO {
@@ -93,4 +138,5 @@ export interface HealthDTO extends PipelineStats {
   db: 'ok' | 'error';
   qq: ConnectState;
   uptime: number;       // 秒
+  pending: number;      // 待整理（processed=0 且未被过滤）的消息数，只算启用的群
 }

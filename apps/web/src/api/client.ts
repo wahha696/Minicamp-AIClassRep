@@ -9,10 +9,15 @@ import type {
   EventStatus,
   GroupDTO,
   HealthDTO,
+  Level,
   LlmProvider,
   LlmSettingsDTO,
+  MemoryDTO,
   ScenarioDTO,
+  TimetableDTO,
   TodayDTO,
+  TodoDTO,
+  TodosDTO,
 } from './types';
 
 export { ApiError };
@@ -21,9 +26,10 @@ export interface Api {
   getToday(): Promise<TodayDTO>;
   getEvents(from?: number, to?: number): Promise<EventDTO[]>;
   getEvent(id: number): Promise<EventDetailDTO>;
-  patchEvent(id: number, status: EventStatus): Promise<EventDTO>;
+  /** status 改状态；level 1~4 手动设级（锁），null 交还 AI（解锁） */
+  patchEvent(id: number, patch: { status?: EventStatus; level?: Level | null }): Promise<EventDetailDTO>;
   getGroups(): Promise<GroupDTO[]>;
-  patchGroup(id: string, enabled: boolean): Promise<GroupDTO>;
+  patchGroup(id: string, patch: { enabled?: boolean; course_name?: string | null }): Promise<GroupDTO>;
   deleteGroupData(id: string): Promise<{ ok: true }>;
   getScenarios(): Promise<ScenarioDTO[]>;
   replay(name: string): Promise<{ injected: number }>;
@@ -33,10 +39,21 @@ export interface Api {
   getConnectStatus(): Promise<ConnectStatusDTO>;
   restartConnect(): Promise<{ ok: true }>;
   logoutConnect(): Promise<{ ok: true }>;
-  syncNow(): Promise<{ groups: number; messages: number }>;
+  /** days=往前补拉多少天（1/7/30），缺省 7 */
+  syncNow(days?: 1 | 7 | 30): Promise<{ groups: number; messages: number }>;
   getHealth(): Promise<HealthDTO>;
   getLlmSettings(): Promise<LlmSettingsDTO>;
   saveLlmSettings(provider: LlmProvider, apiKey: string): Promise<LlmSettingsDTO>;
+  getTodos(): Promise<TodosDTO>;
+  createTodo(todo: { title: string; note?: string; level?: Level }): Promise<TodoDTO>;
+  patchTodo(id: number, patch: { title?: string; note?: string; level?: Level; done?: boolean }): Promise<TodoDTO>;
+  getTimetable(): Promise<TimetableDTO>;
+  saveTimetable(t: TimetableDTO): Promise<TimetableDTO>;
+  clearTimetable(): Promise<{ ok: true }>;
+  getMemory(): Promise<MemoryDTO>;
+  setMemoryEnabled(enabled: boolean): Promise<MemoryDTO>;
+  deleteMemoryRule(id: number): Promise<MemoryDTO>;
+  clearMemory(): Promise<MemoryDTO>;
 }
 
 export const isMock = import.meta.env.VITE_MOCK === '1';
@@ -77,9 +94,9 @@ const realApi: Api = {
   getToday: () => request('GET', '/api/today'),
   getEvents: (from, to) => request('GET', `/api/events${rangeQuery(from, to)}`),
   getEvent: (id) => request('GET', `/api/events/${id}`),
-  patchEvent: (id, status) => request('PATCH', `/api/events/${id}`, { status }),
+  patchEvent: (id, patch) => request('PATCH', `/api/events/${id}`, patch),
   getGroups: () => request('GET', '/api/groups'),
-  patchGroup: (id, enabled) => request('PATCH', `/api/groups/${encodeURIComponent(id)}`, { enabled }),
+  patchGroup: (id, patch) => request('PATCH', `/api/groups/${encodeURIComponent(id)}`, patch),
   deleteGroupData: (id) => request('DELETE', `/api/groups/${encodeURIComponent(id)}/data`),
   getScenarios: () => request('GET', '/api/demo/scenarios'),
   replay: (name) => request('POST', '/api/demo/replay', { scenario: name }),
@@ -89,10 +106,20 @@ const realApi: Api = {
   getConnectStatus: () => request('GET', '/api/connect/status'),
   restartConnect: () => request('POST', '/api/connect/restart'),
   logoutConnect: () => request('POST', '/api/connect/logout'),
-  syncNow: () => request('POST', '/api/sync'),
+  syncNow: (days) => request('POST', '/api/sync', days === undefined ? undefined : { days }),
   getHealth: () => request('GET', '/health'),
   getLlmSettings: () => request('GET', '/api/settings/llm'),
   saveLlmSettings: (provider, apiKey) => request('PUT', '/api/settings/llm', { provider, api_key: apiKey }),
+  getTodos: () => request('GET', '/api/todos'),
+  createTodo: (todo) => request('POST', '/api/todos', todo),
+  patchTodo: (id, patch) => request('PATCH', `/api/todos/${id}`, patch),
+  getTimetable: () => request('GET', '/api/timetable'),
+  saveTimetable: (t) => request('PUT', '/api/timetable', t),
+  clearTimetable: () => request('DELETE', '/api/timetable'),
+  getMemory: () => request('GET', '/api/settings/memory'),
+  setMemoryEnabled: (enabled) => request('PUT', '/api/settings/memory', { enabled }),
+  deleteMemoryRule: (id) => request('DELETE', `/api/settings/memory/rules/${id}`),
+  clearMemory: () => request('DELETE', '/api/settings/memory'),
 };
 
 const api: Api = isMock ? mockApi : realApi;
@@ -117,6 +144,16 @@ export const {
   getHealth,
   getLlmSettings,
   saveLlmSettings,
+  getTodos,
+  createTodo,
+  patchTodo,
+  getTimetable,
+  saveTimetable,
+  clearTimetable,
+  getMemory,
+  setMemoryEnabled,
+  deleteMemoryRule,
+  clearMemory,
 } = api;
 
 // ===== 直接给 <a href> / <img src> 用的地址（不经 fetch）

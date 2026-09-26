@@ -124,6 +124,7 @@ describe('GET /api/groups', () => {
     addGroup('g1', '高数(2)班');
     const { body } = await getJson(app, '/api/groups');
     expect(Object.keys((body as GroupDTO[])[0]!).sort()).toEqual([
+      'course_name',
       'enabled',
       'event_count',
       'group_id',

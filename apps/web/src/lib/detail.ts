@@ -1,6 +1,6 @@
 // 详情抽屉（D4）的纯函数：来源原文高亮、变更记录渲染。
-import type { EventType, HistoryDTO } from '../api/types';
-import { STATUS_TEXT, TYPE_META } from './eventMeta';
+import type { EventType, HistoryDTO, Level } from '../api/types';
+import { LEVEL_LABEL, STATUS_TEXT, TYPE_META } from './eventMeta';
 import { formatWhen, hhmm } from './time';
 
 // ===== 原文高亮：时间词、地点（简单正则，宁可少标不乱标）
@@ -53,6 +53,7 @@ export const FIELD_TEXT: Record<string, string> = {
   action_required: '要求',
   status: '状态',
   confidence: '置信度',
+  level: '危机等级',
 };
 
 const TIME_FIELDS = new Set(['start_at', 'end_at', 'deadline_at']);
@@ -63,6 +64,7 @@ export function fieldValueText(field: string, value: unknown, now = Date.now()):
   if (field === 'type') return TYPE_META[value as EventType]?.label ?? String(value);
   if (field === 'status') return STATUS_TEXT[value as keyof typeof STATUS_TEXT] ?? String(value);
   if (field === 'confidence' && typeof value === 'number') return `${Math.round(value * 100)}%`;
+  if (field === 'level') return LEVEL_LABEL[value as Level] ?? String(value);
   return typeof value === 'object' ? JSON.stringify(value) : String(value);
 }
 

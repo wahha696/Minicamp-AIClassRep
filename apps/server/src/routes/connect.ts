@@ -1,6 +1,7 @@
 // /api/connect/* 与 /api/sync。主人是 A。接口格式见 00-总约定 §7。
 import { readFile } from 'node:fs/promises';
 import type { Hono } from 'hono';
+import { z } from 'zod';
 import { syncHistory } from '../ingest/history.js';
 import { QRCODE_PATH } from '../napcat/paths.js';
 import { isOnline } from '../napcat/onebot.js';
@@ -46,13 +47,32 @@ export function registerConnectRoutes(app: Hono): void {
     }
   });
 
-  // POST /api/sync：未连接时 409；online 时跑一次历史补齐（FR-2 的手动兜底）
+  // POST /api/sync：未连接时 409；online 时往前补拉群历史（FR-16）。
+  // body 可选 {days: 1|7|30}，缺省/空 body 都按 7 天（登录后自动补齐就是走这个）。入库完即返回。
   app.post('/api/sync', async (c) => {
     if (!isOnline()) return c.json({ error: 'QQ 未连接' }, 409);
+
+    let days: 1 | 7 | 30 = 7;
+    let raw: unknown;
     try {
-      return c.json(await syncHistory());
+      raw = await c.req.json();
+    } catch {
+      raw = undefined; // 空 body 也算合法（保持旧行为）
+    }
+    if (raw !== undefined) {
+      const parsed = syncSchema.safeParse(raw);
+      if (!parsed.success) return c.json({ error: 'days 只能是 1 / 7 / 30' }, 400);
+      days = parsed.data.days;
+    }
+
+    try {
+      return c.json(await syncHistory(days));
     } catch (err) {
       return c.json({ error: `同步失败：${err instanceof Error ? err.message : String(err)}` }, 500);
     }
   });
 }
+
+const syncSchema = z.object({
+  days: z.union([z.literal(1), z.literal(7), z.literal(30)]).default(7),
+});

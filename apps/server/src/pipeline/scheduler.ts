@@ -88,6 +88,7 @@ const extractStage: Stage = async (b) => {
   const failedBefore = llmStats.failed;
   const t0 = Date.now();
   b.extracted = await extractEvents({
+    groupId: b.groupId,
     groupName: b.groupName,
     candidates: b.candidates,
     context: b.context,

@@ -123,6 +123,31 @@ describe('POST /api/sync', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ groups: 3, messages: 57 });
     expect(syncHistoryMock).toHaveBeenCalledOnce();
+    expect(syncHistoryMock).toHaveBeenCalledWith(7); // 缺省 7 天
+  });
+
+  it.each([1, 7, 30] as const)('days=%s 透传给 syncHistory', async (days) => {
+    isOnlineMock.mockReturnValue(true);
+    syncHistoryMock.mockResolvedValue({ groups: 0, messages: 0 });
+    const res = await app().request('/api/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ days }),
+    });
+    expect(res.status).toBe(200);
+    expect(syncHistoryMock).toHaveBeenCalledWith(days);
+  });
+
+  it.each([0, 3, 365, '7', null])('days=%s 非法 → 400，不调 syncHistory', async (days) => {
+    isOnlineMock.mockReturnValue(true);
+    syncHistoryMock.mockResolvedValue({ groups: 0, messages: 0 });
+    const res = await app().request('/api/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ days }),
+    });
+    expect(res.status).toBe(400);
+    expect(syncHistoryMock).not.toHaveBeenCalled();
   });
 
   it('syncHistory 抛错 → 500 + 中文 error', async () => {

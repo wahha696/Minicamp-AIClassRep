@@ -7,12 +7,13 @@ interface Props {
   children?: ReactNode;      // 说明文字
   confirmText: string;
   danger?: boolean;          // 危险操作：确认按钮红色
+  focusCancel?: boolean;     // 默认焦点放「取消」（清空课表这类不可逆操作防误触）
   busy?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
 
-export default function ConfirmDialog({ open, title, children, confirmText, danger, busy, onConfirm, onCancel }: Props) {
+export default function ConfirmDialog({ open, title, children, confirmText, danger, focusCancel, busy, onConfirm, onCancel }: Props) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && !busy && onCancel();
@@ -32,6 +33,7 @@ export default function ConfirmDialog({ open, title, children, confirmText, dang
             type="button"
             onClick={onCancel}
             disabled={busy}
+            autoFocus={focusCancel}
             className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60"
           >
             取消
@@ -40,7 +42,7 @@ export default function ConfirmDialog({ open, title, children, confirmText, dang
             type="button"
             onClick={onConfirm}
             disabled={busy}
-            autoFocus
+            autoFocus={!focusCancel}
             className={`rounded-lg px-4 py-2 text-sm font-medium text-white disabled:opacity-60 ${
               danger ? 'bg-rose-600 hover:bg-rose-700' : 'bg-slate-900 hover:bg-slate-700'
             }`}

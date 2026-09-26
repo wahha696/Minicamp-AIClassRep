@@ -4,6 +4,7 @@ import Avatar from './Avatar';
 import ConnectBanner from './ConnectBanner';
 import Pet from './Pet';
 import StatusLights from './StatusLights';
+import SyncButton from './SyncButton';
 
 interface NavItem {
   to: string;
@@ -14,9 +15,11 @@ interface NavItem {
 export const NAV: NavItem[] = [
   { to: '/', label: '今日', icon: 'M12 3v2m0 14v2m9-9h-2M5 12H3m15.4-6.4-1.4 1.4M7 17l-1.4 1.4m12.8 0L17 17M7 7 5.6 5.6M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z' },
   { to: '/week', label: '本周', icon: 'M8 3v3m8-3v3M4 9h16M5 5h14a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Z' },
+  { to: '/timetable', label: '课表', icon: 'M4 5h16M4 10h16M4 15h16M4 20h16M9 3v19M15 3v19M4 4a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1Z' },
   { to: '/groups', label: '群管理', icon: 'M17 20v-1a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v1m18 0v-1a4 4 0 0 0-3-3.9M14 4.1a4 4 0 0 1 0 7.8M14 8a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z' },
   { to: '/connect', label: '连接', icon: 'M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1' },
   { to: '/demo', label: '演示', icon: 'M6 4l14 8-14 8V4Z' },
+  { to: '/settings', label: '设置', icon: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm7.4-3a7.4 7.4 0 0 0-.1-1.2l2-1.6-2-3.4-2.4 1a7.6 7.6 0 0 0-2-1.2L14.5 3h-5l-.4 2.6a7.6 7.6 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.6a7.4 7.4 0 0 0 0 2.4l-2 1.6 2 3.4 2.4-1a7.6 7.6 0 0 0 2 1.2l.4 2.6h5l.4-2.6a7.6 7.6 0 0 0 2-1.2l2.4 1 2-3.4-2-1.6c.06-.4.1-.8.1-1.2Z' },
 ];
 
 function Icon({ d }: { d: string }) {
@@ -52,6 +55,7 @@ export default function Layout() {
             ))}
           </nav>
           <div className="ml-auto flex items-center gap-3">
+            <SyncButton />
             <StatusLights />
             {/* 手机上跟在状态灯后面；宽屏贴到整个页面的最右上角 */}
             <Avatar className="md:absolute md:right-5 md:top-[10px]" />
@@ -65,14 +69,14 @@ export default function Layout() {
         <Outlet />
       </main>
 
-      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-5 border-t border-slate-200 bg-white pb-[env(safe-area-inset-bottom)] md:hidden">
+      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-7 border-t border-slate-200 bg-white pb-[env(safe-area-inset-bottom)] md:hidden">
         {NAV.map((n) => (
           <NavLink
             key={n.to}
             to={n.to}
             end={n.to === '/'}
             className={({ isActive }) =>
-              `flex flex-col items-center gap-0.5 py-2 text-[11px] ${isActive ? 'text-slate-900' : 'text-slate-400'}`
+              `flex flex-col items-center gap-0.5 py-2 text-[10px] ${isActive ? 'text-slate-900' : 'text-slate-400'}`
             }
           >
             <Icon d={n.icon} />

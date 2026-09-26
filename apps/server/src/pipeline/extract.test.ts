@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { db, openDb } from '../db/index.js';
 import { env } from '../env.js';
+import { saveTimetable } from '../timetable.js';
 import type { Message } from '../types.js';
 import {
   type ExtractInput,
   type LlmClient,
   buildSystemPrompt,
+  buildUserPrompt,
   extractEvents,
   fmtShanghai,
   parseExtraction,
@@ -25,6 +28,7 @@ const msg = (id: string, text: string, minutesAgo = 10): Message => ({
 });
 
 const input = (candidates: Message[]): ExtractInput => ({
+  groupId: 'demo-test',
   groupName: '测试群',
   candidates,
   context: [],
@@ -114,6 +118,19 @@ describe('parseExtraction', () => {
     const r = parseExtraction(JSON.stringify({ events: [ev({ type: 'survey' })] }), ids);
     expect(r.ok && r.events[0]?.type).toBe('other');
   });
+
+  it.each([
+    [3, 3],
+    [undefined, null], // 缺省
+    [null, null],
+    [5, null],         // 越界
+    [0, null],
+    ['高', null],      // 乱写
+    [2.5, null],       // 非整数
+  ] as const)('level=%s → %s', (level, want) => {
+    const r = parseExtraction(JSON.stringify({ events: [ev({ level })] }), ids);
+    expect(r.ok && r.events[0]?.level).toBe(want);
+  });
 });
 
 describe('extractEvents', () => {
@@ -167,5 +184,73 @@ describe('extractEvents', () => {
     env.LLM_API_KEY = '';
     await expect(extractEvents(input([msg('m1', '小测')]))).resolves.toEqual([]);
     expect(llmStats.llm).toBe('unconfigured');
+  });
+});
+
+// ===== 提示词附加段：偏好（记忆）+ 课表（FR-12 / FR-13，需要库）
+
+describe('提示词附加段', () => {
+  afterEach(() => {
+    try {
+      db.exec("DELETE FROM level_rules; DELETE FROM courses; INSERT OR REPLACE INTO kv (key, value) VALUES ('memory_enabled', '1');");
+    } catch {
+      // 库没开就不管
+    }
+  });
+
+  it('记忆开 + 有规则 → system prompt 带偏好段；关掉开关就没有', async () => {
+    openDb(':memory:');
+    db.prepare("INSERT INTO level_rules (text, level, feedback_ids, created_at) VALUES ('大物实验报告一律紧急', 4, '[]', ?)").run(Date.now());
+    const { client, create } = fakeClient(JSON.stringify({ events: [ev()] }));
+    await extractEvents(input([msg('m1', '小测')]), client);
+    const sys = (create.mock.calls[0] as unknown as [{ messages: { content: string }[] }])[0]
+      .messages[0]!.content;
+    expect(sys).toContain('用户对危机等级的偏好');
+    expect(sys).toContain('大物实验报告一律紧急 → 4 紧急');
+
+    db.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES ('memory_enabled', '0')").run();
+    const { client: c2, create: create2 } = fakeClient(JSON.stringify({ events: [ev()] }));
+    await extractEvents(input([msg('m1', '小测')]), c2);
+    const sys2 = (create2.mock.calls[0] as unknown as [{ messages: { content: string }[] }])[0]
+      .messages[0]!.content;
+    expect(sys2).not.toContain('用户对危机等级的偏好');
+  });
+
+  it('有课表 → user prompt 带课表段；群绑定了课程写「用户指定」，没绑定写按群名判断', () => {
+    openDb(':memory:');
+    saveTimetable({
+      semester_start: '2026-09-07',
+      courses: [
+        {
+          name: '概率论与数理统计A',
+          teacher: '彭丽华(副教授)',
+          location: 'B座312',
+          weekday: 2,
+          block: 2,
+          weeks: [1, 2, 3, 4],
+        },
+      ],
+    });
+
+    // 消息发送时间 2026-09-26（第 3 周周六）；下周也有第 4 周课
+    const unbound = buildUserPrompt(input([msg('m1', '下节课要小测')]));
+    expect(unbound).toContain('本群课表');
+    expect(unbound).toContain('概率论与数理统计A B座312');
+    expect(unbound).toContain('根据群名「测试群」判断');
+
+    db.prepare("UPDATE groups SET course_name = '概率论与数理统计A' WHERE group_id = 'demo-test'").run();
+    // groups 表可能还没这个群（input 的 groupId 对应行不在库里）→ 先插
+    db.prepare(
+      "INSERT OR IGNORE INTO groups (group_id, name, enabled, adapter, course_name, created_at) VALUES ('demo-test', '测试群', 1, 'demo', NULL, ?)",
+    ).run(Date.now());
+    db.prepare("UPDATE groups SET course_name = '概率论与数理统计A' WHERE group_id = 'demo-test'").run();
+    const bound = buildUserPrompt(input([msg('m1', '下节课要小测')]));
+    expect(bound).toContain('本群对应课程：概率论与数理统计A（用户指定）');
+  });
+
+  it('没导入课表 → 没有课表段', () => {
+    openDb(':memory:');
+    const p = buildUserPrompt(input([msg('m1', '下节课要小测')]));
+    expect(p).not.toContain('本群课表');
   });
 });

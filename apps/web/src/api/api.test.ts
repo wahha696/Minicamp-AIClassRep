@@ -46,22 +46,40 @@ describe('mock 模式', () => {
 
   it('覆盖所有类型和状态，供页面调样式', async () => {
     const c = await loadClient(true);
-    const all = await c.getEvents(0, Date.now() + 30 * 86_400_000);
-    const types = new Set([...all, ...(await c.getEvents())].map((e) => e.type));
+    // 列表接口不返回 cancelled / 待办类事件（与后端一致），所以要从三个口凑齐：
+    // getEvents（正常事件）+ getTodos（待办类）+ getEvent（取消的那条按 id 取详情）
+    const [listed, todos, cancelled] = await Promise.all([
+      c.getEvents(0, Date.now() + 30 * 86_400_000),
+      c.getTodos(),
+      c.getEvent(8),
+    ]);
+    const all = [...listed, ...todos.events, cancelled];
+    const types = new Set(all.map((e) => e.type));
     const statuses = new Set(all.map((e) => e.status));
     expect([...types].sort()).toEqual(['activity', 'announcement', 'assignment', 'exam', 'meeting', 'other']);
     expect([...statuses].sort()).toEqual(['active', 'cancelled', 'done', 'pending_confirm']);
   });
 
-  it('getEvents 省略参数时不返回 cancelled', async () => {
+  it('getEvents 省略参数时不返回 cancelled，也不返回待办类事件', async () => {
     const c = await loadClient(true);
-    expect((await c.getEvents()).some((e) => e.status === 'cancelled')).toBe(false);
+    const all = await c.getEvents();
+    expect(all.some((e) => e.status === 'cancelled')).toBe(false);
+    // 无时间事件（待办）不出现在列表接口
+    expect(all.every((e) => e.start_at !== null || e.deadline_at !== null)).toBe(true);
   });
 
   it('PATCH 事件后状态持久', async () => {
     const c = await loadClient(true);
-    expect((await c.patchEvent(3, 'active')).status).toBe('active');
+    expect((await c.patchEvent(3, { status: 'active' })).status).toBe('active');
     expect((await c.getEvent(3)).status).toBe('active');
+  });
+
+  it('PATCH level 设级后锁定，null 交还 AI', async () => {
+    const c = await loadClient(true);
+    const locked = await c.patchEvent(1, { level: 1 });
+    expect(locked).toMatchObject({ level: 1, level_locked: true });
+    const unlocked = await c.patchEvent(1, { level: null });
+    expect(unlocked.level_locked).toBe(false);
   });
 
   it('不存在的事件抛 ApiError 404', async () => {
@@ -71,10 +89,47 @@ describe('mock 模式', () => {
 
   it('群开关、删除群数据', async () => {
     const c = await loadClient(true);
-    expect((await c.patchGroup('demo-math', false)).enabled).toBe(false);
+    expect((await c.patchGroup('demo-math', { enabled: false })).enabled).toBe(false);
     await c.deleteGroupData('demo-math');
     const g = (await c.getGroups()).find((x) => x.group_id === 'demo-math')!;
     expect(g).toMatchObject({ message_count: 0, event_count: 0 });
+  });
+
+  it('群绑定课程名', async () => {
+    const c = await loadClient(true);
+    expect((await c.patchGroup('demo-linear', { course_name: '线性代数' })).course_name).toBe('线性代数');
+    expect((await c.patchGroup('demo-linear', { course_name: null })).course_name).toBeNull();
+  });
+
+  it('待办：列表、新建、勾选完成', async () => {
+    const c = await loadClient(true);
+    const t0 = await c.getTodos();
+    expect(t0.events.length).toBeGreaterThan(0); // 群里的待办类事件
+    expect(t0.manual).toHaveLength(1);
+    const created = await c.createTodo({ title: '领快递' });
+    expect((await c.getTodos()).manual.map((t) => t.id)).toContain(created.id);
+    await c.patchTodo(created.id, { done: true });
+    expect((await c.getTodos()).manual.map((t) => t.id)).not.toContain(created.id);
+  });
+
+  it('课表：读取、保存、清空', async () => {
+    const c = await loadClient(true);
+    const t = await c.getTimetable();
+    expect(t.semester_start).toBe('2026-09-07');
+    expect(t.courses.length).toBe(13);
+    const saved = await c.saveTimetable({ semester_start: '2026-09-07', courses: t.courses.slice(0, 1) });
+    expect(saved.courses).toHaveLength(1);
+    await c.clearTimetable();
+    expect((await c.getTimetable()).courses).toHaveLength(0);
+  });
+
+  it('记忆：开关、删单条、清空', async () => {
+    const c = await loadClient(true);
+    const m = await c.getMemory();
+    expect(m.rules.length).toBe(2);
+    expect((await c.setMemoryEnabled(false)).enabled).toBe(false);
+    expect((await c.deleteMemoryRule(1)).rules.map((r) => r.id)).toEqual([2]);
+    expect((await c.clearMemory()).rules).toEqual([]);
   });
 
   it('演示：剧本、回放、粘贴、清空', async () => {
@@ -112,9 +167,9 @@ describe('mock 模式', () => {
   it('health 字段齐全，jev 为 disabled', async () => {
     const c = await loadClient(true);
     const h = await c.getHealth();
-    expect(h).toMatchObject({ db: 'ok', jev: 'disabled' });
+    expect(h).toMatchObject({ db: 'ok', jev: 'disabled', pending: 0 });
     expect(Object.keys(h).sort()).toEqual(
-      ['db', 'filtered_count', 'jev', 'jev_called_count', 'jev_filtered_count', 'llm', 'llm_called_count', 'qq', 'status', 'uptime'],
+      ['db', 'filtered_count', 'jev', 'jev_called_count', 'jev_filtered_count', 'llm', 'llm_called_count', 'pending', 'qq', 'status', 'uptime'],
     );
   });
 });
@@ -140,9 +195,12 @@ describe('真实模式（fetch 打桩）', () => {
     await c.getEvents();
     await c.getEvents(1, 2);
     await c.getEvent(5);
-    await c.patchEvent(5, 'done');
+    await c.patchEvent(5, { status: 'done' });
+    await c.patchEvent(5, { level: 3 });
+    await c.patchEvent(5, { level: null });
     await c.getGroups();
-    await c.patchGroup('123', true);
+    await c.patchGroup('123', { enabled: true });
+    await c.patchGroup('123', { course_name: '线性代数' });
     await c.deleteGroupData('123');
     await c.getScenarios();
     await c.replay('reschedule');
@@ -153,17 +211,31 @@ describe('真实模式（fetch 打桩）', () => {
     await c.restartConnect();
     await c.logoutConnect();
     await c.syncNow();
+    await c.syncNow(30);
     await c.getHealth();
     await c.getLlmSettings();
     await c.saveLlmSettings('deepseek', 'sk-12345678abcd');
+    await c.getTodos();
+    await c.createTodo({ title: '领快递', note: '东门', level: 3 });
+    await c.patchTodo(1, { done: true });
+    await c.getTimetable();
+    await c.saveTimetable({ semester_start: '2026-09-07', courses: [] });
+    await c.clearTimetable();
+    await c.getMemory();
+    await c.setMemoryEnabled(true);
+    await c.deleteMemoryRule(2);
+    await c.clearMemory();
     expect(calls).toEqual([
       { method: 'GET', url: '/api/today' },
       { method: 'GET', url: '/api/events' },
       { method: 'GET', url: '/api/events?from=1&to=2' },
       { method: 'GET', url: '/api/events/5' },
       { method: 'PATCH', url: '/api/events/5', body: { status: 'done' } },
+      { method: 'PATCH', url: '/api/events/5', body: { level: 3 } },
+      { method: 'PATCH', url: '/api/events/5', body: { level: null } },
       { method: 'GET', url: '/api/groups' },
       { method: 'PATCH', url: '/api/groups/123', body: { enabled: true } },
+      { method: 'PATCH', url: '/api/groups/123', body: { course_name: '线性代数' } },
       { method: 'DELETE', url: '/api/groups/123/data' },
       { method: 'GET', url: '/api/demo/scenarios' },
       { method: 'POST', url: '/api/demo/replay', body: { scenario: 'reschedule' } },
@@ -174,9 +246,20 @@ describe('真实模式（fetch 打桩）', () => {
       { method: 'POST', url: '/api/connect/restart' },
       { method: 'POST', url: '/api/connect/logout' },
       { method: 'POST', url: '/api/sync' },
+      { method: 'POST', url: '/api/sync', body: { days: 30 } },
       { method: 'GET', url: '/health' },
       { method: 'GET', url: '/api/settings/llm' },
       { method: 'PUT', url: '/api/settings/llm', body: { provider: 'deepseek', api_key: 'sk-12345678abcd' } },
+      { method: 'GET', url: '/api/todos' },
+      { method: 'POST', url: '/api/todos', body: { title: '领快递', note: '东门', level: 3 } },
+      { method: 'PATCH', url: '/api/todos/1', body: { done: true } },
+      { method: 'GET', url: '/api/timetable' },
+      { method: 'PUT', url: '/api/timetable', body: { semester_start: '2026-09-07', courses: [] } },
+      { method: 'DELETE', url: '/api/timetable' },
+      { method: 'GET', url: '/api/settings/memory' },
+      { method: 'PUT', url: '/api/settings/memory', body: { enabled: true } },
+      { method: 'DELETE', url: '/api/settings/memory/rules/2' },
+      { method: 'DELETE', url: '/api/settings/memory' },
     ]);
     expect(c.exportIcsUrl(1, 2)).toBe('/api/export.ics?from=1&to=2');
     expect(c.eventIcsUrl(5)).toBe('/api/events/5/export.ics');
@@ -187,7 +270,7 @@ describe('真实模式（fetch 打桩）', () => {
     reply = { status: 409, body: { error: 'QQ 未连接' } };
     await expect(c.syncNow()).rejects.toMatchObject({ message: 'QQ 未连接', status: 409 });
     reply = { status: 403, body: { error: '局域网只读' } };
-    await expect(c.patchEvent(1, 'done')).rejects.toMatchObject({ message: '局域网只读', status: 403 });
+    await expect(c.patchEvent(1, { status: 'done' })).rejects.toMatchObject({ message: '局域网只读', status: 403 });
     reply = { status: 404, body: { error: '接口不存在' } };
     await expect(c.getToday()).rejects.toMatchObject({ message: '接口不存在', status: 404 });
   });

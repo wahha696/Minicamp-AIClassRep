@@ -10,10 +10,10 @@ const HOUR_MS = 60 * 60 * 1000;
 const TTL_DAYS = env.RAW_MSG_TTL_DAYS;
 const NOW = Date.parse('2026-09-23T12:00:00+08:00');
 
-function addMessage(message_id: string, sent_at: number, group_id = 'g1'): void {
+function addMessage(message_id: string, sent_at: number, group_id = 'g1', processed = 1): void {
   db.prepare(
-    'INSERT INTO messages (message_id, group_id, sender_name, text, sent_at, source, processed, filtered_out, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)',
-  ).run(message_id, group_id, '张老师', `消息 ${message_id}`, sent_at, 'onebot', sent_at);
+    'INSERT INTO messages (message_id, group_id, sender_name, text, sent_at, source, processed, filtered_out, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)',
+  ).run(message_id, group_id, '张老师', `消息 ${message_id}`, sent_at, 'onebot', processed, sent_at);
 }
 
 function addEventWithSource(eventId: number, message_id: string): void {
@@ -109,6 +109,48 @@ describe('cleanupOnce', () => {
     expect(row.text).toBe('明天下午两点小测');
     // 事件本身也还在
     expect(count('events')).toBe(2);
+  });
+
+  it('删掉的消息先记进 message_seen（30 天刷新再拉到时不重复整理）', () => {
+    addMessage('old-1', NOW - (TTL_DAYS + 1) * DAY_MS);
+
+    cleanupOnce(NOW);
+
+    expect(count('messages')).toBe(0);
+    const seen = db
+      .prepare('SELECT message_id, sent_at FROM message_seen')
+      .all() as unknown as { message_id: string; sent_at: number }[];
+    expect(seen).toEqual([{ message_id: 'old-1', sent_at: NOW - (TTL_DAYS + 1) * DAY_MS }]);
+  });
+
+  it('过 TTL 但没处理的消息保留；超过 45 天还没处理的强删', () => {
+    addMessage('unprocessed', NOW - (TTL_DAYS + 1) * DAY_MS, 'g1', 0);
+    addMessage('ancient', NOW - 46 * DAY_MS, 'g1', 0);
+
+    const removed = cleanupOnce(NOW);
+
+    expect(removed).toBe(1);
+    expect(ids()).toEqual(['unprocessed']);
+    // 46 天 > message_seen 的 40 天保留期，同行里被顺手清掉——反正它也不可能在 ≤30 天的刷新里再出现
+    expect(count('message_seen', "message_id = 'ancient'")).toBe(0);
+  });
+
+  it('message_seen 里超过 40 天的行被清掉', () => {
+    db.prepare('INSERT INTO message_seen (message_id, sent_at) VALUES (?, ?)').run(
+      'stale-seen',
+      NOW - 41 * DAY_MS,
+    );
+    db.prepare('INSERT INTO message_seen (message_id, sent_at) VALUES (?, ?)').run(
+      'fresh-seen',
+      NOW - 1 * DAY_MS,
+    );
+
+    cleanupOnce(NOW);
+
+    const seen = db
+      .prepare('SELECT message_id FROM message_seen ORDER BY message_id')
+      .all() as unknown as { message_id: string }[];
+    expect(seen).toEqual([{ message_id: 'fresh-seen' }]);
   });
 
   it('空库上跑不报错', () => {

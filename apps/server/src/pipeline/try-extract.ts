@@ -43,6 +43,7 @@ for (let i = 0; i < msgs.length; i += BATCH) {
   if (candidates.length === 0) continue;
 
   const out = await extractEvents({
+    groupId: sc.group.id,
     groupName: sc.group.name,
     candidates,
     context: msgs.slice(Math.max(0, i - CONTEXT), i),
@@ -77,6 +78,7 @@ for (let i = 0; i < msgs.length; i += BATCH) {
         deadline_at: ev.deadline_at,
         location: ev.location,
         action_required: ev.action_required,
+        level: ev.level ?? 2,
         status: 'active',
         version: 1,
       });

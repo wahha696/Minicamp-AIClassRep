@@ -221,18 +221,18 @@ describe('GET /api/today', () => {
 // ===== /api/events
 
 describe('GET /api/events', () => {
-  it('不给 from/to 时返回全部非 cancelled（含无时间的）', async () => {
+  it('不给 from/to 时返回全部非 cancelled，待办类事件（无时间的）进 /api/todos 不进这里', async () => {
     const app = freshApp();
     const today = shanghaiToday();
     addGroup('g1', '高数(2)班');
     addEvent({ title: '有时间的', start_at: shTime(today, '14:00') });
-    addEvent({ title: '没时间的' });
+    addEvent({ title: '没时间的' }); // 待办
     addEvent({ title: '取消的', start_at: shTime(today, '15:00'), status: 'cancelled' });
 
     const { status, body } = await getJson(app, '/api/events');
     expect(status).toBe(200);
     const events = body as EventDTO[];
-    expect(events.map((e) => e.title)).toEqual(['有时间的', '没时间的']);
+    expect(events.map((e) => e.title)).toEqual(['有时间的']);
     expect(events[0]).toHaveProperty('group_name', '高数(2)班');
   });
 
@@ -296,16 +296,16 @@ describe('GET /api/events', () => {
     expect((await getJson(app, '/api/events?from=2000&to=1000')).status).toBe(400);
   });
 
-  it('排序：按排序时间升序，无时间的排最后', async () => {
+  it('排序：按排序时间升序；无时间的待办事件不进列表', async () => {
     const app = freshApp();
     const today = shanghaiToday();
     addGroup('g1', '高数(2)班');
     addEvent({ title: '晚的', start_at: shTime(today, '20:00') });
-    addEvent({ title: '没时间的' });
+    addEvent({ title: '没时间的' }); // 待办 → 去 /api/todos
     addEvent({ title: '早的', start_at: shTime(today, '08:00') });
 
     const { body } = await getJson(app, '/api/events');
-    expect((body as EventDTO[]).map((e) => e.title)).toEqual(['早的', '晚的', '没时间的']);
+    expect((body as EventDTO[]).map((e) => e.title)).toEqual(['早的', '晚的']);
   });
 });
 
@@ -449,6 +449,85 @@ describe('PATCH /api/events/:id', () => {
     expect(await patchJson(app, '/api/events/9999', { status: 'done' })).toMatchObject({
       status: 404,
     });
+  });
+
+  it('手动设级：level+locked+version+history，记一条 level_feedback（ai_level=调整前的值）', async () => {
+    const app = freshApp();
+    addGroup('g1', '高数(2)班');
+    const id = addEvent({ title: '大物实验报告' }); // 默认 level=2, unlocked
+
+    const { status, body } = await patchJson(app, `/api/events/${id}`, { level: 4 });
+    expect(status).toBe(200);
+    const event = body as EventDetailDTO;
+    expect(event.level).toBe(4);
+    expect(event.level_locked).toBe(true);
+    expect(event.version).toBe(2);
+    const levelChange = event.history.at(-1)?.changed_fields['level'] as { from: number; to: number };
+    expect(levelChange).toEqual({ from: 2, to: 4 });
+
+    const fb = db
+      .prepare('SELECT ai_level, user_level, title, group_name, type FROM level_feedback WHERE event_id = ?')
+      .get(id) as Record<string, unknown>;
+    expect(fb).toMatchObject({ ai_level: 2, user_level: 4, title: '大物实验报告', group_name: '高数(2)班', type: 'exam' });
+  });
+
+  it('设成原等级：只锁不升版本、不写 level history，但照样记 feedback', async () => {
+    const app = freshApp();
+    addGroup('g1', '高数(2)班');
+    const id = addEvent({ title: '保持原级' });
+    const { body } = await patchJson(app, `/api/events/${id}`, { level: 2 });
+    const event = body as EventDetailDTO;
+    expect(event.level).toBe(2);
+    expect(event.level_locked).toBe(true);
+    expect(event.version).toBe(1);
+    expect((db.prepare('SELECT COUNT(*) n FROM level_feedback WHERE event_id = ?').get(id) as { n: number }).n).toBe(1);
+  });
+
+  it('已锁定再调级：feedback 的 ai_level 沿用上一条的（不是上一次用户值）', async () => {
+    const app = freshApp();
+    addGroup('g1', '高数(2)班');
+    const id = addEvent({ title: '大物实验报告' }); // AI 原级 2
+    await patchJson(app, `/api/events/${id}`, { level: 4 });
+    await patchJson(app, `/api/events/${id}`, { level: 3 });
+    const fb = db
+      .prepare('SELECT ai_level, user_level FROM level_feedback WHERE event_id = ? ORDER BY id')
+      .all(id) as { ai_level: number; user_level: number }[];
+    expect(fb.map((f) => [f.ai_level, f.user_level])).toEqual([[2, 4], [2, 3]]);
+  });
+
+  it('level:null 解锁交还 AI：locked=0、level 不变、不再写 feedback', async () => {
+    const app = freshApp();
+    addGroup('g1', '高数(2)班');
+    const id = addEvent({ title: '高数小测' });
+    await patchJson(app, `/api/events/${id}`, { level: 4 });
+    const { status, body } = await patchJson(app, `/api/events/${id}`, { level: null });
+    expect(status).toBe(200);
+    const event = body as EventDTO;
+    expect(event.level).toBe(4); // 交还后保留当前值，等 AI 下次覆盖
+    expect(event.level_locked).toBe(false);
+    expect((db.prepare('SELECT COUNT(*) n FROM level_feedback WHERE event_id = ?').get(id) as { n: number }).n).toBe(1);
+  });
+
+  it('level 越界 / 非整数 / 非数字 → 400', async () => {
+    const app = freshApp();
+    const id = addEvent({ title: '高数小测' });
+    for (const payload of [{ level: 0 }, { level: 5 }, { level: 2.5 }, { level: '高' }]) {
+      expect((await patchJson(app, `/api/events/${id}`, payload)).status).toBe(400);
+    }
+    const row = db.prepare('SELECT level, level_locked FROM events WHERE id = ?').get(id) as {
+      level: number;
+      level_locked: number;
+    };
+    expect(row).toEqual({ level: 2, level_locked: 0 });
+  });
+
+  it('status + level 一起 PATCH 都生效', async () => {
+    const app = freshApp();
+    addGroup('g1', '高数(2)班');
+    const id = addEvent({ title: '高数小测' });
+    const { status, body } = await patchJson(app, `/api/events/${id}`, { status: 'done', level: 1 });
+    expect(status).toBe(200);
+    expect(body as EventDTO).toMatchObject({ status: 'done', level: 1, level_locked: true });
   });
 });
 

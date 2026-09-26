@@ -1,11 +1,12 @@
-// 事件详情抽屉（D4，FR-8）：电脑右侧滑出，手机底部全屏。
-// 内容：基本信息、置信度、「查看来源」（原文高亮）、「变更记录」、完成/取消/恢复、导出这一条。
+// 事件详情抽屉（D4，FR-8 + FR-12）：电脑右侧滑出，手机底部全屏。
+// 内容：基本信息、危机等级（4 格分段选择器，手动设级锁定 / 可交还 AI）、置信度、
+// 「查看来源」（原文高亮）、「变更记录」、完成/取消/恢复、导出这一条。
 import { useEffect, useState, type ReactNode } from 'react';
 import { eventIcsUrl, getEvent, patchEvent } from '../api/client';
-import type { EventDetailDTO, EventStatus } from '../api/types';
+import type { EventDetailDTO, EventStatus, Level } from '../api/types';
 import { highlightSegments, historyLines } from '../lib/detail';
 import { toastError } from '../lib/errors';
-import { STATUS_TEXT, typeMeta } from '../lib/eventMeta';
+import { LEVEL_LABEL, levelStyle, STATUS_TEXT, typeMeta } from '../lib/eventMeta';
 import { formatWhen } from '../lib/time';
 import { useToast } from './Toast';
 
@@ -55,9 +56,25 @@ function Drawer({ id, onClose, onChanged }: { id: number } & Omit<Props, 'id'>) 
     if (!detail) return;
     setBusy(true);
     try {
-      const e = await patchEvent(detail.id, status);
+      const e = await patchEvent(detail.id, { status });
       setDetail({ ...detail, ...e });
       toast(doneText);
+      onChanged?.();
+    } catch (e) {
+      toastError(toast, e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** 手动调级（level 1~4 → 锁定；null → 交还 AI） */
+  async function setLevel(level: Level | null) {
+    if (!detail) return;
+    setBusy(true);
+    try {
+      const e = await patchEvent(detail.id, { level });
+      setDetail({ ...detail, ...e });
+      toast(level === null ? '已交还 AI 评估' : `等级已设为「${LEVEL_LABEL[level]}」，AI 更新不会覆盖`);
       onChanged?.();
     } catch (e) {
       toastError(toast, e);
@@ -90,7 +107,15 @@ function Drawer({ id, onClose, onChanged }: { id: number } & Omit<Props, 'id'>) 
               <div className="h-24 animate-pulse rounded bg-slate-100" />
             </div>
           )}
-          {detail && <Body detail={detail} showSources={showSources} onToggleSources={() => setShowSources((v) => !v)} />}
+          {detail && (
+            <Body
+              detail={detail}
+              showSources={showSources}
+              onToggleSources={() => setShowSources((v) => !v)}
+              busy={busy}
+              onSetLevel={(l) => void setLevel(l)}
+            />
+          )}
         </div>
 
         {detail && (
@@ -109,13 +134,17 @@ function Drawer({ id, onClose, onChanged }: { id: number } & Omit<Props, 'id'>) 
                 </Btn>
               </>
             )}
-            <a
-              href={eventIcsUrl(detail.id)}
-              download
-              className="ml-auto rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
-            >
-              导出这一条
-            </a>
+            {detail.start_at !== null || detail.deadline_at !== null ? (
+              <a
+                href={eventIcsUrl(detail.id)}
+                download
+                className="ml-auto rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+              >
+                导出这一条
+              </a>
+            ) : (
+              <span />
+            )}
           </footer>
         )}
       </aside>
@@ -157,10 +186,14 @@ function Body({
   detail,
   showSources,
   onToggleSources,
+  busy,
+  onSetLevel,
 }: {
   detail: EventDetailDTO;
   showSources: boolean;
   onToggleSources: () => void;
+  busy: boolean;
+  onSetLevel: (level: Level | null) => void;
 }) {
   const meta = typeMeta(detail.type);
   const pct = Math.round(Math.min(1, Math.max(0, detail.confidence)) * 100);
@@ -191,6 +224,45 @@ function Body({
         {detail.start_at === null && detail.deadline_at === null && <Row label="时间">待定</Row>}
         {detail.location && <Row label="地点">{detail.location}</Row>}
         {detail.action_required && <Row label="要求">{detail.action_required}</Row>}
+        <Row label="危机等级">
+          <div>
+            <div className="flex gap-1" role="group" aria-label="危机等级">
+              {([1, 2, 3, 4] as Level[]).map((l) => {
+                const lv = levelStyle(detail.type, l);
+                const active = detail.level === l;
+                return (
+                  <button
+                    key={l}
+                    type="button"
+                    disabled={busy}
+                    aria-pressed={active}
+                    onClick={() => onSetLevel(l)}
+                    className={`rounded-md px-2.5 py-1 text-xs font-medium transition disabled:opacity-60 ${
+                      active
+                        ? `${lv.bg} ${lv.text} ring-1 ring-current`
+                        : 'bg-slate-50 text-slate-500 hover:bg-slate-100'
+                    }`}
+                  >
+                    {LEVEL_LABEL[l]}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="mt-1 flex items-center gap-2 text-xs text-slate-400">
+              <span>{detail.level_locked ? '你设定的（AI 更新不会覆盖）' : 'AI 评估'}</span>
+              {detail.level_locked && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => onSetLevel(null)}
+                  className="text-sky-600 underline underline-offset-2 hover:text-sky-700 disabled:opacity-60"
+                >
+                  交还 AI
+                </button>
+              )}
+            </div>
+          </div>
+        </Row>
         <Row label="来源群">{detail.group_name}</Row>
         <Row label="置信度">
           <div className="flex items-center gap-2">

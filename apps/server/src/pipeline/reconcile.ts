@@ -17,6 +17,8 @@ interface EventRow {
   action_required: string | null;
   status: EventStatus;
   confidence: number;
+  level: number;
+  level_locked: number;
   version: number;
 }
 
@@ -67,8 +69,8 @@ const q = {
   insert: () =>
     db.prepare(
       `INSERT INTO events (group_id, type, title, description, start_at, end_at, deadline_at,
-         location, action_required, status, confidence, version, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+         location, action_required, status, confidence, level, version, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
     ),
   source: () =>
     db.prepare(
@@ -145,6 +147,10 @@ function applyOne(groupId: string, ev: ExtractedEvent, byId: Map<string, Message
       if (to == null || to === '' || to === target[f]) continue;
       changes[f] = { from: target[f], to };
     }
+    // 用户手动锁过的等级，AI 更新不覆盖（FR-12：手动调级锁定）
+    if (ev.level !== null && target.level_locked === 0 && ev.level !== target.level) {
+      changes.level = { from: target.level, to: ev.level };
+    }
     if (Object.keys(changes).length) writeChange(target, changes, sourceId, now);
     addSources(target.id, ev.source_message_ids, byId);
     return;
@@ -167,6 +173,7 @@ function applyOne(groupId: string, ev: ExtractedEvent, byId: Map<string, Message
     ev.action_required,
     status,
     ev.confidence,
+    ev.level ?? 2,
     now,
     now,
   );
@@ -179,7 +186,7 @@ function applyOne(groupId: string, ev: ExtractedEvent, byId: Map<string, Message
 export function listActiveEvents(groupId: string, now = Date.now()): ActiveEventBrief[] {
   return db
     .prepare(
-      `SELECT id, type, title, start_at, end_at, deadline_at, location, action_required FROM events
+      `SELECT id, type, title, start_at, end_at, deadline_at, location, action_required, level FROM events
        WHERE group_id = ? AND ${LIVE_SQL}
          AND COALESCE(end_at, start_at, deadline_at, updated_at) >= ?
        ORDER BY id`,

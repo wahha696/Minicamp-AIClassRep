@@ -31,6 +31,7 @@ const ev = (m: Message, over: Partial<ExtractedEvent> = {}): ExtractedEvent => (
   location: 'A301',
   action_required: '带计算器',
   confidence: 0.9,
+  level: 2,
   source_message_ids: [m.message_id],
   ...over,
 });
@@ -227,9 +228,46 @@ describe('listActiveEvents', () => {
     expect(list.map((e) => e.id)).toEqual([keep]);
     expect(list[0]).toEqual({
       id: keep, type: 'exam', title: '下周考试', start_at: T0, end_at: null, deadline_at: null, location: 'A301',
-      action_required: '带计算器',
+      action_required: '带计算器', level: 2,
     });
     expect(old).toBeGreaterThan(0);
+  });
+});
+
+describe('level（FR-12 危机等级）', () => {
+  it('create 写 level；缺省（null）用 2', () => {
+    const a = create({ level: 4 });
+    const b = create({ level: null, title: '普通通知', type: 'announcement' });
+    const rows = events();
+    expect(rows.find((r) => r.id === a)!.level).toBe(4);
+    expect(rows.find((r) => r.id === b)!.level).toBe(2);
+  });
+
+  it('update 改 level：没锁且变了 → level 更新 + history 记 level 字段', () => {
+    const id = create({ level: 2 });
+    const m = msg('这个其实很紧急');
+    applyEvents(G, [ev(m, { action: 'update', update_of: id, title: '', level: 4 })], [m]);
+    expect(events()[0]).toMatchObject({ level: 4, version: 2 });
+    expect(JSON.parse(history(id)[0]!.changed_fields as string)).toMatchObject({
+      level: { from: 2, to: 4 },
+    });
+  });
+
+  it('level_locked=1 时 update 不改 level', () => {
+    const id = create({ level: 2 });
+    db.prepare('UPDATE events SET level_locked = 1 WHERE id = ?').run(id); // 模拟用户锁过
+    const m = msg('AI 想降级');
+    applyEvents(G, [ev(m, { action: 'update', update_of: id, title: '', level: 1 })], [m]);
+    expect(events()[0]).toMatchObject({ level: 2, version: 1 });
+    expect(history(id)).toHaveLength(0);
+  });
+
+  it('level 没变 / level=null → 不动', () => {
+    const id = create({ level: 3 });
+    const m = msg('补充说明');
+    applyEvents(G, [ev(m, { action: 'update', update_of: id, title: '', level: null })], [m]);
+    applyEvents(G, [ev(msg('还是 3 级'), { action: 'update', update_of: id, title: '', level: 3 })], [m]);
+    expect(events()[0]).toMatchObject({ level: 3, version: 1 });
   });
 });
 

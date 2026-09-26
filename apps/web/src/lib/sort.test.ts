@@ -22,6 +22,8 @@ function ev(p: Partial<EventDTO>): EventDTO {
     action_required: null,
     status: 'active',
     confidence: 0.9,
+    level: 2,
+    level_locked: false,
     version: 1,
     created_at: 0,
     updated_at: 0,
@@ -59,7 +61,7 @@ describe('按紧急', () => {
     expect(urgencyTier(ev({ start_at: sh('2026-09-30T11:00:00'), status: 'done' }), NOW)).toBe(4);
   });
 
-  it('两小时内的活动排在晚上的考试前面；同一档里考试、作业优先', () => {
+  it('两小时内的排最前；同档按时间升序（不再有类型优先）', () => {
     const es = [
       ev({ title: '晚上聚餐', type: 'activity', start_at: sh('2026-09-30T18:00:00') }),
       ev({ title: '下午班会', type: 'meeting', start_at: sh('2026-09-30T15:00:00') }),
@@ -69,10 +71,26 @@ describe('按紧急', () => {
     ];
     expect(titles(sortEvents(es, 'urgency', NOW))).toEqual([
       '马上排练',
-      '晚上考试',
-      '作业截止',
       '下午班会',
       '晚上聚餐',
+      '晚上考试',
+      '作业截止',
+    ]);
+  });
+
+  it('等级为主：高等级排在更急的同级前面，压在低等级两小时内的前面', () => {
+    const es = [
+      ev({ title: '两小时后的事', level: 2, start_at: sh('2026-09-30T11:30:00') }),
+      ev({ title: '晚上小测', level: 4, start_at: sh('2026-09-30T19:00:00') }),
+      ev({ title: '下午的事', level: 3, start_at: sh('2026-09-30T15:00:00') }),
+      ev({ title: '晚上的事', level: 3, start_at: sh('2026-09-30T20:00:00') }),
+    ];
+    // level 4 最前；两个 level 3 按 urgencyTier+时间：15:00 < 20:00；level 2 沉底（哪怕两小时内）
+    expect(titles(sortEvents(es, 'urgency', NOW))).toEqual([
+      '晚上小测',
+      '下午的事',
+      '晚上的事',
+      '两小时后的事',
     ]);
   });
 

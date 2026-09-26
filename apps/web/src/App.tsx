@@ -6,6 +6,8 @@ import { ToastProvider } from './components/Toast';
 import Connect from './pages/Connect';
 import Groups from './pages/Groups';
 import Demo from './pages/Demo';
+import Settings from './pages/Settings';
+import Timetable from './pages/Timetable';
 import Today from './pages/Today';
 import Week from './pages/Week';
 
@@ -18,9 +20,11 @@ export default function App() {
             <Route element={<Layout />}>
               <Route index element={<Today />} />
               <Route path="week" element={<Week />} />
+              <Route path="timetable" element={<Timetable />} />
               <Route path="groups" element={<Groups />} />
               <Route path="connect" element={<Connect />} />
               <Route path="demo" element={<Demo />} />
+              <Route path="settings" element={<Settings />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>
           </Route>

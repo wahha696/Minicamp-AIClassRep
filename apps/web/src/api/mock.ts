@@ -5,18 +5,25 @@
 //   localStorage.mockFirstRun = '1'                // 模拟首次使用（守卫拦到 /connect）
 import type { Api } from './client';
 import { ApiError } from './error';
+import { isTodo } from '../lib/todo';
 import type {
   ConnectState,
   ConnectStatusDTO,
+  CourseDTO,
   EventDetailDTO,
   EventDTO,
   GroupDTO,
   HealthDTO,
+  Level,
   LlmSettingsDTO,
   HistoryDTO,
+  MemoryDTO,
   ScenarioDTO,
   SourceMessageDTO,
+  TimetableDTO,
   TodayDTO,
+  TodoDTO,
+  TodosDTO,
 } from './types';
 
 const MIN = 60_000;
@@ -43,10 +50,10 @@ function hhmm(ts: number): string {
 // ===== 初始数据
 
 const groups: (Omit<GroupDTO, 'event_count'>)[] = [
-  { group_id: 'demo-math', name: '高数(2)班', enabled: true, message_count: 126 },
-  { group_id: 'demo-linear', name: '线性代数课程群', enabled: true, message_count: 58 },
-  { group_id: 'demo-class', name: '计科2301班级群', enabled: true, message_count: 342 },
-  { group_id: 'demo-club', name: '摄影社', enabled: false, message_count: 17 },
+  { group_id: 'demo-math', name: '高数(2)班', enabled: true, message_count: 126, course_name: '概率论与数理统计A' },
+  { group_id: 'demo-linear', name: '线性代数课程群', enabled: true, message_count: 58, course_name: null },
+  { group_id: 'demo-class', name: '计科2301班级群', enabled: true, message_count: 342, course_name: null },
+  { group_id: 'demo-club', name: '摄影社', enabled: false, message_count: 17, course_name: null },
 ];
 
 type MockEvent = Omit<EventDTO, 'group_name'> & {
@@ -67,6 +74,8 @@ function makeEvent(
     action_required: null,
     status: 'active',
     confidence: 0.9,
+    level: 2,
+    level_locked: false,
     version: 1,
     created_at: created,
     updated_at: created,
@@ -89,6 +98,7 @@ let events: MockEvent[] = [
     location: 'A203',
     action_required: '带计算器',
     confidence: 0.93,
+    level: 4,
     version: 2,
     created_at: bootAt - 3 * HOUR,
     updated_at: bootAt - 5 * MIN,
@@ -128,6 +138,7 @@ let events: MockEvent[] = [
     deadline_at: at(0, 23, 59),
     action_required: '上传学习通',
     confidence: 0.88,
+    level: 4,
     sources: [
       {
         message_id: 'demo-linear-3',
@@ -145,6 +156,7 @@ let events: MockEvent[] = [
     deadline_at: at(0, 12),
     status: 'done',
     confidence: 0.81,
+    level: 3,
   }),
   makeEvent({
     id: 4,
@@ -155,6 +167,8 @@ let events: MockEvent[] = [
     end_at: at(1, 20),
     location: '教学楼 B105',
     confidence: 0.9,
+    level: 3,
+    level_locked: true, // 演示「手动锁定」的图钉
     sources: [
       {
         message_id: 'demo-class-8',
@@ -173,6 +187,7 @@ let events: MockEvent[] = [
     location: '学生活动中心 201',
     status: 'pending_confirm',
     confidence: 0.55,
+    level: 1,
   }),
   makeEvent({
     id: 6,
@@ -184,6 +199,7 @@ let events: MockEvent[] = [
     location: '主楼 305',
     action_required: '带学生证、2B 铅笔',
     confidence: 0.96,
+    level: 3,
   }),
   makeEvent({
     id: 7,
@@ -192,6 +208,7 @@ let events: MockEvent[] = [
     title: '期中考试安排已发布',
     description: '详见教务处网站通知',
     confidence: 0.72,
+    level: 1,
   }),
   makeEvent({
     id: 8,
@@ -201,8 +218,69 @@ let events: MockEvent[] = [
     start_at: at(2, 18),
     status: 'cancelled',
     confidence: 0.8,
+    level: 1,
+  }),
+  // ===== 待办类事件（没有截止，不进 today/events/ics，出现在待办框里）
+  makeEvent({
+    id: 9,
+    group_id: 'demo-class',
+    type: 'assignment',
+    title: '开始准备课程设计选题',
+    description: '先想好做哪个方向，分组名单下周交',
+    start_at: at(1, 10),
+    confidence: 0.83,
+    level: 3,
+  }),
+  makeEvent({
+    id: 10,
+    group_id: 'demo-linear',
+    type: 'announcement',
+    title: '线性代数下周换教室',
+    description: '下周起改到 B 座 210 上课',
+    confidence: 0.77,
+    level: 1,
   }),
 ];
+
+// ===== 手动待办 / 课表 / 长期记忆（mock 也走内存） =====
+
+let todos: TodoDTO[] = [
+  { id: 1, title: '把学生证充磁', note: '一食堂一楼自助机', level: 2, done_at: null, created_at: bootAt - DAY },
+];
+let nextTodoId = 2;
+
+// 与 docs/拓展功能-开发计划.md 附录 A 一致的解析结果（13 个课次）
+const mockTimetable: TimetableDTO = {
+  semester_start: '2026-09-07',
+  courses: [
+    { name: '创新创业导论', teacher: '王斌(教授),钟萍(副教授),张永敏(教授),杨柳(教授)', location: 'B座508', weekday: 1, block: 3, weeks: range(1, 16) },
+    { name: '大学物理B（二）(信息类)', teacher: '郑小娟(教授)', location: 'A座404', weekday: 1, block: 4, weeks: range(3, 18) },
+    { name: '概率论与数理统计A', teacher: '彭丽华(副教授)', location: 'B座312', weekday: 2, block: 2, weeks: range(3, 16) },
+    { name: '体育（三）', teacher: '张绮(讲师)', location: '', weekday: 2, block: 3, weeks: range(3, 18) },
+    { name: '计算机组成原理与体系结构', teacher: '郭菲(教授)', location: 'B座519', weekday: 2, block: 4, weeks: range(1, 16) },
+    { name: '面向对象编程（C++）', teacher: '杨希(讲师)', location: 'B座507', weekday: 3, block: 2, weeks: range(1, 16) },
+    { name: '形势与政策', teacher: '史建权(高级政工师)', location: 'C座410', weekday: 3, block: 5, weeks: [8, 12] },
+    { name: '概率论与数理统计A', teacher: '彭丽华(副教授)', location: 'B座312', weekday: 4, block: 2, weeks: range(3, 16) },
+    { name: '中国近现代史纲要', teacher: '罗春梅(副教授)', location: 'B座219', weekday: 4, block: 3, weeks: range(3, 18) },
+    { name: '计算机组成原理与体系结构', teacher: '郭菲(教授)', location: 'B座519', weekday: 4, block: 4, weeks: range(1, 16) },
+    { name: '传统文化与管理智慧', teacher: '戴国斌(副教授)', location: 'C座104', weekday: 4, block: 5, weeks: range(3, 18) },
+    { name: '人工智能', teacher: '钟萍(副教授)', location: 'B座505', weekday: 5, block: 3, weeks: range(1, 16) },
+    { name: '大学物理B（二）(信息类)', teacher: '郑小娟(教授)', location: 'A座404', weekday: 5, block: 4, weeks: range(3, 18) },
+  ],
+};
+
+function range(a: number, b: number): number[] {
+  return Array.from({ length: b - a + 1 }, (_, i) => a + i);
+}
+
+let memory: { enabled: boolean; rules: { id: number; text: string; level: Level }[]; feedback_count: number } = {
+  enabled: true,
+  rules: [
+    { id: 1, text: '实验报告一律 → 4 紧急', level: 4 },
+    { id: 2, text: '社团活动一律 → 1 低', level: 1 },
+  ],
+  feedback_count: 5,
+};
 
 const scenarios: ScenarioDTO[] = [
   { name: 'reschedule', title: '改期场景', count: 3, group_id: 'demo-math', active: false },
@@ -252,7 +330,7 @@ export const mockApi: Api = {
     const from = at(0, 0);
     const to = at(1, 0);
     const list = events
-      .filter((e) => e.status !== 'cancelled')
+      .filter((e) => e.status !== 'cancelled' && !isTodo(e))
       .filter((e) => inRange(e.start_at, from, to) || inRange(e.deadline_at, from, to))
       .map(toDTO)
       .sort((a, b) => timeOf(a) - timeOf(b));
@@ -268,10 +346,9 @@ export const mockApi: Api = {
   },
 
   getEvents(from, to) {
-    let list = events;
-    if (from === undefined && to === undefined) {
-      list = list.filter((e) => e.status !== 'cancelled');
-    } else {
+    // 与后端一致：cancelled 与待办类事件都不返回（范围查询也一样）
+    let list = events.filter((e) => e.status !== 'cancelled' && !isTodo(e));
+    if (from !== undefined || to !== undefined) {
       const f = from ?? -Infinity;
       const t = to ?? Infinity;
       list = list.filter((e) => inRange(e.start_at, f, t) || inRange(e.deadline_at, f, t));
@@ -286,12 +363,32 @@ export const mockApi: Api = {
     return delay(detail);
   },
 
-  patchEvent(id, status) {
+  patchEvent(id, patch) {
     const e = events.find((x) => x.id === id);
     if (!e) return fail('事件不存在', 404);
-    e.status = status;
+    if (patch.status !== undefined) e.status = patch.status;
+    if (patch.level !== undefined) {
+      if (patch.level === null) {
+        e.level_locked = false;
+      } else {
+        const from = e.level;
+        e.level = patch.level;
+        e.level_locked = true;
+        e.version += 1;
+        e.history = [
+          ...e.history,
+          {
+            version: e.version,
+            changed_fields: { level: { from, to: patch.level } },
+            source_message_id: null,
+            changed_at: Date.now(),
+          },
+        ];
+      }
+    }
     e.updated_at = Date.now();
-    return delay(toDTO(e));
+    const detail: EventDetailDTO = { ...toDTO(e), sources: e.sources, history: e.history };
+    return delay(detail);
   },
 
   getGroups() {
@@ -300,10 +397,13 @@ export const mockApi: Api = {
     );
   },
 
-  patchGroup(id, enabled) {
+  patchGroup(id, patch) {
     const g = groups.find((x) => x.group_id === id);
     if (!g) return fail('群不存在', 404);
-    g.enabled = enabled;
+    if (patch.enabled !== undefined) g.enabled = patch.enabled;
+    if (patch.course_name !== undefined) {
+      g.course_name = patch.course_name === '' ? null : patch.course_name;
+    }
     return delay({ ...g, event_count: events.filter((e) => e.group_id === id).length });
   },
 
@@ -373,9 +473,10 @@ export const mockApi: Api = {
     return delay({ ok: true as const });
   },
 
-  syncNow() {
+  syncNow(days = 7) {
     if (connectState() !== 'online') return fail('QQ 未连接', 409);
-    return delay({ groups: groups.filter((g) => g.enabled).length, messages: 12 });
+    // 天数越大补回的消息越多（mock 按比例给个数）
+    return delay({ groups: groups.filter((g) => g.enabled).length, messages: 4 * days });
   },
 
   getHealth() {
@@ -391,6 +492,7 @@ export const mockApi: Api = {
       jev_called_count: 0,
       llm_called_count: llmCalledCount,
       uptime: Math.floor((Date.now() - bootAt) / 1000),
+      pending: 0,
     };
     return delay(health);
   },
@@ -405,6 +507,79 @@ export const mockApi: Api = {
     if (!/^sk-[A-Za-z0-9_-]{8,}$/.test(key)) return fail('API Key 格式不对，应以 sk- 开头', 400);
     mockLlm = { provider, configured: true, key_hint: `${key.slice(0, 3)}****${key.slice(-4)}`, source: 'web' };
     return delay({ ...mockLlm });
+  },
+
+  getTodos() {
+    const eventTodos = events.filter(isTodo).map(toDTO);
+    const body: TodosDTO = { events: eventTodos, manual: todos.filter((t) => t.done_at === null) };
+    return delay(body);
+  },
+
+  createTodo(input) {
+    const title = input.title.trim();
+    if (!title) return fail('标题不能为空', 400);
+    const todo: TodoDTO = {
+      id: nextTodoId++,
+      title,
+      note: input.note?.trim() ?? '',
+      level: input.level ?? 2,
+      done_at: null,
+      created_at: Date.now(),
+    };
+    todos = [...todos, todo];
+    return delay(todo);
+  },
+
+  patchTodo(id, patch) {
+    const t = todos.find((x) => x.id === id);
+    if (!t) return fail('待办不存在', 404);
+    if (patch.title !== undefined) t.title = patch.title;
+    if (patch.note !== undefined) t.note = patch.note;
+    if (patch.level !== undefined) t.level = patch.level;
+    if (patch.done !== undefined) t.done_at = patch.done ? Date.now() : null;
+    return delay({ ...t });
+  },
+
+  getTimetable() {
+    return delay(structuredClone(mockTimetable));
+  },
+
+  saveTimetable(t) {
+    mockTimetable.semester_start = t.semester_start;
+    mockTimetable.courses = t.courses as CourseDTO[];
+    return delay(structuredClone(mockTimetable));
+  },
+
+  clearTimetable() {
+    mockTimetable.courses = [];
+    return delay({ ok: true as const });
+  },
+
+  getMemory() {
+    const body: MemoryDTO = { enabled: memory.enabled, rules: [...memory.rules], feedback_count: memory.feedback_count };
+    return delay(body);
+  },
+
+  setMemoryEnabled(enabled) {
+    memory.enabled = enabled;
+    const body: MemoryDTO = { enabled, rules: [...memory.rules], feedback_count: memory.feedback_count };
+    return delay(body);
+  },
+
+  deleteMemoryRule(id) {
+    const before = memory.rules.length;
+    memory.rules = memory.rules.filter((r) => r.id !== id);
+    if (memory.rules.length === before) return fail('规则不存在', 404);
+    memory.feedback_count = Math.max(0, memory.feedback_count - 1);
+    const body: MemoryDTO = { enabled: memory.enabled, rules: [...memory.rules], feedback_count: memory.feedback_count };
+    return delay(body);
+  },
+
+  clearMemory() {
+    memory.rules = [];
+    memory.feedback_count = 0;
+    const body: MemoryDTO = { enabled: memory.enabled, rules: [], feedback_count: 0 };
+    return delay(body);
   },
 };
 

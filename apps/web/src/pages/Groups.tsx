@@ -1,6 +1,6 @@
-// 群管理页 /groups（D6，FR-10）：群名、消息数、事件数、监听开关、删除本群数据（二次确认）。
+// 群管理页 /groups（D6，FR-10 + FR-13）：群名、消息数、事件数、对应课程下拉、监听开关、删除本群数据。
 import { useCallback, useState } from 'react';
-import { deleteGroupData, getGroups, patchGroup } from '../api/client';
+import { deleteGroupData, getGroups, getTimetable, patchGroup } from '../api/client';
 import type { GroupDTO } from '../api/types';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useToast } from '../components/Toast';
@@ -10,6 +10,7 @@ import { filterGroups, groupsToChange, runInBatches } from '../lib/groups';
 
 export default function Groups() {
   const { data, error, loading, refresh } = usePolling(getGroups, 10_000);
+  const timetable = usePolling(getTimetable, 60_000);
   const toast = useToast();
   // 开关刚点下、后端还没返回时先按用户的选择显示（乐观更新）；失败就撤回
   const [pending, setPending] = useState<Record<string, boolean>>({});
@@ -18,6 +19,8 @@ export default function Groups() {
   const [query, setQuery] = useState('');
   const shown = data ? filterGroups(data, query) : null;
   const [bulk, setBulk] = useState<boolean | null>(null); // 正在一键全开(true) / 全关(false)
+  // 课表里的课程名去重（保持课表里的顺序）；没导入课表就不显示下拉
+  const courseNames = [...new Set((timetable.data?.courses ?? []).map((c) => c.name))];
 
   /** 一键全开 / 全关：只作用于当前列表里显示的群（搜索时就是搜索结果） */
   async function onBulk(enabled: boolean) {
@@ -30,7 +33,7 @@ export default function Groups() {
     setBulk(enabled);
     setPending((p) => ({ ...p, ...Object.fromEntries(targets.map((g) => [g.group_id, enabled])) }));
     try {
-      const failed = await runInBatches(targets, 8, (g) => patchGroup(g.group_id, enabled));
+      const failed = await runInBatches(targets, 8, (g) => patchGroup(g.group_id, { enabled }));
       await refresh();
       const ok = targets.length - failed;
       if (failed === 0) toast(enabled ? `已开启 ${ok} 个群的监听` : `已关闭 ${ok} 个群的监听`);
@@ -48,13 +51,24 @@ export default function Groups() {
   async function onToggle(g: GroupDTO, enabled: boolean) {
     setPending((p) => ({ ...p, [g.group_id]: enabled }));
     try {
-      await patchGroup(g.group_id, enabled);
+      await patchGroup(g.group_id, { enabled });
       await refresh();
       toast(enabled ? `已开启「${g.name}」的监听` : `已关闭「${g.name}」的监听，新消息不再生成日程`);
     } catch (e) {
       toastError(toast, e);
     } finally {
       setPending(({ [g.group_id]: _, ...rest }) => rest);
+    }
+  }
+
+  /** 群↔课程绑定（FR-13）：选「自动」清掉 course_name，让 AI 按群名猜 */
+  async function onCourseChange(g: GroupDTO, courseName: string) {
+    try {
+      await patchGroup(g.group_id, { course_name: courseName === '' ? null : courseName });
+      await refresh();
+      toast(courseName === '' ? `「${g.name}」回到 AI 判断` : `「${g.name}」对应课程改为「${courseName}」`);
+    } catch (e) {
+      toastError(toast, e);
     }
   }
 
@@ -180,6 +194,20 @@ export default function Groups() {
                     {!enabled && ' · 已关闭监听'}
                   </div>
                 </div>
+
+                {courseNames.length > 0 && (
+                  <select
+                    aria-label={`「${g.name}」对应课程`}
+                    value={g.course_name ?? ''}
+                    onChange={(e) => void onCourseChange(g, e.target.value)}
+                    className="rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-600 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                  >
+                    <option value="">自动（AI 判断）</option>
+                    {courseNames.map((n) => (
+                      <option key={n} value={n}>{n}</option>
+                    ))}
+                  </select>
+                )}
 
                 <Switch
                   checked={enabled}

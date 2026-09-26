@@ -18,8 +18,11 @@ import { installCrashHandlers } from './crash-log.js';
 import { trustSystemCertificates } from './system-ca.js';
 import { registerBusinessRoutes } from './routes/business.js';
 import { registerConnectRoutes } from './routes/connect.js';
+import { registerMemoryRoutes } from './routes/memory.js';
 import { registerPetChatRoutes } from './routes/pet-chat.js';
 import { registerSettingsRoutes } from './routes/settings.js';
+import { registerTimetableRoutes } from './routes/timetable.js';
+import { registerTodoRoutes } from './routes/todos.js';
 import { registerPresence } from './presence.js';
 import { DATA_DIR, WEB_DIST } from './paths.js';
 import type { HealthDTO } from './types.js';
@@ -42,8 +45,19 @@ app.use('*', lanReadOnly());
 
 app.get('/health', (c) => {
   let dbState: HealthDTO['db'] = 'ok';
+  let pending = 0;
   try {
     db.prepare('SELECT 1').get();
+    // 待整理 = 未处理且未被过滤的消息，只算启用的群（群行不存在按启用算）
+    pending = (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM messages m
+             LEFT JOIN groups g ON g.group_id = m.group_id
+            WHERE m.processed = 0 AND m.filtered_out = 0 AND COALESCE(g.enabled, 1) = 1`,
+        )
+        .get() as { n: number }
+    ).n;
   } catch {
     dbState = 'error';
   }
@@ -60,6 +74,7 @@ app.get('/health', (c) => {
     jev_called_count: stats.jev_called_count,
     llm_called_count: stats.llm_called_count,
     uptime: Math.round((Date.now() - STARTED_AT) / 1000),
+    pending,
   };
   return c.json(body);
 });
@@ -68,6 +83,9 @@ registerBusinessRoutes(app);
 registerConnectRoutes(app);
 registerSettingsRoutes(app);
 registerPetChatRoutes(app);
+registerTodoRoutes(app);
+registerTimetableRoutes(app);
+registerMemoryRoutes(app);
 
 // 后台模式（scripts/dev.mjs --background 设 AUTO_EXIT=1）：网页全关掉后自动退出
 const AUTO_EXIT = process.env.AUTO_EXIT === '1';

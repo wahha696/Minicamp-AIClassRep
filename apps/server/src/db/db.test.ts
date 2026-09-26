@@ -2,10 +2,14 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterAll, describe, expect, it } from 'vitest';
 import { db, openDb } from './index.js';
 
-const TABLES = ['groups', 'messages', 'events', 'event_sources', 'event_history'];
+const TABLES = [
+  'groups', 'messages', 'events', 'event_sources', 'event_history',
+  'todos', 'level_feedback', 'level_rules', 'courses', 'kv', 'message_seen',
+];
 const INDEXES = ['idx_messages_group_time', 'idx_messages_processed'];
 
 const tempDirs: string[] = [];
@@ -121,6 +125,47 @@ describe('db 建表', () => {
     openDb(':memory:');
     expect(old.isOpen).toBe(false);
     expect(db.isOpen).toBe(true);
+  });
+
+  it('老库自动升级：缺列补上 + 新表建出 + 旧数据还在', () => {
+    // 先用「旧版」最小 schema 建一个文件库并插数据（没有 level/course_name/新表）
+    const dir = mkdtempSync(join(tmpdir(), 'classrep-db-old-'));
+    tempDirs.push(dir);
+    const file = join(dir, 'classrep.db');
+    const old = new DatabaseSync(file);
+    old.exec(`
+      CREATE TABLE groups (group_id TEXT PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, adapter TEXT NOT NULL, created_at INTEGER NOT NULL);
+      CREATE TABLE events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL, type TEXT NOT NULL, title TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '', start_at INTEGER, end_at INTEGER, deadline_at INTEGER,
+        location TEXT, action_required TEXT, status TEXT NOT NULL DEFAULT 'active', confidence REAL NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+    `);
+    const now = Date.now();
+    old.prepare('INSERT INTO groups (group_id, name, enabled, adapter, created_at) VALUES (?, ?, 1, ?, ?)').run('g1', '高数(2)班', 'demo', now);
+    old.prepare("INSERT INTO events (group_id, type, title, confidence, created_at, updated_at) VALUES ('g1', 'exam', '高数小测', 0.9, ?, ?)").run(now, now);
+    old.close();
+
+    openDb(file); // 升级
+
+    const eventCols = (db.prepare('PRAGMA table_info(events)').all() as { name: string }[]).map((c) => c.name);
+    expect(eventCols).toContain('level');
+    expect(eventCols).toContain('level_locked');
+    const groupCols = (db.prepare('PRAGMA table_info(groups)').all() as { name: string }[]).map((c) => c.name);
+    expect(groupCols).toContain('course_name');
+
+    // 旧数据还在，新列是默认值
+    const ev = db.prepare('SELECT title, level, level_locked FROM events').get() as Record<string, unknown>;
+    expect(ev).toMatchObject({ title: '高数小测', level: 2, level_locked: 0 });
+    const g = db.prepare('SELECT name, course_name FROM groups WHERE group_id = ?').get('g1') as Record<string, unknown>;
+    expect(g).toMatchObject({ name: '高数(2)班', course_name: null });
+
+    // 新表建出来了 + 默认 kv 写入
+    for (const t of ['todos', 'level_feedback', 'level_rules', 'courses', 'kv', 'message_seen']) {
+      expect(tableNames()).toContain(t);
+    }
+    const kv = db.prepare("SELECT value FROM kv WHERE key = 'semester_start'").get() as { value: string };
+    expect(kv.value).toBe('2026-09-07');
   });
 
   it('文件库的 journal_mode 是 WAL', () => {

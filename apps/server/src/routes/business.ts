@@ -7,12 +7,14 @@ import { buildIcs } from '../ics.js';
 import { buildDemoMessages, listScenarios, parseImportedText, scenarioGroupId } from '../ingest/demo.js';
 import { ingestMessages } from '../ingest/index.js';
 import { runPipelineNow } from '../pipeline/index.js';
+import { schedulePreferenceSummary } from '../pipeline/preferences.js';
 import type {
   EventDTO,
   EventDetailDTO,
   EventStatus,
   GroupDTO,
   HistoryDTO,
+  Level,
   SourceMessageDTO,
   TodayDTO,
 } from '../types.js';
@@ -68,6 +70,8 @@ interface EventRow {
   action_required: string | null;
   status: string;
   confidence: number;
+  level: number;
+  level_locked: number;
   version: number;
   created_at: number;
   updated_at: number;
@@ -77,7 +81,7 @@ interface EventRow {
 const EVENT_COLUMNS = `
   e.id, e.group_id, g.name AS group_name, e.type, e.title, e.description,
   e.start_at, e.end_at, e.deadline_at, e.location, e.action_required,
-  e.status, e.confidence, e.version, e.created_at, e.updated_at
+  e.status, e.confidence, e.level, e.level_locked, e.version, e.created_at, e.updated_at
 `;
 const EVENT_FROM = 'FROM events e LEFT JOIN groups g ON g.group_id = e.group_id';
 const EVENT_ORDER = 'ORDER BY COALESCE(e.start_at, e.deadline_at) IS NULL, COALESCE(e.start_at, e.deadline_at), e.id';
@@ -97,6 +101,8 @@ function toEventDTO(row: EventRow): EventDTO {
     action_required: row.action_required,
     status: row.status as EventStatus,
     confidence: row.confidence,
+    level: row.level as Level,
+    level_locked: row.level_locked !== 0,
     version: row.version,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -110,19 +116,23 @@ function selectEvents(where: string, params: unknown[]): EventDTO[] {
   return rows.map(toEventDTO);
 }
 
-/** 状态不是 cancelled，且 start_at 或 deadline_at 落在 [from, to) 内 */
+// 待办类事件（todo.ts 的 isTodo 的 SQL 等价条件）不进 today / events / ics 导出（FR-15）
+const NOT_TODO_SQL = `NOT (e.status IN ('active', 'pending_confirm') AND e.deadline_at IS NULL
+    AND ((e.start_at IS NULL AND e.end_at IS NULL) OR e.type = 'assignment'))`;
+
+/** 状态不是 cancelled、不是待办，且 start_at 或 deadline_at 落在 [from, to) 内 */
 function selectEventsInRange(from: number, to: number): EventDTO[] {
   return selectEvents(
-    `WHERE e.status <> 'cancelled'
+    `WHERE e.status <> 'cancelled' AND ${NOT_TODO_SQL}
        AND ((e.start_at IS NOT NULL AND e.start_at >= ? AND e.start_at < ?)
          OR (e.deadline_at IS NOT NULL AND e.deadline_at >= ? AND e.deadline_at < ?))`,
     [from, to, from, to],
   );
 }
 
-/** 全部非 cancelled（含两个时间都为空的） */
+/** 全部非 cancelled、非待办（含两个时间都为空的非待办事件——比如已完成的活动记录） */
 function selectAllEvents(): EventDTO[] {
-  return selectEvents(`WHERE e.status <> 'cancelled'`, []);
+  return selectEvents(`WHERE e.status <> 'cancelled' AND ${NOT_TODO_SQL}`, []);
 }
 
 function getEventById(id: number): EventDTO | null {
@@ -130,6 +140,75 @@ function getEventById(id: number): EventDTO | null {
     | unknown as EventRow
     | undefined;
   return row === undefined ? null : toEventDTO(row);
+}
+
+/** 详情 = 事件 + sources（时间升序）+ history（version 升序）；GET 详情与 PATCH 共用 */
+function getEventDetail(id: number): EventDetailDTO | null {
+  const event = getEventById(id);
+  if (event === null) return null;
+
+  const sources = db
+    .prepare(
+      'SELECT message_id, sender_name, text, sent_at FROM event_sources WHERE event_id = ? ORDER BY sent_at, message_id',
+    )
+    .all(id) as unknown as SourceMessageDTO[];
+
+  const historyRows = db
+    .prepare(
+      'SELECT version, changed_fields, source_message_id, changed_at FROM event_history WHERE event_id = ? ORDER BY version',
+    )
+    .all(id) as unknown as {
+    version: number;
+    changed_fields: string;
+    source_message_id: string | null;
+    changed_at: number;
+  }[];
+  const history: HistoryDTO[] = historyRows.map((h) => ({
+    version: h.version,
+    changed_fields: parseChangedFields(h.changed_fields),
+    source_message_id: h.source_message_id,
+    changed_at: h.changed_at,
+  }));
+
+  return { ...event, sources, history };
+}
+
+/** 手动调级 / 交还 AI（level === null）。调级记 level_feedback 并防抖触发偏好总结（FR-12）。 */
+function applyManualLevel(row: EventRow, level: number | null, now: number): void {
+  if (level === null) {
+    db.prepare('UPDATE events SET level_locked = 0, updated_at = ? WHERE id = ?').run(now, row.id);
+    return;
+  }
+  // 已锁定时 AI 原级取上一条 feedback 的 ai_level（没记过就退回当前 level）
+  const aiLevel =
+    row.level_locked !== 0
+      ? ((
+          db
+            .prepare(
+              'SELECT ai_level FROM level_feedback WHERE event_id = ? ORDER BY id DESC LIMIT 1',
+            )
+            .get(row.id) as { ai_level: number } | undefined
+        )?.ai_level ?? row.level)
+      : row.level;
+
+  if (level !== row.level) {
+    const version = row.version + 1;
+    db.prepare(
+      'UPDATE events SET level = ?, level_locked = 1, version = ?, updated_at = ? WHERE id = ?',
+    ).run(level, version, now, row.id);
+    db.prepare(
+      `INSERT INTO event_history (event_id, version, changed_fields, source_message_id, changed_at)
+       VALUES (?, ?, ?, NULL, ?)`,
+    ).run(row.id, version, JSON.stringify({ level: { from: row.level, to: level } }), now);
+  } else {
+    db.prepare('UPDATE events SET level_locked = 1, updated_at = ? WHERE id = ?').run(now, row.id);
+  }
+
+  db.prepare(
+    `INSERT INTO level_feedback (event_id, group_name, type, title, ai_level, user_level, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(row.id, row.group_name ?? '', row.type, row.title, aiLevel, level, now);
+  schedulePreferenceSummary();
 }
 
 // ===== 摘要文案
@@ -151,8 +230,24 @@ function buildSummary(events: EventDTO[], now: number): string {
 // ===== 校验
 
 const EVENT_STATUSES = ['active', 'cancelled', 'done', 'pending_confirm'] as const;
-const patchEventSchema = z.object({ status: z.enum(EVENT_STATUSES) });
-const patchGroupSchema = z.object({ enabled: z.boolean() });
+const patchEventSchema = z
+  .object({
+    status: z.enum(EVENT_STATUSES).optional(),
+    // 1~4 手动设级；null = 解除锁定交还 AI
+    level: z.number().int().min(1).max(4).nullable().optional(),
+  })
+  .refine((o) => o.status !== undefined || o.level !== undefined, {
+    message: 'status 或 level 至少给一个',
+  });
+const patchGroupSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    // null = 清除指定课程名（回到 AI 按群名猜）
+    course_name: z.string().trim().max(50).nullable().optional(),
+  })
+  .refine((o) => o.enabled !== undefined || o.course_name !== undefined, {
+    message: 'enabled 或 course_name 至少给一个',
+  });
 const replaySchema = z.object({ scenario: z.string().min(1) });
 const importSchema = z.object({ groupName: z.string().default(''), text: z.string().min(1) });
 
@@ -182,6 +277,7 @@ interface GroupRow {
   group_id: string;
   name: string;
   enabled: number;
+  course_name: string | null;
   message_count: number;
   event_count: number;
 }
@@ -190,7 +286,7 @@ interface GroupRow {
 function selectGroups(): GroupDTO[] {
   const rows = db
     .prepare(
-      `SELECT g.group_id, g.name, g.enabled,
+      `SELECT g.group_id, g.name, g.enabled, g.course_name,
               (SELECT COUNT(*) FROM messages m WHERE m.group_id = g.group_id) AS message_count,
               (SELECT COUNT(*) FROM events e WHERE e.group_id = g.group_id)   AS event_count
          FROM groups g
@@ -203,7 +299,7 @@ function selectGroups(): GroupDTO[] {
 function getGroupById(group_id: string): GroupDTO | null {
   const row = db
     .prepare(
-      `SELECT g.group_id, g.name, g.enabled,
+      `SELECT g.group_id, g.name, g.enabled, g.course_name,
               (SELECT COUNT(*) FROM messages m WHERE m.group_id = g.group_id) AS message_count,
               (SELECT COUNT(*) FROM events e WHERE e.group_id = g.group_id)   AS event_count
          FROM groups g
@@ -220,6 +316,7 @@ function toGroupDTO(row: GroupRow): GroupDTO {
     enabled: row.enabled !== 0,
     message_count: row.message_count,
     event_count: row.event_count,
+    course_name: row.course_name,
   };
 }
 
@@ -287,37 +384,12 @@ export function registerBusinessRoutes(app: Hono): void {
   app.get('/api/events/:id', (c) => {
     const id = parseId(c.req.param('id'));
     if (id === null) return c.json({ error: '事件 id 不合法' }, 400);
-    const event = getEventById(id);
-    if (event === null) return c.json({ error: '事件不存在' }, 404);
-
-    const sources = db
-      .prepare(
-        'SELECT message_id, sender_name, text, sent_at FROM event_sources WHERE event_id = ? ORDER BY sent_at, message_id',
-      )
-      .all(id) as unknown as SourceMessageDTO[];
-
-    const historyRows = db
-      .prepare(
-        'SELECT version, changed_fields, source_message_id, changed_at FROM event_history WHERE event_id = ? ORDER BY version',
-      )
-      .all(id) as unknown as {
-      version: number;
-      changed_fields: string;
-      source_message_id: string | null;
-      changed_at: number;
-    }[];
-    const history: HistoryDTO[] = historyRows.map((h) => ({
-      version: h.version,
-      changed_fields: parseChangedFields(h.changed_fields),
-      source_message_id: h.source_message_id,
-      changed_at: h.changed_at,
-    }));
-
-    const body: EventDetailDTO = { ...event, sources, history };
-    return c.json(body);
+    const detail = getEventDetail(id);
+    if (detail === null) return c.json({ error: '事件不存在' }, 404);
+    return c.json(detail);
   });
 
-  // 手动改状态（完成 / 取消）
+  // 手动改状态 / 调危机等级。level: null 表示解除锁定交还 AI。
   app.patch('/api/events/:id', async (c) => {
     const id = parseId(c.req.param('id'));
     if (id === null) return c.json({ error: '事件 id 不合法' }, 400);
@@ -330,17 +402,30 @@ export function registerBusinessRoutes(app: Hono): void {
     }
     const parsed = patchEventSchema.safeParse(raw);
     if (!parsed.success) {
-      return c.json({ error: `status 只能是 ${EVENT_STATUSES.join(' / ')}` }, 400);
+      return c.json({ error: 'status 或 level 不合法' }, 400);
     }
 
-    const res = db
-      .prepare('UPDATE events SET status = ?, updated_at = ? WHERE id = ?')
-      .run(parsed.data.status, Date.now(), id);
-    if (res.changes === 0) return c.json({ error: '事件不存在' }, 404);
+    const row = db
+      .prepare(`SELECT ${EVENT_COLUMNS} ${EVENT_FROM} WHERE e.id = ?`)
+      .get(id) as unknown as EventRow | undefined;
+    if (row === undefined) return c.json({ error: '事件不存在' }, 404);
 
-    const event = getEventById(id);
-    if (event === null) return c.json({ error: '事件不存在' }, 404);
-    return c.json(event);
+    const now = Date.now();
+    const data = parsed.data;
+    if (data.status !== undefined) {
+      db.prepare('UPDATE events SET status = ?, updated_at = ? WHERE id = ?').run(
+        data.status,
+        now,
+        id,
+      );
+    }
+    if (data.level !== undefined) {
+      applyManualLevel(row, data.level, now);
+    }
+
+    const detail = getEventDetail(id);
+    if (detail === null) return c.json({ error: '事件不存在' }, 404);
+    return c.json(detail);
   });
 
   // 群列表（FR-10.1）
@@ -356,12 +441,27 @@ export function registerBusinessRoutes(app: Hono): void {
       return c.json({ error: '请求体不是合法 JSON' }, 400);
     }
     const parsed = patchGroupSchema.safeParse(raw);
-    if (!parsed.success) return c.json({ error: 'enabled 只能是 true / false' }, 400);
+    if (!parsed.success) {
+      return c.json({ error: 'enabled 只能是 true / false，course_name 是最长 50 字的字符串或 null' }, 400);
+    }
+    const data = parsed.data;
 
-    const res = db
-      .prepare('UPDATE groups SET enabled = ? WHERE group_id = ?')
-      .run(parsed.data.enabled ? 1 : 0, group_id);
-    if (res.changes === 0) return c.json({ error: '群不存在' }, 404);
+    const exists = db.prepare('SELECT 1 AS ok FROM groups WHERE group_id = ?').get(group_id);
+    if (exists === undefined) return c.json({ error: '群不存在' }, 404);
+
+    if (data.enabled !== undefined) {
+      db.prepare('UPDATE groups SET enabled = ? WHERE group_id = ?').run(
+        data.enabled ? 1 : 0,
+        group_id,
+      );
+    }
+    if (data.course_name !== undefined) {
+      // 空串也当「清除指定课程名」处理
+      db.prepare('UPDATE groups SET course_name = ? WHERE group_id = ?').run(
+        data.course_name === null || data.course_name === '' ? null : data.course_name,
+        group_id,
+      );
+    }
 
     const group = getGroupById(group_id);
     if (group === null) return c.json({ error: '群不存在' }, 404);
