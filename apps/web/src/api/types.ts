@@ -100,6 +100,10 @@ export interface ScenarioDTO {
   name: string;
   title: string;
   count: number;
+  /** 剧本对应的演示群 */
+  group_id: string;
+  /** 已回放且没取消（演示群里有数据）→ 页面显示「取消」 */
+  active: boolean;
 }
 
 /** GET/PUT /api/settings/llm：连接页「AI 接入」卡片。key 只返回打码后的提示，不回传明文 */

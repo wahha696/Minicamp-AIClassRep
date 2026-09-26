@@ -205,8 +205,8 @@ let events: MockEvent[] = [
 ];
 
 const scenarios: ScenarioDTO[] = [
-  { name: 'reschedule', title: '改期场景', count: 3 },
-  { name: 'noisy-class', title: '班级群日常（大量闲聊）', count: 40 },
+  { name: 'reschedule', title: '改期场景', count: 3, group_id: 'demo-math', active: false },
+  { name: 'noisy-class', title: '班级群日常（大量闲聊）', count: 40, group_id: 'demo-noisy', active: false },
 ];
 
 let filteredCount = 214;
@@ -316,7 +316,7 @@ export const mockApi: Api = {
   },
 
   getScenarios() {
-    return delay(scenarios);
+    return delay(scenarios.map((s) => ({ ...s })));
   },
 
   replay(name) {
@@ -324,10 +324,21 @@ export const mockApi: Api = {
     if (!s) return fail(`没有名为 ${name} 的剧本`, 404);
     filteredCount += Math.floor(s.count * 0.6);
     llmCalledCount += 1;
+    s.active = true;
     return delay({ injected: s.count });
   },
 
+  undoReplay(name) {
+    const s = scenarios.find((x) => x.name === name);
+    if (!s) return fail('剧本不存在', 404);
+    s.active = false;
+    events = events.filter((e) => e.group_id !== s.group_id);
+    groups.splice(0, groups.length, ...groups.filter((g) => g.group_id !== s.group_id));
+    return delay({ ok: true as const });
+  },
+
   resetDemo() {
+    for (const s of scenarios) s.active = false;
     events = events.filter((e) => !e.group_id.startsWith('demo-'));
     groups.splice(0, groups.length, ...groups.filter((g) => !g.group_id.startsWith('demo-')));
     return delay({ ok: true as const });

@@ -280,6 +280,42 @@ describe('POST /api/demo/replay', () => {
   });
 });
 
+describe('POST /api/demo/undo', () => {
+  it('只删这个剧本的演示群，别的演示群和真实群不动；scenarios 的 active 随之变化', async () => {
+    const app = freshApp();
+    db.prepare(
+      'INSERT INTO groups (group_id, name, enabled, adapter, created_at) VALUES (?, ?, 1, ?, ?)',
+    ).run('123456', '真实课程群', 'onebot', Date.now());
+    await postJson(app, '/api/demo/replay', { scenario: 'reschedule' });
+    await postJson(app, '/api/demo/replay', { scenario: 'cancel' });
+    const mathId = mockScenario('reschedule').group.id;
+    const guitarId = mockScenario('cancel').group.id;
+
+    const before = (await getJson(app, '/api/demo/scenarios')).body as { name: string; active: boolean }[];
+    expect(before.find((s) => s.name === 'reschedule')?.active).toBe(true);
+    expect(before.find((s) => s.name === 'meeting')?.active).toBe(false);
+
+    const { status, body } = await postJson(app, '/api/demo/undo', { scenario: 'reschedule' });
+    expect(status).toBe(200);
+    expect(body).toEqual({ ok: true });
+    expect(count('groups', 'group_id = ?', [mathId])).toBe(0);
+    expect(count('messages', 'group_id = ?', [mathId])).toBe(0);
+    expect(count('groups', 'group_id = ?', [guitarId])).toBe(1);
+    expect(count('messages', 'group_id = ?', [guitarId])).toBeGreaterThan(0);
+    expect(count('groups', 'group_id = ?', ['123456'])).toBe(1);
+
+    const after = (await getJson(app, '/api/demo/scenarios')).body as { name: string; active: boolean }[];
+    expect(after.find((s) => s.name === 'reschedule')?.active).toBe(false);
+    expect(after.find((s) => s.name === 'cancel')?.active).toBe(true);
+  });
+
+  it('剧本不存在 404，参数不对 400', async () => {
+    const app = freshApp();
+    expect((await postJson(app, '/api/demo/undo', { scenario: 'nope' })).status).toBe(404);
+    expect((await postJson(app, '/api/demo/undo', {})).status).toBe(400);
+  });
+});
+
 describe('POST /api/demo/reset', () => {
   it('删掉所有 demo- 开头的群及其数据，保留真实群', async () => {
     const app = freshApp();

@@ -56,3 +56,18 @@ export function filterGroups(groups: GroupDTO[], query: string): GroupDTO[] {
   scored.sort((x, y) => x.score - y.score || x.i - y.i);
   return scored.map((x) => x.g);
 }
+
+/** 一键全开 / 全关：列表里状态和目标不一样、需要改的群 */
+export function groupsToChange(groups: GroupDTO[], enabled: boolean): GroupDTO[] {
+  return groups.filter((g) => g.enabled !== enabled);
+}
+
+/** 按每批 size 个并发执行，返回失败的数量（一个失败不影响其他） */
+export async function runInBatches<T>(items: T[], size: number, fn: (item: T) => Promise<unknown>): Promise<number> {
+  let failed = 0;
+  for (let i = 0; i < items.length; i += size) {
+    const results = await Promise.allSettled(items.slice(i, i + size).map(fn));
+    failed += results.filter((r) => r.status === 'rejected').length;
+  }
+  return failed;
+}

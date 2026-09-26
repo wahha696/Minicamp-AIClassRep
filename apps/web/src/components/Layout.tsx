@@ -1,5 +1,6 @@
 // 全局布局（D1）：顶部栏（Logo + 导航 + 状态灯）+ 连接黄条 + 页面 + 手机底部 Tab。
 import { NavLink, Outlet } from 'react-router-dom';
+import Avatar from './Avatar';
 import ConnectBanner from './ConnectBanner';
 import StatusLights from './StatusLights';
 
@@ -49,8 +50,10 @@ export default function Layout() {
               </NavLink>
             ))}
           </nav>
-          <div className="ml-auto">
+          <div className="ml-auto flex items-center gap-3">
             <StatusLights />
+            {/* 手机上跟在状态灯后面；宽屏贴到整个页面的最右上角 */}
+            <Avatar className="md:absolute md:right-5 md:top-[10px]" />
           </div>
         </div>
         <ConnectBanner />

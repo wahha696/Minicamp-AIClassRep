@@ -28,6 +28,7 @@ export interface Api {
   getScenarios(): Promise<ScenarioDTO[]>;
   replay(name: string): Promise<{ injected: number }>;
   resetDemo(): Promise<{ ok: true }>;
+  undoReplay(name: string): Promise<{ ok: true }>;
   importText(groupName: string, text: string): Promise<{ messages: number }>;
   getConnectStatus(): Promise<ConnectStatusDTO>;
   restartConnect(): Promise<{ ok: true }>;
@@ -82,6 +83,7 @@ const realApi: Api = {
   getScenarios: () => request('GET', '/api/demo/scenarios'),
   replay: (name) => request('POST', '/api/demo/replay', { scenario: name }),
   resetDemo: () => request('POST', '/api/demo/reset'),
+  undoReplay: (name) => request('POST', '/api/demo/undo', { scenario: name }),
   importText: (groupName, text) => request('POST', '/api/import/text', { groupName, text }),
   getConnectStatus: () => request('GET', '/api/connect/status'),
   restartConnect: () => request('POST', '/api/connect/restart'),
@@ -104,6 +106,7 @@ export const {
   getScenarios,
   replay,
   resetDemo,
+  undoReplay,
   importText,
   getConnectStatus,
   restartConnect,

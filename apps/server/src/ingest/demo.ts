@@ -9,6 +9,8 @@ export interface ScenarioMeta {
   name: string;
   title: string;
   count: number;
+  /** 剧本对应的演示群（回放后出现在群列表里） */
+  group_id: string;
 }
 
 interface ScenarioMessage {
@@ -77,9 +79,15 @@ export function listScenarios(): ScenarioMeta[] {
       name: file.slice(0, -'.json'.length),
       title: scenario.title,
       count: scenario.messages.length,
+      group_id: scenario.group.id,
     });
   }
   return out;
+}
+
+/** 剧本对应的演示群 id；剧本不存在返回 null */
+export function scenarioGroupId(name: string): string | null {
+  return readScenario(name)?.group.id ?? null;
 }
 
 /**

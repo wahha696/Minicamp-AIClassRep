@@ -81,6 +81,9 @@ describe('mock 模式', () => {
     const c = await loadClient(true);
     const [s] = await c.getScenarios();
     expect(await c.replay(s.name)).toEqual({ injected: s.count });
+    expect((await c.getScenarios())[0].active).toBe(true);
+    await c.undoReplay(s.name);
+    expect((await c.getScenarios())[0].active).toBe(false);
     expect(await c.importText('测试群', 'a\nb\n\nc')).toEqual({ messages: 3 });
     await expect(c.importText('', 'x')).rejects.toMatchObject({ status: 400 });
     await c.resetDemo();
@@ -140,6 +143,7 @@ describe('真实模式（fetch 打桩）', () => {
     await c.getScenarios();
     await c.replay('reschedule');
     await c.resetDemo();
+    await c.undoReplay('reschedule');
     await c.importText('群', '文本');
     await c.getConnectStatus();
     await c.restartConnect();
@@ -159,6 +163,7 @@ describe('真实模式（fetch 打桩）', () => {
       { method: 'GET', url: '/api/demo/scenarios' },
       { method: 'POST', url: '/api/demo/replay', body: { scenario: 'reschedule' } },
       { method: 'POST', url: '/api/demo/reset' },
+      { method: 'POST', url: '/api/demo/undo', body: { scenario: 'reschedule' } },
       { method: 'POST', url: '/api/import/text', body: { groupName: '群', text: '文本' } },
       { method: 'GET', url: '/api/connect/status' },
       { method: 'POST', url: '/api/connect/restart' },

@@ -1,7 +1,7 @@
 // 演示控制台 /demo（D7，FR-11）：剧本回放、清空演示数据、粘贴聊天记录、流水线统计。
 import { useCallback, useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { getHealth, getScenarios, importText, replay, resetDemo } from '../api/client';
+import { getHealth, getScenarios, importText, replay, resetDemo, undoReplay } from '../api/client';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useToast } from '../components/Toast';
 import { usePolling } from '../hooks/usePolling';
@@ -25,6 +25,20 @@ export default function Demo() {
       const r = await replay(name);
       toast(`已注入 ${r.injected} 条消息`);
       void health.refresh();
+      void scenarios.refresh();
+    } catch (e) {
+      toastError(toast, e);
+    } finally {
+      setReplaying(null);
+    }
+  }
+
+  async function onUndo(name: string) {
+    setReplaying(name);
+    try {
+      await undoReplay(name);
+      toast('已取消，这个剧本的假数据已删除');
+      void scenarios.refresh();
     } catch (e) {
       toastError(toast, e);
     } finally {
@@ -39,6 +53,7 @@ export default function Demo() {
       toast('已清空演示数据');
       setConfirmReset(false);
       void health.refresh();
+      void scenarios.refresh();
     } catch (e) {
       toastError(toast, e);
     } finally {
@@ -103,19 +118,31 @@ export default function Demo() {
                   <div className="truncate font-medium text-slate-800">{s.title}</div>
                   <div className="text-xs text-slate-400">
                     {s.name} · {s.count} 条消息
+                    {s.active && <span className="ml-1.5 text-emerald-600">· 已回放，点「取消」删掉这批假数据</span>}
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => void onReplay(s.name)}
-                  disabled={replaying !== null}
-                  className="flex shrink-0 items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-60"
-                >
-                  {replaying === s.name && (
-                    <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
-                  )}
-                  {replaying === s.name ? '回放中…' : '回放'}
-                </button>
+                {s.active ? (
+                  <button
+                    type="button"
+                    onClick={() => void onUndo(s.name)}
+                    disabled={replaying !== null}
+                    className="shrink-0 rounded-lg border border-rose-200 px-3 py-1.5 text-sm text-rose-600 hover:bg-rose-50 disabled:opacity-60"
+                  >
+                    {replaying === s.name ? '取消中…' : '取消'}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => void onReplay(s.name)}
+                    disabled={replaying !== null}
+                    className="flex shrink-0 items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-60"
+                  >
+                    {replaying === s.name && (
+                      <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                    )}
+                    {replaying === s.name ? '回放中…' : '回放'}
+                  </button>
+                )}
               </li>
             ))}
           </ul>

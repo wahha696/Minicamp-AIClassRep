@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { GroupDTO } from '../api/types';
-import { filterGroups } from './groups';
+import { filterGroups, groupsToChange, runInBatches } from './groups';
 
 const g = (group_id: string, name: string): GroupDTO => ({ group_id, name, enabled: true, message_count: 0, event_count: 0 });
 const list = [
@@ -49,5 +49,24 @@ describe('filterGroups', () => {
 
   it('没有匹配时返回空数组', () => {
     expect(names('不存在')).toEqual([]);
+  });
+});
+
+describe('一键全开 / 全关', () => {
+  const mixed = [g('1', 'a'), { ...g('2', 'b'), enabled: false }, g('3', 'c')];
+
+  it('只挑出需要改的群', () => {
+    expect(groupsToChange(mixed, true).map((x) => x.group_id)).toEqual(['2']);
+    expect(groupsToChange(mixed, false).map((x) => x.group_id)).toEqual(['1', '3']);
+  });
+
+  it('分批执行，统计失败数，失败不影响其他', async () => {
+    const done: number[] = [];
+    const failed = await runInBatches([1, 2, 3, 4, 5], 2, async (n) => {
+      if (n === 3) throw new Error('x');
+      done.push(n);
+    });
+    expect(failed).toBe(1);
+    expect(done.sort()).toEqual([1, 2, 4, 5]);
   });
 });
