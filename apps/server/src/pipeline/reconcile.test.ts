@@ -1,22 +1,9 @@
-import { rmSync } from 'node:fs';
+// 用 :memory: 库，不碰 data/classrep.db
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { db, openDb } from '../db/index.js';
 import type { Message } from '../types.js';
 import type { ExtractedEvent } from './extract.js';
-
-// 库文件放到临时目录，不碰 data/classrep.db；建表仍用 db/index.ts 的 openDb
-const { TMP } = await vi.hoisted(async () => {
-  const { mkdtempSync } = await import('node:fs');
-  const { tmpdir } = await import('node:os');
-  const { join } = await import('node:path');
-  return { TMP: mkdtempSync(join(tmpdir(), 'classrep-reconcile-')) };
-});
-vi.mock('../paths.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../paths.js')>()),
-  DATA_DIR: TMP,
-}));
-
-const { db, openDb } = await import('../db/index.js');
-const { applyEvents, listActiveEvents, titleSimilarity } = await import('./reconcile.js');
+import { applyEvents, listActiveEvents, titleSimilarity } from './reconcile.js';
 
 const G = 'demo-test';
 const DAY = 86400_000;
@@ -61,11 +48,8 @@ function create(over: Partial<ExtractedEvent> = {}, text = '明天下午两点 A
   return Number(events().at(-1)!.id);
 }
 
-beforeAll(() => openDb());
-afterAll(() => {
-  db.close();
-  rmSync(TMP, { recursive: true, force: true });
-});
+beforeAll(() => openDb(':memory:'));
+afterAll(() => db.close());
 beforeEach(() => {
   db.exec('DELETE FROM events; DELETE FROM event_sources; DELETE FROM event_history;');
 });
