@@ -58,6 +58,20 @@ function isNode(pid) {
   }
 }
 
+/**
+ * 以前开的 ClassRep 开发后端（tsx watch / 后台 tsx）。光结束占端口的子进程不够：
+ * watch 父进程发现代码变了会立刻再拉起一个，把新后端挤到 8001、8002…，所以要连根结束。
+ */
+function staleServerPids() {
+  const ps = "Get-CimInstance Win32_Process -Filter \"name='node.exe'\" | Where-Object { $_.CommandLine -like '*apps*server*tsx*src/index.ts*' } | ForEach-Object { $_.ProcessId }";
+  try {
+    const out = execSync(`powershell -NoProfile -Command "${ps.replace(/"/g, '\\"')}"`, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, timeout: 20_000 }).toString();
+    return out.split(/\s+/).map(Number).filter((pid) => pid > 0 && pid !== process.pid);
+  } catch {
+    return [];
+  }
+}
+
 /** 第 0 步：拉最新 main。返回 true 表示 dev.mjs 自己被更新了，需要用新版重新跑一遍 */
 function updateToLatest() {
   const git = (args) => execSync(`git ${args}`, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, timeout: 60_000 }).toString().trim();
@@ -117,6 +131,14 @@ if (!process.argv.includes('--no-update') && updateToLatest()) {
 function start() {
 log(`[1/3] 关闭旧的 ClassRep 后端...${background ? '（后台模式）' : ''}`);
 if (isWin) {
+  for (const pid of staleServerPids()) {
+    try {
+      sh(`taskkill /PID ${pid} /T /F`);
+      log(`    已结束旧的后端进程（PID ${pid}）`);
+    } catch {
+      // 可能已经跟着父进程一起结束了
+    }
+  }
   for (const [pid, port] of listeningPids()) {
     if (pid === process.pid) continue;
     if (!isNode(pid)) {
