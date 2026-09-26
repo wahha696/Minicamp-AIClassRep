@@ -17,6 +17,7 @@ import { lanReadOnly } from './lan-guard.js';
 import { installCrashHandlers } from './crash-log.js';
 import { registerBusinessRoutes } from './routes/business.js';
 import { registerConnectRoutes } from './routes/connect.js';
+import { registerSettingsRoutes } from './routes/settings.js';
 import { DATA_DIR, WEB_DIST } from './paths.js';
 import type { HealthDTO } from './types.js';
 
@@ -58,6 +59,7 @@ app.get('/health', (c) => {
 
 registerBusinessRoutes(app);
 registerConnectRoutes(app);
+registerSettingsRoutes(app);
 
 // 00-总约定 §7：错误一律 { error: '中文' }；不存在的接口也不例外（默认是纯文本 404）
 app.notFound((c) => c.json({ error: '接口不存在' }, 404));

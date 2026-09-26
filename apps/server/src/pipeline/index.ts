@@ -1,6 +1,6 @@
 // 流水线对外的三个函数（00-总约定.md §6）。实现在 scheduler.ts / extract.ts。
 import { db } from '../db/index.js';
-import { env } from '../env.js';
+import { getLlmConfig } from '../llm-settings.js';
 import type { PipelineStats } from '../types.js';
 import { llmStats } from './stats.js';
 
@@ -16,6 +16,6 @@ export function getPipelineStats(): PipelineStats {
   return {
     filtered_count: filtered,
     llm_called_count: llmStats.called,
-    llm: env.LLM_API_KEY ? llmStats.llm : 'unconfigured',
+    llm: getLlmConfig().apiKey ? llmStats.llm : 'unconfigured',
   };
 }

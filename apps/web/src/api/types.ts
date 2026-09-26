@@ -101,3 +101,13 @@ export interface ScenarioDTO {
   title: string;
   count: number;
 }
+
+/** GET/PUT /api/settings/llm：连接页「AI 接入」卡片。key 只返回打码后的提示，不回传明文 */
+export type LlmProvider = 'deepseek';
+
+export interface LlmSettingsDTO {
+  provider: LlmProvider;
+  configured: boolean;
+  key_hint: string;                 // 例如 sk-****367f；没配为 ''
+  source: 'web' | 'env' | 'none';   // web=网页保存的；env=.env 里的
+}

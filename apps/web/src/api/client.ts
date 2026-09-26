@@ -9,6 +9,8 @@ import type {
   EventStatus,
   GroupDTO,
   HealthDTO,
+  LlmProvider,
+  LlmSettingsDTO,
   ScenarioDTO,
   TodayDTO,
 } from './types';
@@ -31,6 +33,8 @@ export interface Api {
   restartConnect(): Promise<{ ok: true }>;
   syncNow(): Promise<{ groups: number; messages: number }>;
   getHealth(): Promise<HealthDTO>;
+  getLlmSettings(): Promise<LlmSettingsDTO>;
+  saveLlmSettings(provider: LlmProvider, apiKey: string): Promise<LlmSettingsDTO>;
 }
 
 export const isMock = import.meta.env.VITE_MOCK === '1';
@@ -83,6 +87,8 @@ const realApi: Api = {
   restartConnect: () => request('POST', '/api/connect/restart'),
   syncNow: () => request('POST', '/api/sync'),
   getHealth: () => request('GET', '/health'),
+  getLlmSettings: () => request('GET', '/api/settings/llm'),
+  saveLlmSettings: (provider, apiKey) => request('PUT', '/api/settings/llm', { provider, api_key: apiKey }),
 };
 
 const api: Api = isMock ? mockApi : realApi;
@@ -103,6 +109,8 @@ export const {
   restartConnect,
   syncNow,
   getHealth,
+  getLlmSettings,
+  saveLlmSettings,
 } = api;
 
 // ===== 直接给 <a href> / <img src> 用的地址（不经 fetch）
