@@ -1,16 +1,20 @@
 // node:sqlite 封装：打开 data/classrep.db（WAL）并建表。
-import { DatabaseSync } from 'node:sqlite';
+// 单进程单库：整个后端都 import 这里的 db；openDb() 负责建表（幂等）。
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { DATA_DIR } from '../paths.js';
 
-const DB_FILE = join(DATA_DIR, 'classrep.db');
+export const DB_FILE = join(DATA_DIR, 'classrep.db');
 
 // 先保证 data/ 存在，再打开库文件（首次运行时 data/ 还没有）
 mkdirSync(DATA_DIR, { recursive: true });
 
-/** 单进程单库：data/classrep.db（B1 会补上 :memory: 的测试入口） */
-export const db: DatabaseSync = new DatabaseSync(DB_FILE);
+/**
+ * 唯一库实例。默认是 data/classrep.db；测试里可以 openDb(':memory:') 换成内存库。
+ * 别的模块请用 `db.prepare(...)`，不要在别处 new DatabaseSync。
+ */
+export let db: DatabaseSync = new DatabaseSync(DB_FILE);
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS groups (
@@ -66,9 +70,13 @@ CREATE TABLE IF NOT EXISTS event_history (
 );
 `;
 
-/** 建表（幂等）。index.ts 启动时调一次。 */
-export function openDb(): void {
-  mkdirSync(DATA_DIR, { recursive: true });
+/**
+ * 打开库并建表（幂等）。index.ts 启动时调一次，不带参数。
+ * 传 ':memory:' 则换成内存库（只有测试用），DATA_DIR 不会被创建。
+ */
+export function openDb(path: string = DB_FILE): void {
+  if (path !== ':memory:') mkdirSync(DATA_DIR, { recursive: true });
+  db = new DatabaseSync(path);
   db.exec('PRAGMA journal_mode=WAL');
   db.exec(SCHEMA);
 }
