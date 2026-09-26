@@ -69,7 +69,7 @@ export function buildEnv(src: Record<string, string | undefined>) {
     ENABLE_JEV: (src.ENABLE_JEV ?? 'true').trim().toLowerCase() === 'true',
     TYPESAFE_API_KEY: src.TYPESAFE_API_KEY ?? '',
     JEV_MODEL: src.JEV_MODEL?.trim() || 'jev-latest',
-    JEV_TIMEOUT_MS: positiveNum(src.JEV_TIMEOUT_MS, 5_000),
+    JEV_TIMEOUT_MS: positiveNum(src.JEV_TIMEOUT_MS, 3_000),
     DEMO_MODE: (src.DEMO_MODE ?? 'true').trim() === 'true',
     RAW_MSG_TTL_DAYS: positiveNum(src.RAW_MSG_TTL_DAYS, 7),
   };

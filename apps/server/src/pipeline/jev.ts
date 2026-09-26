@@ -1,22 +1,44 @@
-// Jev 快判：一批消息一次请求，每条消息各问一个窄问题。失败时返回 null，由流水线交给原有 LLM。
+// Jev 快判：一批消息一次请求，每条消息各问一个窄问题，返回每条的 noul 概率（「含日程信息」的概率）。
+// 这里只给分数，怎么用分数（丢弃 / 立刻处理 / 攒批）由 scheduler.ts 决定。
+// 失败时返回 null，由流水线把候选原样交给 LLM；失败后歇 JEV_BACKOFF_MS，免得每批都白等一次超时。
 import { z } from 'zod';
 import { env } from '../env.js';
 import type { Message } from '../types.js';
 import { jevStats } from './stats.js';
 
 const ENDPOINT = 'https://api.typesafe.ai/v1/systemone';
-// 这是保守的初始路由值，不代表已在真实群聊上校准。低于它才丢弃。
+
+// ---------- 路由阈值（校准见 jev-calibrate.ts；两种错误代价不对等：误丢一条通知 ≫ 多调一次 LLM） ----------
+
+/** 低于它才丢弃（不送 LLM）。只有在「真通知的最低分」明显高于它时才可以往上调。 */
 export const JEV_DROP_BELOW = 0.2;
+/** 不低于它视为「确定是通知」：跳过攒批等待，立刻交给 LLM 抽取 */
+export const JEV_URGENT_AT = 0.8;
+/** Jev 失败后多久内不再调用（期间候选直接交给 LLM） */
+export const JEV_BACKOFF_MS = 30_000;
 
 const answerSchema = z.object({ type: z.literal('noul'), noul: z.number().min(0).max(1) });
 const responseSchema = z.object({ answers: z.record(z.string(), answerSchema) });
 
-export async function filterWithJev(
+let backoffUntil = 0;
+
+/** 配置了且不在失败退避期内 */
+export function jevAvailable(now = Date.now()): boolean {
+  return env.ENABLE_JEV && !!env.TYPESAFE_API_KEY && now >= backoffUntil;
+}
+
+/** 测试用：清掉失败退避 */
+export function resetJevBackoff(): void {
+  backoffUntil = 0;
+}
+
+/** 返回与 candidates 一一对应的分数；未配置、退避中、候选为空或失败时返回 null */
+export async function scoreWithJev(
   candidates: Message[],
   context: Message[],
   groupName: string,
-): Promise<Message[] | null> {
-  if (!env.ENABLE_JEV || !env.TYPESAFE_API_KEY || candidates.length === 0) return null;
+): Promise<number[] | null> {
+  if (!jevAvailable() || candidates.length === 0) return null;
 
   const questions = Object.fromEntries(candidates.map((_, i) => [
     `message_${i}`,
@@ -31,6 +53,7 @@ export async function filterWithJev(
   ]));
 
   jevStats.called++;
+  const t0 = Date.now();
   try {
     const res = await fetch(ENDPOINT, {
       method: 'POST',
@@ -57,11 +80,14 @@ export async function filterWithJev(
       return score;
     });
     jevStats.state = 'ok';
-    return candidates.filter((_, i) => scores[i]! >= JEV_DROP_BELOW);
+    jevStats.lastMs = Date.now() - t0;
+    return scores;
   } catch (error) {
     jevStats.state = 'error';
+    backoffUntil = Date.now() + JEV_BACKOFF_MS;
     // 不打印请求内容和密钥；错误只影响这一层，原有 LLM 继续处理。
-    console.warn(`[pipeline] Jev 快判失败，已交给 LLM：${error instanceof Error ? error.name : 'unknown'}`);
+    const why = error instanceof Error ? `${error.name}${error.message.startsWith('HTTP') ? ` ${error.message}` : ''}` : 'unknown';
+    console.warn(`[pipeline] Jev 快判失败（${why}），${JEV_BACKOFF_MS / 1000}s 内候选直接交给 LLM`);
     return null;
   }
 }

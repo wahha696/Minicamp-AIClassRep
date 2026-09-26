@@ -9,7 +9,7 @@ import { MOCK_DIR } from '../paths.js';
 import type { Message } from '../types.js';
 import { type ExtractInput, type ExtractedEvent, extractEvents } from './extract.js';
 import { isNoise } from './filter.js';
-import { filterWithJev } from './jev.js';
+import { jevAvailable, scoreWithJev } from './jev.js';
 import { getPipelineStats } from './index.js';
 import { llmStats } from './stats.js';
 import { resetLlmRetry, runPipelineNow, tick } from './scheduler.js';
@@ -18,9 +18,14 @@ vi.mock('./extract.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./extract.js')>()),
   extractEvents: vi.fn(),
 }));
-vi.mock('./jev.js', () => ({ filterWithJev: vi.fn() }));
+vi.mock('./jev.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./jev.js')>()),
+  scoreWithJev: vi.fn(),
+  jevAvailable: vi.fn(),
+}));
 const extract = vi.mocked(extractEvents);
-const jev = vi.mocked(filterWithJev);
+const jev = vi.mocked(scoreWithJev);
+const jevOn = vi.mocked(jevAvailable);
 
 const NOW = Date.now();
 
@@ -74,6 +79,8 @@ beforeEach(() => {
   extract.mockResolvedValue([]);
   jev.mockReset();
   jev.mockResolvedValue(null);
+  jevOn.mockReset();
+  jevOn.mockReturnValue(false);
   resetLlmRetry();
 });
 afterEach(() => vi.restoreAllMocks());
@@ -154,7 +161,7 @@ describe('runPipelineNow', () => {
     messages[1]!.text = '今晚约饭吗同学们';
     messages[2]!.text = '实验报告改成周五交';
     ingestMessages(messages, 'demo');
-    jev.mockImplementationOnce(async (candidates) => [candidates[0]!, candidates[2]!]);
+    jev.mockResolvedValueOnce([0.95, 0.05, 0.9]);
     await runPipelineNow();
     expect(extract.mock.calls[0]![0].candidates.map((m) => m.text)).toEqual([
       '下周二交实验报告', '实验报告改成周五交',
@@ -165,7 +172,7 @@ describe('runPipelineNow', () => {
     const onlyChat = chat('demo-jev', 1, '晚上一起打游戏吗');
     onlyChat[0]!.message_id = 'another-chat';
     ingestMessages(onlyChat, 'demo');
-    jev.mockResolvedValueOnce([]);
+    jev.mockResolvedValueOnce([0.03]);
     extract.mockClear();
     await runPipelineNow();
     expect(extract).not.toHaveBeenCalled();
@@ -187,24 +194,29 @@ describe('runPipelineNow', () => {
     expect(count('processed = 0')).toBe(5);
   });
 
-  it('同一时刻只跑一个批次', async () => {
+  it('同一个群不并发，不同群并发处理', async () => {
     ingestMessages([...chat('demo-a', 40), ...chat('demo-b', 40)], 'demo');
-    let running = 0;
-    let peak = 0;
-    extract.mockImplementation(async () => {
-      peak = Math.max(peak, ++running);
+    const running = new Map<string, number>();
+    let peakSame = 0;
+    let peakAll = 0;
+    extract.mockImplementation(async (input) => {
+      const g = input.groupName;
+      running.set(g, (running.get(g) ?? 0) + 1);
+      peakSame = Math.max(peakSame, running.get(g)!);
+      peakAll = Math.max(peakAll, [...running.values()].reduce((a, b) => a + b, 0));
       await new Promise((r) => setTimeout(r, 5));
-      running--;
+      running.set(g, running.get(g)! - 1);
       return [];
     });
     await Promise.all([runPipelineNow(), runPipelineNow(), tick(NOW + 60_000)]);
-    expect(peak).toBe(1);
+    expect(peakSame).toBe(1);
+    expect(peakAll).toBe(2); // 两个群同时跑，不用排队
     expect(extract).toHaveBeenCalledTimes(4); // 两个群各 30 + 10
     expect(count('processed = 0')).toBe(0);
   });
 });
 
-describe('tick 阈值', () => {
+describe('tick 阈值（Jev 不可用时的老规则）', () => {
   it('不到 15 条且等了不到 20 秒 → 不处理；等够 20 秒 → 处理', async () => {
     const t0 = Date.now();
     ingestMessages(chat('demo-a', 5), 'demo');
@@ -221,6 +233,55 @@ describe('tick 阈值', () => {
     await tick(t0);
     expect(count("processed = 0 AND group_id = 'demo-a'")).toBe(0);
     expect(count("processed = 0 AND group_id = 'demo-b'")).toBe(3);
+  });
+});
+
+describe('tick：Jev 分数决定等多久', () => {
+  beforeEach(() => jevOn.mockReturnValue(true));
+
+  it('确定是通知（≥0.8）：群里安静 3 秒就处理，不等 20 秒', async () => {
+    const t0 = Date.now();
+    ingestMessages(chat('demo-u', 2, '明天下午两点 A301 小测'), 'demo');
+    jev.mockResolvedValueOnce([0.95, 0.4]);
+    await tick(t0 + 1_000); // 刚发完：先打分，还在等后续补充
+    expect(jev).toHaveBeenCalledOnce();
+    expect(count('processed = 0')).toBe(2);
+    await tick(t0 + 3_500);
+    expect(count('processed = 0')).toBe(0);
+    expect(jev).toHaveBeenCalledOnce(); // 批次复用分诊时的分数，不再请求 Jev
+    expect(extract.mock.calls[0]![0].candidates).toHaveLength(2);
+  });
+
+  it('全部确定不是（<0.2）：立刻收尾且不调 LLM', async () => {
+    const t0 = Date.now();
+    ingestMessages(chat('demo-d', 3, '今晚约饭吗同学们'), 'demo');
+    jev.mockResolvedValueOnce([0.05, 0.1, 0.02]);
+    await tick(t0 + 500);
+    expect(count('processed = 0')).toBe(0);
+    expect(count('filtered_out = 1')).toBe(3);
+    expect(extract).not.toHaveBeenCalled();
+  });
+
+  it('拿不准（0.2~0.8）：等 8 秒攒上下文再交给 LLM', async () => {
+    const t0 = Date.now();
+    ingestMessages(chat('demo-m', 2, '那下周还办吗'), 'demo');
+    jev.mockResolvedValueOnce([0.5, 0.3]);
+    await tick(t0 + 5_000);
+    expect(count('processed = 0')).toBe(2);
+    await tick(t0 + 8_500);
+    expect(count('processed = 0')).toBe(0);
+    expect(extract).toHaveBeenCalledOnce();
+  });
+
+  it('Jev 失败：退回老规则，候选全部交给 LLM', async () => {
+    const t0 = Date.now();
+    ingestMessages(chat('demo-f', 2, '明天考试地点有改动'), 'demo');
+    jev.mockResolvedValue(null);
+    await tick(t0 + 5_000);
+    expect(count('processed = 0')).toBe(2);
+    await tick(t0 + 25_000);
+    expect(count('processed = 0')).toBe(0);
+    expect(extract.mock.calls[0]![0].candidates).toHaveLength(2);
   });
 });
 

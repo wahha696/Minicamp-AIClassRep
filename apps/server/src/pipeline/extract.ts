@@ -248,6 +248,7 @@ export async function extractEvents(
     let raw: string;
     try {
       llmStats.called++;
+      const t0 = Date.now();
       const res = await llm.chat.completions.create({
         model: getLlmConfig().model,
         messages,
@@ -256,6 +257,7 @@ export async function extractEvents(
         max_tokens: 4096,
       });
       raw = res.choices[0]?.message.content?.trim() ?? '';
+      llmStats.lastMs = Date.now() - t0;
     } catch (e) {
       llmStats.llm = 'error';
       llmStats.failed++;
