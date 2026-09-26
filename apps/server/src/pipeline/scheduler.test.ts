@@ -1,0 +1,176 @@
+// 用 :memory: 库；extractEvents 换成假的，不调 LLM
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { db, openDb } from '../db/index.js';
+import { env } from '../env.js';
+import { ingestMessages } from '../ingest/index.js';
+import { MOCK_DIR } from '../paths.js';
+import type { Message } from '../types.js';
+import { type ExtractInput, type ExtractedEvent, extractEvents } from './extract.js';
+import { isNoise } from './filter.js';
+import { getPipelineStats } from './index.js';
+import { runPipelineNow, tick } from './scheduler.js';
+
+vi.mock('./extract.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./extract.js')>()),
+  extractEvents: vi.fn(),
+}));
+const extract = vi.mocked(extractEvents);
+
+const NOW = Date.now();
+
+/** 读一个剧本，按回放的方式换成 Message[] */
+function scenario(name: string): Message[] {
+  const sc = JSON.parse(readFileSync(join(MOCK_DIR, `${name}.json`), 'utf8')) as {
+    group: { id: string; name: string };
+    messages: { offset_minutes: number; sender: string; text: string }[];
+  };
+  return sc.messages.map((m, i) => ({
+    message_id: `demo-${name}-${i + 1}`,
+    group_id: sc.group.id,
+    group_name: sc.group.name,
+    sender_name: m.sender,
+    text: m.text,
+    sent_at: NOW + m.offset_minutes * 60_000,
+  }));
+}
+
+const chat = (group: string, n: number, text = '明天几点上课来着'): Message[] =>
+  Array.from({ length: n }, (_, i) => ({
+    message_id: `${group}-${i}`,
+    group_id: group,
+    group_name: group,
+    sender_name: '同学',
+    text,
+    sent_at: NOW + i * 1000,
+  }));
+
+const created = (input: ExtractInput): ExtractedEvent => ({
+  action: 'create',
+  update_of: null,
+  type: 'exam',
+  title: '高数小测',
+  description: '',
+  start_at: NOW + 86400_000,
+  end_at: null,
+  deadline_at: null,
+  location: 'A301',
+  action_required: null,
+  confidence: 0.9,
+  source_message_ids: [input.candidates[0]!.message_id],
+});
+
+const count = (where: string) =>
+  (db.prepare(`SELECT COUNT(*) AS n FROM messages WHERE ${where}`).get() as { n: number }).n;
+
+beforeEach(() => {
+  openDb(':memory:');
+  extract.mockReset();
+  extract.mockResolvedValue([]);
+});
+afterEach(() => vi.restoreAllMocks());
+
+describe('runPipelineNow', () => {
+  it('reschedule 剧本：全部置已处理，噪声置 filtered_out，按 30 条分批，事件入库', async () => {
+    const msgs = scenario('reschedule');
+    ingestMessages(msgs, 'demo');
+    extract.mockImplementationOnce(async (input) => [created(input)]);
+
+    await runPipelineNow();
+
+    expect(count('processed = 0')).toBe(0);
+    const noise = msgs.filter((m) => isNoise(m.text)).length;
+    expect(count('filtered_out = 1')).toBe(noise);
+    expect(getPipelineStats().filtered_count).toBe(noise);
+
+    // 68 条 → 30 + 30 + 8，每批都有候选
+    expect(extract).toHaveBeenCalledTimes(3);
+    const calls = extract.mock.calls.map(([input]) => input);
+    for (const input of calls) {
+      expect(input.groupName).toBe(msgs[0]!.group_name);
+      expect(input.candidates.every((m) => !isNoise(m.text))).toBe(true);
+    }
+    // 第 1 批没有上文；第 2 批的上文 = 之前最近的 ≤10 条非噪声消息（这里就是第 1 批的候选）
+    expect(calls[0]!.context).toEqual([]);
+    expect(calls[1]!.context).toEqual(calls[0]!.candidates.slice(-10));
+    // 第 3 批（8 条）的上文取满 10 条，且都早于本批
+    expect(calls[2]!.context).toHaveLength(10);
+    expect(calls[2]!.context.every((m) => m.sent_at < calls[2]!.candidates[0]!.sent_at)).toBe(true);
+    // 第 2 批起能看到第 1 批建的事件
+    expect(calls[1]!.activeEvents.map((e) => e.title)).toEqual(['高数小测']);
+
+    const ev = db.prepare('SELECT * FROM events').all() as { group_id: string }[];
+    expect(ev).toHaveLength(1);
+    expect(ev[0]!.group_id).toBe(msgs[0]!.group_id);
+  });
+
+  it('extract 出错也置已处理，不抛', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    ingestMessages(chat('demo-a', 20), 'demo');
+    extract.mockRejectedValue(new Error('boom'));
+    await expect(runPipelineNow()).resolves.toBeUndefined();
+    expect(count('processed = 0')).toBe(0);
+  });
+
+  it('候选全是噪声就不调 LLM', async () => {
+    ingestMessages(chat('demo-a', 20, '收到'), 'demo');
+    await runPipelineNow();
+    expect(extract).not.toHaveBeenCalled();
+    expect(count('filtered_out = 1')).toBe(20);
+  });
+
+  it('关掉的群不处理，也不会空转', async () => {
+    ingestMessages(chat('demo-off', 5), 'demo');
+    db.prepare("UPDATE groups SET enabled = 0 WHERE group_id = 'demo-off'").run();
+    await runPipelineNow();
+    expect(count('processed = 0')).toBe(5);
+  });
+
+  it('同一时刻只跑一个批次', async () => {
+    ingestMessages([...chat('demo-a', 40), ...chat('demo-b', 40)], 'demo');
+    let running = 0;
+    let peak = 0;
+    extract.mockImplementation(async () => {
+      peak = Math.max(peak, ++running);
+      await new Promise((r) => setTimeout(r, 5));
+      running--;
+      return [];
+    });
+    await Promise.all([runPipelineNow(), runPipelineNow(), tick(NOW + 60_000)]);
+    expect(peak).toBe(1);
+    expect(extract).toHaveBeenCalledTimes(4); // 两个群各 30 + 10
+    expect(count('processed = 0')).toBe(0);
+  });
+});
+
+describe('tick 阈值', () => {
+  it('不到 15 条且等了不到 20 秒 → 不处理；等够 20 秒 → 处理', async () => {
+    const t0 = Date.now();
+    ingestMessages(chat('demo-a', 5), 'demo');
+    await tick(t0 + 5_000);
+    expect(count('processed = 0')).toBe(5);
+    await tick(t0 + 60_000);
+    expect(count('processed = 0')).toBe(0);
+  });
+
+  it('攒够 15 条立刻处理', async () => {
+    const t0 = Date.now();
+    ingestMessages(chat('demo-a', 15), 'demo');
+    ingestMessages(chat('demo-b', 3), 'demo');
+    await tick(t0);
+    expect(count("processed = 0 AND group_id = 'demo-a'")).toBe(0);
+    expect(count("processed = 0 AND group_id = 'demo-b'")).toBe(3);
+  });
+});
+
+describe('getPipelineStats', () => {
+  it('没配 key 报 unconfigured', () => {
+    const key = env.LLM_API_KEY;
+    env.LLM_API_KEY = '';
+    expect(getPipelineStats().llm).toBe('unconfigured');
+    env.LLM_API_KEY = 'x';
+    expect(getPipelineStats().llm).not.toBe('unconfigured');
+    env.LLM_API_KEY = key;
+  });
+});
