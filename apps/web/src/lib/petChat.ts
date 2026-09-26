@@ -1,6 +1,7 @@
 // 桌宠对话框的纯逻辑：把用户的一句话映射成「回答 + 动作」。
-// 刻意做成规则引擎（不调 LLM、不发网络请求）：离线可用、零成本、毫秒级回复；
-// 以后要接 LLM，把 petReply 换成「LLM 优先、本文件兜底」即可，调用方不用改。
+// 规则引擎优先（不调 LLM、不发网络请求）：离线可用、零成本、毫秒级回复，还能执行动作；
+// 规则没命中的话（matched=false），组件再拿去问 DeepSeek（走后端 /api/pet/chat 代理），
+// LLM 也失败时才用本文件的兜底话术。调用方（Pet.tsx）不用关心这个先后顺序之外的细节。
 import type { ConnectState, EventDTO, GroupDTO } from '../api/types';
 import { petGreeting } from './pet';
 import { eventTimeText, hhmm } from './time';
@@ -21,6 +22,8 @@ export interface PetAnswer {
   action?: ChatAction;
   /** 需要群列表：组件先取 getGroups()，再用 groupListText 追加回答 */
   needGroups?: boolean;
+  /** 规则引擎是否命中；false = 兜底话术，组件可以拿同一句话去问 LLM */
+  matched: boolean;
 }
 
 export const QUICK_QUESTIONS: readonly string[] = ['今天有什么事', '接下来做什么', '最近截止', '同步一下'];
@@ -81,8 +84,14 @@ function deadlineText(events: readonly EventDTO[], now: number): string {
 /**
  * 把用户的一句话映射成回答。
  * 匹配顺序即优先级：导航 → 群 → 动作 → 查询 → 闲聊兜底。
+ * 命中任意规则 matched=true；只有最后走到兜底话术才是 false（调用方可以转问 LLM）。
  */
 export function petReply(input: string, ctx: ChatCtx): PetAnswer {
+  const ans = petReplyRules(input, ctx);
+  return { ...ans, matched: ans.text !== FALLBACK };
+}
+
+function petReplyRules(input: string, ctx: ChatCtx): Omit<PetAnswer, 'matched'> {
   const q = input.trim().toLowerCase();
   if (q.length === 0) return { text: '想说点什么呀？' };
   const has = (...words: string[]): boolean => words.some((w) => q.includes(w));

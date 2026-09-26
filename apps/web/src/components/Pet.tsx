@@ -3,7 +3,7 @@
 // - PET-1 素材：src/assets/nailong.jpg（奶龙图，约 1:1 的 JPG，圆角卡片 + 投影展示）；
 //   换素材直接替换 assets 里的图片文件即可，行为逻辑不动。
 // - PET-2 只在 md+ 显示：手机屏幕小、底部已有 Tab 栏，桌宠会挡内容。
-// - PET-3 交互：单击→跳一下并说一句；双击→打开对话框；按住拖动→拎起来，松手弹回地面；
+// - PET-3 交互：单击→跳一下并说一句；双击→打开对话框；按住拖动→全页面自由移动（上下左右都行）；
 //   右键→菜单（问话/走两步/跳页面/收起）。收起后右下角留半透明小按钮召回；
 //   位置与开关记 localStorage（classrep.pet.*），刷新后保持。
 // - PET-4 台词数据：60s 低频轮询 getToday（只读、失败静默降级为闲聊），不写任何接口。
@@ -15,6 +15,11 @@
 // - PET-8 系统联动：新事件播报（轮询 diff）→ 临期提醒（10/5/1 分钟各一次）→
 //   连接状态变化感知（中断/被踢/恢复）。对话框开着时，这些播报改走对话框，不打架。
 // - PET-9 深夜（23:00~6:00）自动睡觉：Zzz 浮标，不闲聊不散步，点了会嘟囔一句。
+// - PET-10 全页自由移动：不再只左右走，x/y 都可动、可拖到页面任意位置；
+//   气泡/菜单/对话框贴屏幕上沿时自动改到桌宠下方弹出。
+// - PET-11 高频自主活动：6~12s 一次概率触发散步或跳一下（原来 16~38s），睡觉/收起时不闹腾。
+// - PET-12 对话接入 DeepSeek：规则引擎（lib/petChat.ts）优先——命中即答还能执行动作；
+//   没命中才走 /api/pet/chat 由后端持 key 调 DeepSeek；LLM 失败回退规则兜底，用户无感。
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -25,6 +30,7 @@ import { usePolling } from '../hooks/usePolling';
 import { clamp, petGreeting, petLine } from '../lib/pet';
 import { groupListText, petReply, QUICK_QUESTIONS } from '../lib/petChat';
 import type { ChatAction } from '../lib/petChat';
+import { askPetLlm, llmAvailable } from '../lib/petLlm';
 import nailongUrl from '../assets/nailong.jpg';
 import './pet.css';
 
@@ -32,9 +38,10 @@ const SIZE = 92; // 本体宽度(px)，素材约 1:1，高约 90px
 const EDGE = 12; // 左右贴边留白(px)
 
 const STORE_X = 'classrep.pet.x';
+const STORE_Y = 'classrep.pet.y';
 const STORE_HIDDEN = 'classrep.pet.hidden';
 
-type Phase = 'idle' | 'walk' | 'drag' | 'drop';
+type Phase = 'idle' | 'walk' | 'drag';
 
 /** 对话框里的一条消息 */
 interface ChatMsg {
@@ -54,6 +61,11 @@ function writeStore(key: string, value: string): void {
 function xRange(): [number, number] {
   return [EDGE, Math.max(EDGE, window.innerWidth - SIZE - EDGE)];
 }
+const PET_H = 96; // 本体高约 90px（素材约 1:1）+ 影子/贴边余量
+/** 垂直活动范围：0 = 蹲在页面底边，hi = 顶到页面上沿还留一点空隙 */
+function yRange(): [number, number] {
+  return [0, Math.max(0, window.innerHeight - PET_H - 8)];
+}
 
 export default function Pet() {
   // ===== 位置与姿态 =====
@@ -62,7 +74,11 @@ export default function Pet() {
     const saved = Number(readStore(STORE_X));
     return Number.isFinite(saved) && saved >= EDGE ? clamp(saved, EDGE, hi) : hi; // 默认蹲右下角
   });
-  const [lift, setLift] = useState(0);
+  const [y, setY] = useState<number>(() => {
+    const hi = Math.max(0, (typeof window === 'undefined' ? 800 : window.innerHeight) - PET_H - 8);
+    const saved = Number(readStore(STORE_Y));
+    return Number.isFinite(saved) && saved > 0 ? clamp(saved, 0, hi) : 0; // 默认贴地
+  });
   const [phase, setPhase] = useState<Phase>('idle');
   const [facing, setFacing] = useState<1 | -1>(-1); // 默认面朝左（看着页面中间）
   const [walkDur, setWalkDur] = useState(1);
@@ -80,16 +96,16 @@ export default function Pet() {
 
   // 回调里要读「最新值」，用渲染期同步的 ref（与 usePolling 的 fnRef 同一写法）
   const xRef = useRef(x); xRef.current = x;
+  const yRef = useRef(y); yRef.current = y;
   const phaseRef = useRef(phase); phaseRef.current = phase;
   const menuRef = useRef(menuOpen); menuRef.current = menuOpen;
   const chatOpenRef = useRef(chatOpen); chatOpenRef.current = chatOpen;
   const msgsRef = useRef(msgs); msgsRef.current = msgs;
   const todayRef = useRef(data); todayRef.current = data;
   const connRef = useRef(conn); connRef.current = conn;
-  const drag = useRef<{ id: number; px: number; py: number; bx: number; bl: number; moved: boolean } | null>(null);
+  const drag = useRef<{ id: number; px: number; py: number; bx: number; by: number; moved: boolean } | null>(null);
   const speechTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const animSeq = useRef(0);
-  const dropSeq = useRef(0);
   const greetedRef = useRef(false);
   const lastClickRef = useRef(0);            // 双击判定
   const msgSeq = useRef(0);                  // 对话消息 id
@@ -120,9 +136,14 @@ export default function Pet() {
   }
 
   // ===== 对话（PET-7） =====
-  function pushMsg(role: ChatMsg['role'], text: string) {
+  function pushMsg(role: ChatMsg['role'], text: string): number {
     const id = ++msgSeq.current;
     setMsgs((ms) => [...ms, { id, role, text }]); // updater 保持纯净，StrictMode 下也安全
+    return id;
+  }
+  /** 把占位的「…」替换成真正的回答 */
+  function replaceMsg(id: number, text: string) {
+    setMsgs((ms) => ms.map((m) => (m.id === id ? { ...m, text } : m)));
   }
   function openChat() {
     if (speechTimer.current) clearTimeout(speechTimer.current);
@@ -139,13 +160,23 @@ export default function Pet() {
     if (text.length === 0) return;
     pushMsg('user', text);
     const t = todayRef.current;
-    const answer = petReply(text, {
+    const ctx = {
       now: Date.now(),
       summary: t?.summary,
       events: t?.events ?? [],
       connect: connRef.current?.state,
-    });
-    pushMsg('bot', answer.text);
+    };
+    const answer = petReply(text, ctx);
+    if (answer.matched || !llmAvailable()) {
+      // 规则命中（或 mock 模式）：直接回答，还能执行动作
+      pushMsg('bot', answer.text);
+    } else {
+      // PET-12：规则没命中 → 走后端 DeepSeek；失败/超时回退规则兜底话术
+      const id = pushMsg('bot', '…');
+      void askPetLlm(text, msgsRef.current, ctx)
+        .then((reply) => replaceMsg(id, reply))
+        .catch(() => replaceMsg(id, answer.text));
+    }
     if (answer.needGroups) {
       void getGroups()
         .then((gs) => pushMsg('bot', groupListText(gs)))
@@ -174,27 +205,41 @@ export default function Pet() {
     setAnim(kind);
     window.setTimeout(() => { if (animSeq.current === s) setAnim('none'); }, ms);
   }
-  const walkTo = useCallback((target: number) => {
+  const walkTo = useCallback((targetX: number, targetY?: number) => {
     if (phaseRef.current !== 'idle') return;
-    const [lo, hi] = xRange();
-    const t = clamp(target, lo, hi);
-    const dist = Math.abs(t - xRef.current);
-    if (dist < 12) return;
-    const dur = clamp(dist / 90, 0.7, 2.4); // 约 90px/s，快走不磨蹭
-    setFacing(t >= xRef.current ? 1 : -1);
+    const [xlo, xhi] = xRange();
+    const [ylo, yhi] = yRange();
+    const tx = clamp(targetX, xlo, xhi);
+    const ty = clamp(targetY ?? yRef.current, ylo, yhi);
+    const dx = tx - xRef.current;
+    const dy = ty - yRef.current;
+    if (Math.hypot(dx, dy) < 12) return;
+    const dur = clamp(Math.hypot(dx, dy) / 110, 0.6, 2.4); // 约 130px/s 的匀速小碎步
+    if (Math.abs(dx) > 6) setFacing(dx > 0 ? 1 : -1);
     setWalkDur(dur);
     setPhase('walk');
-    setX(t);
+    setX(tx);
+    setY(ty);
     window.setTimeout(() => {
       if (phaseRef.current === 'walk') {
         setPhase('idle');
-        writeStore(STORE_X, String(Math.round(t)));
+        writeStore(STORE_X, String(Math.round(tx)));
+        writeStore(STORE_Y, String(Math.round(ty)));
       }
     }, dur * 1000 + 100);
-  }, [setX]);
+  }, [setX, setY]);
   function stroll() {
-    const [lo, hi] = xRange();
-    walkTo(lo + Math.random() * (hi - lo));
+    // PET-10：全页面随机挑一个点，尽量离当前位置远一点，走起来才像散步
+    const [xlo, xhi] = xRange();
+    const [ylo, yhi] = yRange();
+    let tx = xRef.current;
+    let ty = yRef.current;
+    for (let i = 0; i < 5; i++) {
+      tx = xlo + Math.random() * (xhi - xlo);
+      ty = ylo + Math.random() * (yhi - ylo);
+      if (Math.hypot(tx - xRef.current, ty - yRef.current) > 120) break;
+    }
+    walkTo(tx, ty);
   }
   function hide() {
     setHidden(true);
@@ -273,7 +318,7 @@ export default function Pet() {
     return () => { alive = false; if (t) clearTimeout(t); };
   }, [hidden]);
 
-  // 随机散步：16~38s 一次概率触发
+  // 随机活动：PET-11，6~12s 一次概率触发——散步（全页随机点）为主，偶尔原地跳一下
   useEffect(() => {
     if (hidden) return;
     let alive = true;
@@ -281,23 +326,29 @@ export default function Pet() {
     const loop = () => {
       t = setTimeout(() => {
         if (!alive) return;
-        if (!document.hidden && phaseRef.current === 'idle' && !menuRef.current && !sleepingRef.current && Math.random() < 0.65) stroll();
+        if (!document.hidden && phaseRef.current === 'idle' && !menuRef.current && !sleepingRef.current) {
+          const roll = Math.random();
+          if (roll < 0.6) stroll();
+          else if (roll < 0.72) playAnim('hop', 640);
+        }
         loop();
-      }, 16_000 + Math.random() * 22_000);
+      }, 6_000 + Math.random() * 6_000);
     };
     loop();
     return () => { alive = false; if (t) clearTimeout(t); };
   }, [hidden]);
 
-  // 窗口变窄时别把自己挤出去
+  // 窗口变小（宽或高）时别把自己挤出屏幕
   useEffect(() => {
     const onResize = () => {
-      const [lo, hi] = xRange();
-      setX(clamp(xRef.current, lo, hi));
+      const [xlo, xhi] = xRange();
+      const [ylo, yhi] = yRange();
+      setX(clamp(xRef.current, xlo, xhi));
+      setY(clamp(yRef.current, ylo, yhi));
     };
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
-  }, [setX]);
+  }, [setX, setY]);
 
   // 右键菜单点外面就关
   useEffect(() => {
@@ -307,11 +358,11 @@ export default function Pet() {
     return () => document.removeEventListener('pointerdown', close);
   }, [menuOpen]);
 
-  // ===== 拖拽/单击/双击（PET-3） =====
+  // ===== 拖拽/单击/双击（PET-3）=====
   function onBodyPointerDown(e: ReactPointerEvent<HTMLDivElement>) {
     if (e.button !== 0) return; // 右键交给 contextmenu
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* 已释放，忽略 */ }
-    drag.current = { id: e.pointerId, px: e.clientX, py: e.clientY, bx: x, bl: lift, moved: false };
+    drag.current = { id: e.pointerId, px: e.clientX, py: e.clientY, bx: x, by: y, moved: false };
     setPhase('drag');
     setMenuOpen(false);
     animSeq.current++; // 作废进行中的动画
@@ -322,9 +373,10 @@ export default function Pet() {
     const dx = e.clientX - d.px;
     const dy = e.clientY - d.py;
     if (!d.moved) { if (Math.hypot(dx, dy) < 6) return; d.moved = true; }
-    const [lo, hi] = xRange();
-    setX(clamp(d.bx + dx, lo, hi));
-    setLift(clamp(d.bl - dy, 0, Math.max(60, window.innerHeight * 0.35)));
+    const [xlo, xhi] = xRange();
+    const [ylo, yhi] = yRange();
+    setX(clamp(d.bx + dx, xlo, xhi));
+    setY(clamp(d.by - dy, ylo, yhi)); // 往上拖 dy 为负 → y 增大
   }
   function endDrag(e: ReactPointerEvent<HTMLDivElement>, clicked: boolean) {
     const d = drag.current;
@@ -333,7 +385,6 @@ export default function Pet() {
     if (phaseRef.current !== 'drag') return;
     if (!d.moved && clicked) {
       setPhase('idle');
-      setLift(0);
       playAnim('hop', 640);
       const now = Date.now();
       const isDouble = now - lastClickRef.current < 350; // PET-7：双击开/关对话框
@@ -348,21 +399,11 @@ export default function Pet() {
       sayRefStable.current();
       return;
     }
-    // 松手：弹回地面 + 落地压扁
-    setPhase('drop');
-    setLift(0);
+    // 松手落地：压扁回弹一下，位置记住（PET-10 全页坐标）
+    setPhase('idle');
     writeStore(STORE_X, String(Math.round(xRef.current)));
-    const s = ++dropSeq.current;
-    window.setTimeout(() => {
-      if (dropSeq.current !== s || phaseRef.current !== 'drop') return;
-      setPhase('idle');
-      playAnim('land', 470);
-    }, 570);
-  }
-  function playAnim(kind: 'hop' | 'land', ms: number) {
-    const s = ++animSeq.current;
-    setAnim(kind);
-    window.setTimeout(() => { if (animSeq.current === s) setAnim('none'); }, ms);
+    writeStore(STORE_Y, String(Math.round(yRef.current)));
+    playAnim('land', 470);
   }
 
   // ===== 收起状态：右下角一个半透明小按钮召回 =====
@@ -385,45 +426,40 @@ export default function Pet() {
     );
   }
 
-  // 气泡/菜单/对话框贴边时别伸出屏幕外
+  // 气泡/菜单/对话框贴边时别伸出屏幕外（PET-10：含上下——桌宠靠上时改到本体下方弹出）
   const align = x < 150 ? 'left-0' : x > window.innerWidth - 210 ? 'right-0' : 'left-1/2 -translate-x-1/2';
   const chatAlign = x < 165 ? 'left-0' : x > window.innerWidth - 345 ? 'right-0' : 'left-1/2 -translate-x-1/2';
+  const nearTop = y > Math.max(0, window.innerHeight - 340); // 顶部留白不够放面板时，改从下方弹出
+  const upPos = 'bottom-full mb-3';
+  const downPos = 'top-full mt-3';
 
   return (
     <div
       className="fixed bottom-0 left-0 z-30 hidden md:block"
       style={{
         width: SIZE,
-        transform: `translate3d(${x}px, 0, 0)`,
+        transform: `translate3d(${x}px, ${-y}px, 0)`,
         transition: phase === 'walk' ? `transform ${walkDur}s ease-in-out` : 'none',
       }}
     >
-      {/* 地面影子：被拎起来时缩小变淡 */}
+      {/* 脚下影子：跟着本体走（全页坐标后影子和本体一起动） */}
       <div
         className="absolute bottom-[2px] left-1/2 h-2.5 rounded-[50%] bg-slate-900/15"
-        style={{
-          width: SIZE * 0.62,
-          opacity: Math.max(0.15, 0.8 - (lift / 240) * 0.65),
-          transform: `translateX(-50%) scaleX(${1 - (Math.min(lift, 240) / 240) * 0.45})`,
-        }}
+        style={{ width: SIZE * 0.62, transform: 'translateX(-50%)' }}
       />
 
-      {/* 本体：lift 只在这一层；位移全走 transform（PET-6） */}
+      {/* 本体：位移全走 transform（PET-6）；全页坐标见 PET-10 */}
       <div
         className={`pointer-events-auto absolute bottom-1 left-0 flex touch-none select-none items-end ${
           phase === 'drag' ? 'cursor-grabbing' : 'cursor-grab'
         }`}
-        style={{
-          transform: `translateY(${-lift}px)`,
-          transition: phase === 'drop' ? 'transform 0.55s cubic-bezier(0.3, 1.6, 0.5, 1)' : 'none',
-        }}
         onPointerDown={onBodyPointerDown}
         onPointerMove={onBodyPointerMove}
         onPointerUp={(e) => endDrag(e, true)}
         onPointerCancel={(e) => endDrag(e, false)}
         onContextMenu={(e) => { e.preventDefault(); setMenuOpen((v) => !v); }}
       >
-        {/* 翻面（袖章文字由 pet.css 反向翻回，见 PET-1） */}
+        {/* 翻面：素材整体左右镜像（面朝走路方向） */}
         <div
           className={facing === -1 ? 'pet-flipped' : undefined}
           style={{ transform: `scaleX(${facing})`, transition: 'transform 0.25s ease' }}
@@ -433,22 +469,22 @@ export default function Pet() {
           </div>
         </div>
 
-        {/* 台词气泡（对话框开着时统一走对话框，见 PET-8） */}
+        {/* 台词气泡（对话框开着时统一走对话框，见 PET-8；贴屏幕上沿时改到下方弹出） */}
         {speech && (
-          <div className={`absolute bottom-full mb-3 ${align}`} aria-live="polite">
+          <div className={`absolute ${nearTop ? downPos : upPos} ${align}`} aria-live="polite">
             <div
               key={speech.id}
               className="pet-pop pointer-events-none relative w-max max-w-56 rounded-2xl border border-slate-200 bg-white px-3.5 py-2 text-sm leading-relaxed text-slate-700 shadow-lg"
             >
               {speech.text}
-              <span className="absolute -bottom-[7px] left-1/2 h-3 w-3 -translate-x-1/2 rotate-45 border-b border-r border-slate-200 bg-white" />
+              <span className={`absolute left-1/2 h-3 w-3 -translate-x-1/2 rotate-45 border-b border-r border-slate-200 bg-white ${nearTop ? '-top-[7px] border-t border-b-0 border-r-0' : '-bottom-[7px]'}`} />
             </div>
           </div>
         )}
 
         {/* 右键菜单 */}
         {menuOpen && (
-          <div className={`absolute bottom-full mb-9 ${align}`} onPointerDown={(e) => e.stopPropagation()}>
+          <div className={`absolute ${nearTop ? 'top-full mt-9' : 'bottom-full mb-9'} ${align}`} onPointerDown={(e) => e.stopPropagation()}>
             <div className="pet-pop overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-xl">
               {[
                 { label: '找我问话', act: () => { setMenuOpen(false); openChat(); } },
@@ -478,9 +514,9 @@ export default function Pet() {
           </div>
         )}
 
-        {/* PET-7 双击对话框 */}
+        {/* PET-7 双击对话框（贴屏幕上沿时改到本体下方弹出） */}
         {chatOpen && (
-          <div className={`absolute bottom-full mb-3 w-80 ${chatAlign}`}>
+          <div className={`absolute ${nearTop ? 'top-full mt-3' : 'bottom-full mb-3'} w-80 ${chatAlign}`}>
             <PetChatPanel msgs={msgs} onSend={send} onClose={() => setChatOpen(false)} />
           </div>
         )}

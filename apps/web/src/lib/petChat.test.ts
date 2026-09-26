@@ -104,4 +104,9 @@ describe('对话框：状态与闲聊', () => {
   it('空输入不崩', () => {
     expect(petReply('  ', ctx()).text.length).toBeGreaterThan(0);
   });
+
+  it('matched 标记：命中规则为 true，只有兜底是 false（LLM 路由依据，PET-12）', () => {
+    expect(petReply('同步一下', ctx()).matched).toBe(true);
+    expect(petReply('给我讲个笑话吧', ctx()).matched).toBe(false);
+  });
 });
