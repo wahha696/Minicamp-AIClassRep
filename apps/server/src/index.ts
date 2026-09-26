@@ -132,6 +132,10 @@ async function listenWithFallback(): Promise<number> {
   throw new Error(`端口 ${START_PORT}~${END_PORT} 都被占用了`);
 }
 
+// 未捕获异常：中文打印 + 追加写日志，进程不退出（演示时不能因为一条坏消息就整个挂掉）。
+// 放在 openDb() 之前：启动阶段（建库、建目录）出问题也要能记下来。防 EPIPE 死循环 / 日志上限见 crash-log.ts
+installCrashHandlers(join(DATA_DIR, 'logs', 'server.log'));
+
 openDb();
 
 const port = await listenWithFallback();
@@ -177,7 +181,3 @@ process.on('exit', () => {
     // 退出路径上不再抛
   }
 });
-
-// ===== 未捕获异常：中文打印 + 追加写日志，进程不退出（演示时不能因为一条坏消息就整个挂掉）
-// 防 EPIPE 死循环 / 日志上限见 crash-log.ts
-installCrashHandlers(join(DATA_DIR, 'logs', 'server.log'));
