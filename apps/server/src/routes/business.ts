@@ -1,9 +1,12 @@
-// 业务路由：今日 / 事件查询 / 事件详情 / 改状态 / 导出 .ics。主人是 B。
-// 群管理（B5）、演示（B6）后续补。
+// 业务路由：今日 / 事件查询 / 事件详情 / 改状态 / 导出 .ics / 群管理 / 演示。主人是 B。
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import { db } from '../db/index.js';
+import { env } from '../env.js';
 import { buildIcs } from '../ics.js';
+import { buildDemoMessages, listScenarios, parseImportedText } from '../ingest/demo.js';
+import { ingestMessages } from '../ingest/index.js';
+import { runPipelineNow } from '../pipeline/index.js';
 import type {
   EventDTO,
   EventDetailDTO,
@@ -150,6 +153,8 @@ function buildSummary(events: EventDTO[], now: number): string {
 const EVENT_STATUSES = ['active', 'cancelled', 'done', 'pending_confirm'] as const;
 const patchEventSchema = z.object({ status: z.enum(EVENT_STATUSES) });
 const patchGroupSchema = z.object({ enabled: z.boolean() });
+const replaySchema = z.object({ scenario: z.string().min(1) });
+const importSchema = z.object({ groupName: z.string().default(''), text: z.string().min(1) });
 
 /** '?from=&to=' → 毫秒；返回 null 表示格式不对 */
 function parseRange(from: string | undefined, to: string | undefined): { from?: number; to?: number } | null {
@@ -390,6 +395,83 @@ export function registerBusinessRoutes(app: Hono): void {
       throw err;
     }
     return c.json({ ok: true });
+  });
+
+  // ===== 演示与粘贴导入（B6）
+
+  // 可用剧本列表
+  app.get('/api/demo/scenarios', (c) => c.json(listScenarios()));
+
+  // 回放剧本：注入后立即跑一次流水线
+  app.post('/api/demo/replay', async (c) => {
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      return c.json({ error: '请求体不是合法 JSON' }, 400);
+    }
+    const parsed = replaySchema.safeParse(raw);
+    if (!parsed.success) return c.json({ error: '需要 { scenario: "剧本名" }' }, 400);
+
+    const msgs = buildDemoMessages(parsed.data.scenario);
+    if (msgs === null) return c.json({ error: '剧本不存在' }, 404);
+
+    const { inserted } = ingestMessages(msgs, 'demo');
+    await runPipelineNow();
+    return c.json({ injected: inserted });
+  });
+
+  // 清空演示数据：所有 demo- 开头的群及其全部数据
+  app.post('/api/demo/reset', (c) => {
+    if (!env.DEMO_MODE) return c.json({ error: '演示模式已关闭' }, 403);
+    const demoGroups = db
+      .prepare("SELECT group_id FROM groups WHERE group_id LIKE 'demo-%'")
+      .all() as unknown as { group_id: string }[];
+
+    const delHistory = db.prepare(
+      'DELETE FROM event_history WHERE event_id IN (SELECT id FROM events WHERE group_id = ?)',
+    );
+    const delSources = db.prepare(
+      'DELETE FROM event_sources WHERE event_id IN (SELECT id FROM events WHERE group_id = ?)',
+    );
+    const delEvents = db.prepare('DELETE FROM events WHERE group_id = ?');
+    const delMessages = db.prepare('DELETE FROM messages WHERE group_id = ?');
+    const delGroup = db.prepare('DELETE FROM groups WHERE group_id = ?');
+
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const { group_id } of demoGroups) {
+        delHistory.run(group_id);
+        delSources.run(group_id);
+        delEvents.run(group_id);
+        delMessages.run(group_id);
+        delGroup.run(group_id);
+      }
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+    return c.json({ ok: true });
+  });
+
+  // 粘贴一段聊天记录 → 解析成消息进流水线
+  app.post('/api/import/text', async (c) => {
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      return c.json({ error: '请求体不是合法 JSON' }, 400);
+    }
+    const parsed = importSchema.safeParse(raw);
+    if (!parsed.success) return c.json({ error: '需要 { groupName, text }' }, 400);
+
+    const msgs = parseImportedText(parsed.data.groupName, parsed.data.text);
+    if (msgs.length === 0) return c.json({ error: '没解析出任何消息' }, 400);
+
+    const { inserted } = ingestMessages(msgs, 'import');
+    await runPipelineNow();
+    return c.json({ messages: inserted });
   });
 }
 
