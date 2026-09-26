@@ -292,6 +292,11 @@ export function getOnebotFacts(): OnebotFacts {
   };
 }
 
+/** WS 已连上且已收到 lifecycle self_id（= online，POST /api/sync 用） */
+export function isOnline(): boolean {
+  return ws !== null && ws.readyState === WebSocket.OPEN && selfId !== null;
+}
+
 // ===== 工具 =====
 
 function str(v: unknown): string {
