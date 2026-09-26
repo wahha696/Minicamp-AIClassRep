@@ -1,10 +1,8 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { isNoise } from './filter';
-
-const MOCK_DIR = fileURLToPath(new URL('../../../../data/mock/', import.meta.url));
+import { MOCK_DIR } from '../paths.js';
+import { isNoise } from './filter.js';
 
 describe('isNoise', () => {
   it.each([
