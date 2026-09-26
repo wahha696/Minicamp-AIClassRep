@@ -2,8 +2,10 @@
 // 状态来自全局 ConnectStatusProvider（每 2s 轮询），这里不再单独轮询。
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getLlmSettings, qrcodeUrl, restartConnect, saveLlmSettings } from '../api/client';
-import type { LlmSettingsDTO } from '../api/types';
+import { getLlmSettings, logoutConnect, qrcodeUrl, restartConnect, saveLlmSettings } from '../api/client';
+import type { ConnectStatusDTO, LlmSettingsDTO } from '../api/types';
+import { qqAvatarUrl } from '../components/Avatar';
+import ConfirmDialog from '../components/ConfirmDialog';
 import { useConnectStatus } from '../components/ConnectStatus';
 import { useToast } from '../components/Toast';
 import { toastError } from '../lib/errors';
@@ -123,8 +125,12 @@ export default function Connect() {
     }
   }
 
+  const showAccount = !!data?.uin && state !== 'waiting_qr';
+
   return (
-    <section className="mx-auto max-w-md space-y-8 py-6 text-center">
+    <div className={`mx-auto py-6 ${showAccount ? 'max-w-3xl md:flex md:items-start md:gap-8' : 'max-w-md'}`}>
+    {showAccount && data && <AccountCard status={data} onLoggedOut={refresh} />}
+    <section className="mx-auto w-full max-w-md space-y-8 text-center md:order-first">
       <div>
         <h2 className="mb-3 text-left text-sm font-semibold text-slate-500">QQ 连接</h2>
         {body}
@@ -163,6 +169,84 @@ export default function Connect() {
         </div>
       )}
     </section>
+    </div>
+  );
+}
+
+/** 右侧账号卡片：大头像 + QQ 名称 + 退出登录（退出后回到扫码，另一个人可以登录自己的号） */
+function AccountCard({ status, onLoggedOut }: { status: ConnectStatusDTO; onLoggedOut: () => Promise<unknown> | void }) {
+  const toast = useToast();
+  const uin = status.uin!;
+  const online = status.state === 'online';
+  const [imgFailed, setImgFailed] = useState(false);
+  const [confirm, setConfirm] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  async function onLogout() {
+    setBusy(true);
+    try {
+      await logoutConnect();
+      await onLoggedOut();
+      setConfirm(false);
+      toast('已退出登录，请用要登录的 QQ 扫码');
+    } catch (e) {
+      toastError(toast, e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <aside className="mb-8 rounded-2xl border border-slate-200 bg-white px-6 py-7 text-center shadow-sm md:mb-0 md:mt-8 md:w-64 md:shrink-0">
+      <div className="relative mx-auto h-24 w-24">
+        {imgFailed ? (
+          <span className="flex h-full w-full items-center justify-center rounded-full border border-slate-200 bg-slate-100 text-slate-400">
+            <svg viewBox="0 0 24 24" className="h-12 w-12" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" aria-hidden>
+              <circle cx="12" cy="8" r="4" />
+              <path d="M4 21a8 8 0 0 1 16 0" />
+            </svg>
+          </span>
+        ) : (
+          <img
+            src={qqAvatarUrl(uin).replace('s=100', 's=640')}
+            alt=""
+            referrerPolicy="no-referrer"
+            onError={() => setImgFailed(true)}
+            className="h-full w-full rounded-full border border-slate-200 bg-slate-100 object-cover"
+          />
+        )}
+        <span
+          className={`absolute bottom-1 right-1 h-4 w-4 rounded-full border-2 border-white ${online ? 'bg-emerald-500' : 'bg-slate-300'}`}
+          aria-hidden
+        />
+      </div>
+      <div className="mt-4 truncate text-lg font-semibold text-slate-900" title={status.nickname ?? uin}>
+        {status.nickname ?? `QQ ${uin}`}
+      </div>
+      <div className="mt-0.5 text-sm text-slate-400">
+        {status.nickname ? `${uin} · ` : ''}
+        {online ? '已连接' : '未连接'}
+      </div>
+      <button
+        type="button"
+        onClick={() => setConfirm(true)}
+        className="mt-6 w-full rounded-xl border border-rose-200 py-2.5 text-sm font-medium text-rose-600 hover:bg-rose-50"
+      >
+        退出登录
+      </button>
+
+      <ConfirmDialog
+        open={confirm}
+        title="退出当前 QQ？"
+        confirmText="退出登录"
+        danger
+        busy={busy}
+        onConfirm={() => void onLogout()}
+        onCancel={() => setConfirm(false)}
+      >
+        退出后回到扫码页，可以换另一个 QQ 号登录。已整理的群和日程会保留。
+      </ConfirmDialog>
+    </aside>
   );
 }
 

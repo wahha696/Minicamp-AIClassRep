@@ -75,6 +75,7 @@ export interface GroupDTO {
 export interface ConnectStatusDTO {
   state: ConnectState;
   uin?: string;
+  nickname?: string;    // online 时登录者的 QQ 昵称（get_login_info；取不到就没有）
   since: number;        // 进入当前状态的时间
   message?: string;     // error 时的用户文案（架构.md §7）
   first_run: boolean;   // 从未登录过（无 uin）且库里没有任何消息/事件 → 前端拦到 /connect

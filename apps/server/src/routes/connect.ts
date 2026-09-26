@@ -4,7 +4,7 @@ import type { Hono } from 'hono';
 import { syncHistory } from '../ingest/history.js';
 import { QRCODE_PATH } from '../napcat/paths.js';
 import { isOnline } from '../napcat/onebot.js';
-import { restartNapcat } from '../napcat/index.js';
+import { logoutNapcat, restartNapcat } from '../napcat/index.js';
 import { getConnectStatus } from '../napcat/state.js';
 
 export function registerConnectRoutes(app: Hono): void {
@@ -33,6 +33,16 @@ export function registerConnectRoutes(app: Hono): void {
       return c.json({ ok: true });
     } catch (err) {
       return c.json({ error: `重启采集端失败：${err instanceof Error ? err.message : String(err)}` }, 500);
+    }
+  });
+
+  // POST /api/connect/logout：退出当前 QQ（忘掉 QQ 号 + 重启采集端）→ 回到扫码，可换号登录；数据保留
+  app.post('/api/connect/logout', async (c) => {
+    try {
+      await logoutNapcat();
+      return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: `退出登录失败：${err instanceof Error ? err.message : String(err)}` }, 500);
     }
   });
 

@@ -16,7 +16,7 @@ export default function Avatar({ className = '' }: { className?: string }) {
   const [failedUin, setFailedUin] = useState<string | null>(null);
   const showImg = uin && failedUin !== uin;
 
-  const title = uin ? `QQ ${uin}${online ? ' · 已连接' : ' · 未连接'}` : '未登录 QQ，点击去连接';
+  const title = uin ? `${data?.nickname ? data.nickname + ' · ' : ''}QQ ${uin}${online ? ' · 已连接' : ' · 未连接'}` : '未登录 QQ，点击去连接';
 
   return (
     <Link

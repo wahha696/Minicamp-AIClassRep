@@ -31,6 +31,11 @@ export function setUin(uin: string, settingsDir: string = DATA_DIR): void {
   writeFileSync(join(settingsDir, 'settings.json'), `${JSON.stringify({ uin }, null, 2)}\n`, 'utf8');
 }
 
+/** 忘掉记住的 QQ 号（退出登录用）：下次 spawn 不带 -q，采集端就会出二维码 */
+export function clearUin(settingsDir: string = DATA_DIR): void {
+  rmSync(join(settingsDir, 'settings.json'), { force: true });
+}
+
 // ===== 供 state.ts（A5）读取的进程事实 =====
 
 export interface ManagerFacts {
