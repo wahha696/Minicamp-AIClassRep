@@ -97,7 +97,7 @@ export default function Groups() {
             type="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="搜索群名或群号"
+            placeholder="搜索群名或群号，打几个字就行，如「高数班」"
             aria-label="搜索群"
             className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
           />
@@ -106,7 +106,7 @@ export default function Groups() {
 
       {shown && data!.length > 0 && shown.length === 0 && (
         <div className="mt-4 rounded-xl border border-dashed border-slate-300 bg-white px-6 py-10 text-center text-sm text-slate-500">
-          没有找到包含「{query.trim()}」的群
+          没有找到和「{query.trim()}」相关的群
         </div>
       )}
 

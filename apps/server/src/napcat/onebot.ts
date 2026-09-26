@@ -3,7 +3,7 @@
 // 铁律：任何解析/处理异常都 catch，绝不让连接断掉。
 import { randomUUID } from 'node:crypto';
 import { ingestMessages, upsertGroup } from '../ingest/index.js';
-import { killTree, setUin } from './manager.js';
+import { getUin, killTree, setUin } from './manager.js';
 import type { Message } from '../types.js';
 
 const WS_URL = 'ws://127.0.0.1:3001';
@@ -167,10 +167,60 @@ function handleMessage(text: string): void {
   }
 
   // 4) 群消息（自己发的以 post_type = message_sent 推送，FR-1.2）
+  //    @规则：@了别人（没 @全体、也没 @我）的消息直接忽略，不入库
   if ((obj.post_type === 'message' || obj.post_type === 'message_sent') && obj.message_type === 'group') {
+    if (mentionOf(obj.message, currentSelfId()) === 'other') return;
     const m = toMessage(obj);
     if (m !== null) ingestMessages([m], 'onebot');
   }
+}
+
+// ===== @ 规则 =====
+
+/**
+ * 一条消息的 @ 指向：
+ * - 'none'  没有 @ 任何人 → 视为全体须知，照常处理
+ * - 'all'   @全体成员 → 照常处理
+ * - 'me'    @了我自己 → 照常处理
+ * - 'other' 只 @了别人 → 与我无关，忽略
+ * selfId 不知道（还没登录过）时无法判断是不是 @我，按 'me' 放行，宁可多收不漏收。
+ */
+export type Mention = 'none' | 'all' | 'me' | 'other';
+
+export function mentionOf(segments: unknown, selfId: string | null | undefined): Mention {
+  try {
+    if (!Array.isArray(segments)) return 'none';
+    let sawAt = false;
+    for (const seg of segments) {
+      if (seg === null || typeof seg !== 'object' || Array.isArray(seg)) continue;
+      const s = seg as Json;
+      if (str(s.type) !== 'at') continue;
+      sawAt = true;
+      const data = (s.data !== null && typeof s.data === 'object' && !Array.isArray(s.data) ? s.data : {}) as Json;
+      const qq = str(data.qq);
+      if (qq === 'all') return 'all';
+      if (!selfId || qq === selfId) return 'me';
+    }
+    return sawAt ? 'other' : 'none';
+  } catch {
+    return 'none'; // 解析出错不能丢消息
+  }
+}
+
+/** 当前登录的 QQ 号：本次运行的 lifecycle 优先，其次 settings.json 里记住的 */
+function currentSelfId(): string | null {
+  if (selfId !== null) return selfId;
+  try {
+    return getUin() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** 历史补齐用：这条历史消息是否只 @了别人（是则跳过） */
+export function isMentionOther(item: unknown): boolean {
+  if (item === null || typeof item !== 'object' || Array.isArray(item)) return false;
+  return mentionOf((item as Json).message, currentSelfId()) === 'other';
 }
 
 /** lifecycle 后异步执行：refreshGroups → syncHistory。动态 import 避免 onebot ⇄ history 加载环。 */

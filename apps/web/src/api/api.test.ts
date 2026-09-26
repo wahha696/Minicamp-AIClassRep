@@ -145,6 +145,8 @@ describe('真实模式（fetch 打桩）', () => {
     await c.restartConnect();
     await c.syncNow();
     await c.getHealth();
+    await c.getLlmSettings();
+    await c.saveLlmSettings('deepseek', 'sk-12345678abcd');
     expect(calls).toEqual([
       { method: 'GET', url: '/api/today' },
       { method: 'GET', url: '/api/events' },
@@ -162,6 +164,8 @@ describe('真实模式（fetch 打桩）', () => {
       { method: 'POST', url: '/api/connect/restart' },
       { method: 'POST', url: '/api/sync' },
       { method: 'GET', url: '/health' },
+      { method: 'GET', url: '/api/settings/llm' },
+      { method: 'PUT', url: '/api/settings/llm', body: { provider: 'deepseek', api_key: 'sk-12345678abcd' } },
     ]);
     expect(c.exportIcsUrl(1, 2)).toBe('/api/export.ics?from=1&to=2');
     expect(c.eventIcsUrl(5)).toBe('/api/events/5/export.ics');
