@@ -38,7 +38,8 @@ describe('segmentsToText（FR-1.3 消息段 → 纯文本）', () => {
 
   it('未知类型与畸形段不抛异常，逐段兜底', () => {
     expect(segmentsToText([{ type: 'whatever', data: {} }])).toBe('[消息]');
-    expect(segmentsToText([null, 42, 'str', { data: {} }, { type: 'text' }])).toBe('[消息][消息]');
+    // null/42/'str' → [消息]；{data:{}} 无 type → [消息]；{type:'text'} 无文本 → 空
+    expect(segmentsToText([null, 42, 'str', { data: {} }, { type: 'text' }])).toBe('[消息][消息][消息][消息]');
     expect(segmentsToText(undefined)).toBe('[消息]');
     expect(segmentsToText(null)).toBe('[消息]');
   });
