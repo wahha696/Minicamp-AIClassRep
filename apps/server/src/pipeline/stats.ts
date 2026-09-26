@@ -2,7 +2,8 @@
 // filtered_count 不在这里，它直接从库里 COUNT。
 import type { PipelineStats } from '../types.js';
 
+/** llm：最近一次调用的结果；配了 key 但还没调用过算 ok（没配 key 由 getPipelineStats 报 unconfigured） */
 export const llmStats: { llm: PipelineStats['llm']; called: number } = {
-  llm: 'unconfigured',
+  llm: 'ok',
   called: 0,
 };

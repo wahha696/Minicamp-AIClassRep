@@ -1,18 +1,21 @@
-// 流水线入口（规则过滤 → LLM 提取 → Reconcile）。主人是 C。
-// B0 只给能编译的空实现。
+// 流水线对外的三个函数（00-总约定.md §6）。实现在 scheduler.ts / extract.ts。
+import { db } from '../db/index.js';
+import { env } from '../env.js';
 import type { PipelineStats } from '../types.js';
+import { llmStats } from './stats.js';
 
-/** 调度器：自己轮询 messages.processed=0，别人入库后不需要通知它。实现见 C。 */
-export function startScheduler(): void {
-  // 空实现
-}
+export { runPipelineNow, startScheduler } from './scheduler.js';
 
-/** 立即跑一批（演示回放后调用）。实现见 C。 */
-export async function runPipelineNow(): Promise<void> {
-  // 空实现
-}
-
-/** 累计统计，给 /health 用。实现见 C。 */
 export function getPipelineStats(): PipelineStats {
-  return { filtered_count: 0, llm_called_count: 0, llm: 'unconfigured' };
+  let filtered = 0;
+  try {
+    filtered = (db.prepare('SELECT COUNT(*) AS n FROM messages WHERE filtered_out = 1').get() as { n: number }).n;
+  } catch {
+    // 库没打开时 /health 照样能返回
+  }
+  return {
+    filtered_count: filtered,
+    llm_called_count: llmStats.called,
+    llm: env.LLM_API_KEY ? llmStats.llm : 'unconfigured',
+  };
 }
