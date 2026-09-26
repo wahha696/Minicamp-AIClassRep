@@ -5,7 +5,7 @@ import Layout from './components/Layout';
 import { ToastProvider } from './components/Toast';
 import Connect from './pages/Connect';
 import Groups from './pages/Groups';
-import Placeholder from './pages/Placeholder';
+import Demo from './pages/Demo';
 import Today from './pages/Today';
 import Week from './pages/Week';
 
@@ -20,7 +20,7 @@ export default function App() {
               <Route path="week" element={<Week />} />
               <Route path="groups" element={<Groups />} />
               <Route path="connect" element={<Connect />} />
-              <Route path="demo" element={<Placeholder title="演示控制台" task="D7" />} />
+              <Route path="demo" element={<Demo />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>
           </Route>
