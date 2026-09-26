@@ -173,5 +173,20 @@ describe('真实模式（fetch 打桩）', () => {
     await expect(c.syncNow()).rejects.toMatchObject({ message: 'QQ 未连接', status: 409 });
     reply = { status: 403, body: { error: '局域网只读' } };
     await expect(c.patchEvent(1, 'done')).rejects.toMatchObject({ message: '局域网只读', status: 403 });
+    reply = { status: 404, body: { error: '接口不存在' } };
+    await expect(c.getToday()).rejects.toMatchObject({ message: '接口不存在', status: 404 });
+  });
+
+  it('响应不是 JSON（旧后端的纯文本 404）时也给出可读错误', async () => {
+    const c = await loadClient(false);
+    vi.stubGlobal('fetch', async () => new Response('404 Not Found', { status: 404 }));
+    await expect(c.getToday()).rejects.toMatchObject({ message: '请求失败（404）', status: 404 });
+  });
+
+  it('局域网写操作 403 统一提示「请在电脑上操作」', async () => {
+    const { errorText } = await import('../lib/errors');
+    const { ApiError } = await import('./error');
+    expect(errorText(new ApiError('局域网访问只读', 403))).toBe('请在电脑上操作');
+    expect(errorText(new ApiError('QQ 未连接', 409))).toBe('QQ 未连接');
   });
 });
