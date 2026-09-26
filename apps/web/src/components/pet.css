@@ -1,0 +1,48 @@
+/* Pet.tsx 专用样式。所有动画只动 transform/opacity，不触发布局重排。 */
+
+/* 待机呼吸 */
+@keyframes pet-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+/* 走路摇摆 */
+@keyframes pet-waddle {
+  0%, 100% { transform: rotate(-5deg); }
+  50% { transform: rotate(5deg) translateY(-3px); }
+}
+/* 被点击后开心跳一下（带起跳拉伸与落地压扁） */
+@keyframes pet-hop {
+  0% { transform: translateY(0) scale(1, 1); }
+  30% { transform: translateY(-16px) scale(0.96, 1.06); }
+  60% { transform: translateY(0) scale(1.1, 0.9); }
+  78% { transform: translateY(-5px) scale(1, 1); }
+  100% { transform: translateY(0) scale(1, 1); }
+}
+/* 松手落地的压扁回弹 */
+@keyframes pet-land {
+  0% { transform: scale(1, 1); }
+  35% { transform: scale(1.15, 0.85); }
+  100% { transform: scale(1, 1); }
+}
+/* 气泡/菜单弹出 */
+@keyframes pet-pop {
+  from { opacity: 0; transform: translateY(8px) scale(0.92); }
+}
+
+.pet-bob { animation: pet-bob 3.2s ease-in-out infinite; }
+.pet-waddle { animation: pet-waddle 0.42s ease-in-out infinite; }
+.pet-hop { animation: pet-hop 0.62s ease-in-out; }
+.pet-land { animation: pet-land 0.45s ease-out; }
+.pet-pop { animation: pet-pop 0.22s ease-out; }
+
+/* 睡觉时的 Zzz 轻轻飘 */
+@keyframes pet-zzz {
+  0%, 100% { transform: translateY(0); opacity: 0.55; }
+  50% { transform: translateY(-3px); opacity: 1; }
+}
+.pet-zzz { animation: pet-zzz 2.6s ease-in-out infinite; }
+
+/* 系统开了「减少动态效果」时停掉循环动画（PET-6）；位移动画保留，保证交互可用 */
+@media (prefers-reduced-motion: reduce) {
+  .pet-bob, .pet-waddle, .pet-zzz { animation: none; }
+}
