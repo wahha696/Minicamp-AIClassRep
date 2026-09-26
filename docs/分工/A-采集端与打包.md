@@ -50,6 +50,7 @@ apps/server/src/routes/connect.ts   /api/connect/*、/api/sync
 - `spawnNapcat(uin?: string)`：删 `cache/qrcode.png` → 按 `NapCat接口规格.md` §1 的代码 spawn → stdout/stderr 追加写 `data/logs/napcat.log`。
 - 监控退出：非主动 kill 的退出 → 1s 后自动重新 spawn（带 `-q`）；60s 内退出 ≥ 3 次 → `error`，不再自动重启。
 - `killTree()`：`taskkill /T /F /PID <pid>`。
+- `clearUin()` + `logoutNapcat()`：退出登录用，删掉 settings.json 后走 `restart()`，因为没有 uin，spawn 不带 `-q`，会出新二维码。onebot 在 online 后调 `get_login_info` 记下昵称（`getSelfNickname()`），state 在 online 时带上 `nickname`。
 - `restart()`：`killTree()` → `taskkill /F /IM QQ.exe`（忽略失败）→ 清零崩溃计数 → spawn。
 - 进程退出清理：B 的 `index.ts` 在 `SIGINT`/`SIGHUP`/`exit` 调 `stopNapcat()`，我保证 `stopNapcat` 是**同步**的（用 `execFileSync` 调 taskkill），关窗口时也能执行。
 

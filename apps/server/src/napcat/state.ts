@@ -6,7 +6,7 @@ import { existsSync } from 'node:fs';
 import { db } from '../db/index.js';
 import type { ConnectState, ConnectStatusDTO } from '../types.js';
 import { getManagerFacts, getUin, type ManagerFacts } from './manager.js';
-import { getOnebotFacts } from './onebot.js';
+import { getOnebotFacts, getSelfNickname } from './onebot.js';
 import { QRCODE_PATH } from './paths.js';
 
 // ===== 架构.md §7 的用户文案 =====
@@ -90,6 +90,10 @@ export function getConnectStatus(): ConnectStatusDTO {
   };
   if (derived.uin !== undefined) dto.uin = derived.uin;
   if (derived.message !== undefined) dto.message = derived.message;
+  if (derived.state === 'online') {
+    const nick = getSelfNickname();
+    if (nick !== null) dto.nickname = nick;
+  }
   return dto;
 }
 

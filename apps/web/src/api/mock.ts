@@ -355,7 +355,7 @@ export const mockApi: Api = {
       state,
       since: bootAt,
       first_run: localStorage.getItem('mockFirstRun') === '1',
-      ...(state === 'online' ? { uin: '10001' } : {}),
+      ...(state === 'online' ? { uin: '10001', nickname: '演示同学' } : {}),
       ...(state === 'error'
         ? { message: '采集端异常。常见原因是 QQ 版本过旧，请更新到最新版 QQ 后重试' }
         : {}),
@@ -365,6 +365,11 @@ export const mockApi: Api = {
 
   restartConnect() {
     localStorage.removeItem('mockConnectState');
+    return delay({ ok: true as const });
+  },
+
+  logoutConnect() {
+    localStorage.setItem('mockConnectState', 'waiting_qr');
     return delay({ ok: true as const });
   },
 

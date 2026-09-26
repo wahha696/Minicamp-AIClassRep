@@ -102,7 +102,11 @@ describe('mock 模式', () => {
     await expect(c.syncNow()).rejects.toMatchObject({ message: 'QQ 未连接', status: 409 });
 
     await c.restartConnect();
-    expect((await c.getConnectStatus()).state).toBe('online');
+    expect(await c.getConnectStatus()).toMatchObject({ state: 'online', nickname: '演示同学' });
+
+    await c.logoutConnect();
+    expect((await c.getConnectStatus()).state).toBe('waiting_qr');
+    await c.restartConnect();
   });
 
   it('health 字段齐全，jev 为 disabled', async () => {
@@ -147,6 +151,7 @@ describe('真实模式（fetch 打桩）', () => {
     await c.importText('群', '文本');
     await c.getConnectStatus();
     await c.restartConnect();
+    await c.logoutConnect();
     await c.syncNow();
     await c.getHealth();
     await c.getLlmSettings();
@@ -167,6 +172,7 @@ describe('真实模式（fetch 打桩）', () => {
       { method: 'POST', url: '/api/import/text', body: { groupName: '群', text: '文本' } },
       { method: 'GET', url: '/api/connect/status' },
       { method: 'POST', url: '/api/connect/restart' },
+      { method: 'POST', url: '/api/connect/logout' },
       { method: 'POST', url: '/api/sync' },
       { method: 'GET', url: '/health' },
       { method: 'GET', url: '/api/settings/llm' },
