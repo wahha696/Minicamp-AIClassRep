@@ -157,16 +157,26 @@ export function spawnNapcat(uin?: string): void {
   mkdirSync(join(DATA_DIR, 'logs'), { recursive: true });
   const logPath = join(DATA_DIR, 'logs', 'napcat.log');
 
-  const c: ChildProcess = spawn(
-    join(NAPCAT_DIR, 'NapCatWinBootMain.exe'),
-    buildSpawnArgs(qqExe, uin),
-    {
-      cwd: NAPCAT_DIR,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: buildNapcatEnv(),
-    },
-  );
+  let c: ChildProcess;
+  try {
+    c = spawn(
+      join(NAPCAT_DIR, 'NapCatWinBootMain.exe'),
+      buildSpawnArgs(qqExe, uin),
+      {
+        cwd: NAPCAT_DIR,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: buildNapcatEnv(),
+      },
+    );
+  } catch (err) {
+    // Windows 上 spawn 会同步抛错（EPERM：杀软/策略拦截、路径被占用等）。
+    // 按架构.md §4 落到 spawnFailed → 页面显示错误状态；绝不能把服务器进程带崩。
+    facts.spawnFailed = true;
+    facts.pid = null;
+    try { appendFileSync(logPath, `[manager] spawn 失败：${String(err)}\n`); } catch { /* 忽略 */ }
+    return;
+  }
   child = c;
   killedByUs = false;
   facts.spawnFailed = false;
