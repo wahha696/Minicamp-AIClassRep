@@ -1,5 +1,5 @@
-// 今日页 /（D2，FR-7.1）：顶部大字摘要 + 按时间排序的事件卡片，每 10s 刷新。
-import { useCallback, useState } from 'react';
+// 今日页 /（D2，FR-7.1）：顶部大字摘要 + 事件卡片（按时间 / 按紧急两种排序，可切换），每 10s 刷新。
+import { useCallback, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ApiError, exportIcsUrl, getToday, syncNow } from '../api/client';
 import EventCard from '../components/EventCard';
@@ -7,13 +7,38 @@ import EventDrawer from '../components/EventDrawer';
 import { useToast } from '../components/Toast';
 import { usePolling } from '../hooks/usePolling';
 import { toastError } from '../lib/errors';
+import { SORT_LABEL, type SortMode, sortEvents } from '../lib/sort';
 import { shanghaiDayRange } from '../lib/time';
+
+const SORT_KEY = 'todaySort'; // 记住上次选的排序
+
+function loadSort(): SortMode {
+  try {
+    return localStorage.getItem(SORT_KEY) === 'urgency' ? 'urgency' : 'time';
+  } catch {
+    return 'time';
+  }
+}
 
 export default function Today() {
   const { data, error, loading, refresh } = usePolling(getToday, 10_000);
   const toast = useToast();
   const [syncing, setSyncing] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [sort, setSort] = useState<SortMode>(loadSort);
+
+  function toggleSort() {
+    const next: SortMode = sort === 'time' ? 'urgency' : 'time';
+    setSort(next);
+    try {
+      localStorage.setItem(SORT_KEY, next);
+    } catch {
+      // 存不下就只在本次生效
+    }
+  }
+
+  // 每次轮询拿到新数据都按当前时间重排（「两小时内」会随时间变化）
+  const events = useMemo(() => (data ? sortEvents(data.events, sort) : []), [data, sort]);
 
   async function onSync() {
     setSyncing(true);
@@ -78,8 +103,27 @@ export default function Today() {
       )}
 
       {data && data.events.length > 0 && (
-        <ul className="mt-6 space-y-3">
-          {data.events.map((e) => (
+        <div className="mt-6 flex items-center justify-between">
+          <p className="text-xs text-slate-400">
+            {sort === 'time' ? '按开始 / 截止时间先后' : '两小时内的最前，考试和作业优先，已过去和已完成的在最后'}
+          </p>
+          <button
+            type="button"
+            onClick={toggleSort}
+            title="切换排序方式"
+            className="flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50"
+          >
+            <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+              <path d="M7 4v16m0 0-3-3m3 3 3-3M17 20V4m0 0-3 3m3-3 3 3" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            {SORT_LABEL[sort]}
+          </button>
+        </div>
+      )}
+
+      {data && data.events.length > 0 && (
+        <ul className="mt-3 space-y-3">
+          {events.map((e) => (
             <li key={e.id}>
               <EventCard event={e} onClick={() => setSelectedId(e.id)} />
             </li>
