@@ -31,6 +31,7 @@
 **D1. 布局 + 路由 + 状态灯**
 - 路由：`/` 今日、`/week` 本周、`/groups` 群管理、`/connect` 连接、`/demo` 演示控制台。
 - 顶部栏：Logo「AI课代表」、导航、右侧 4 个状态灯（QQ / 数据库 / AI / 快判），每 5s 读 `/health`；`jev='disabled'` 灰色显示「预留」，其余绿/红，悬停显示中文说明。手机上导航收成底部 Tab。
+- 右上角头像（全局，`components/Avatar.tsx`）：圆形，显示登录者 QQ 头像（`https://q1.qlogo.cn/g?b=qq&nk=<uin>&s=100`，uin 来自 `/api/connect/status`）；右下角小圆点绿色 = 已连接；没有 uin 或图片加载失败显示灰色人像；点击去 `/connect`。
 - 连接黄条（全局）：每 2s 读 `/api/connect/status`：`reconnecting` → "连接中断，重连中"；`kicked` → "你的 QQ 在另一台电脑登录了，采集已暂停" + 「重新连接」按钮（`POST /api/connect/restart`）；`error` → 显示 `message` + 「重启采集端」按钮；`qq_conflict`/`waiting_qr`/`starting` 且不在 `/connect` 页 → "QQ 未连接" + 「去连接」链接。
 - 路由守卫：`first_run === true` 时任何页面都跳到 `/connect`。
 
