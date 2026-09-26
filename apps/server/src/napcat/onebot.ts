@@ -297,6 +297,19 @@ export function isOnline(): boolean {
   return ws !== null && ws.readyState === WebSocket.OPEN && selfId !== null;
 }
 
+/**
+ * 用户点了「重新连接 / 关闭电脑版 QQ 并继续 / 重启采集端」后调用：
+ * 清掉 kicked 标志（否则 WS 循环永远不再连）、重置退避与 online 记忆，并立即恢复连接尝试。
+ * 由 napcat/index.ts 的 restartNapcat() 在 manager.restart()（新进程已 spawn）之后调用。
+ */
+export function resetAfterRestart(): void {
+  kicked = false;
+  everOnline = false;
+  selfId = null;
+  backoffMs = BACKOFF_START_MS;
+  connect();
+}
+
 // ===== 工具 =====
 
 function str(v: unknown): string {

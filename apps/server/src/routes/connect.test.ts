@@ -12,7 +12,7 @@ const { restartMock, isOnlineMock, syncHistoryMock, getConnectStatusMock } = vi.
   getConnectStatusMock: vi.fn(),
 }));
 
-vi.mock('../napcat/manager.js', () => ({ restart: restartMock }));
+vi.mock('../napcat/index.js', () => ({ restartNapcat: restartMock }));
 vi.mock('../napcat/onebot.js', () => ({ isOnline: isOnlineMock }));
 vi.mock('../ingest/history.js', () => ({ syncHistory: syncHistoryMock }));
 vi.mock('../napcat/state.js', () => ({ getConnectStatus: getConnectStatusMock }));

@@ -2,9 +2,9 @@
 import { readFile } from 'node:fs/promises';
 import type { Hono } from 'hono';
 import { syncHistory } from '../ingest/history.js';
-import { restart } from '../napcat/manager.js';
 import { QRCODE_PATH } from '../napcat/paths.js';
 import { isOnline } from '../napcat/onebot.js';
+import { restartNapcat } from '../napcat/index.js';
 import { getConnectStatus } from '../napcat/state.js';
 
 export function registerConnectRoutes(app: Hono): void {
@@ -25,11 +25,11 @@ export function registerConnectRoutes(app: Hono): void {
     });
   });
 
-  // POST /api/connect/restart：结束本进程树 + 结束所有 QQ.exe → 重新 spawn
+  // POST /api/connect/restart：结束本进程树 + 结束所有 QQ.exe → 重新 spawn → 复位 WS 的 kicked 状态
   // （「关闭电脑版 QQ 并继续」「重新连接」「重启采集端」共用，架构.md §5）
   app.post('/api/connect/restart', async (c) => {
     try {
-      await restart();
+      await restartNapcat();
       return c.json({ ok: true });
     } catch (err) {
       return c.json({ error: `重启采集端失败：${err instanceof Error ? err.message : String(err)}` }, 500);
