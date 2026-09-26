@@ -7,8 +7,9 @@ dist/
 # 本地工具与账号数据（含 API Key、WebUI token、QQ 账号配置）
 tools/
 
-# 采集端（含账号数据，不通过 git 传）
-napcat/
+# 采集端（含账号数据，不通过 git 传）。开头的 / 只忽略仓库根的 napcat/，
+# 不能误伤 apps/server/src/napcat/ 源码目录
+/napcat/
 
 # 运行时数据（只保留仿真剧本 data/mock/）
 data/*

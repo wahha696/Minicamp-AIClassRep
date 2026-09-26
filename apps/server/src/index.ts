@@ -170,3 +170,5 @@ function shutdown(): void {
 
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+// Windows 上直接关掉黑窗口发的是 SIGHUP（架构.md §3 第 7 步）
+process.on('SIGHUP', shutdown);
