@@ -104,11 +104,15 @@ describe('parseExtraction', () => {
   it.each([
     ['非 JSON', '```json {"events": []}```'],
     ['缺 events', '{}'],
-    ['type 不合法', JSON.stringify({ events: [ev({ type: 'party' })] })],
     ['create 没标题', JSON.stringify({ events: [ev({ title: null })] })],
     ['时间写中文', JSON.stringify({ events: [ev({ start_at: '明天下午两点' })] })],
   ])('%s → 失败', (_, raw) => {
     expect(parseExtraction(raw, ids).ok).toBe(false);
+  });
+
+  it('编出来的 type 归到 other，不算失败', () => {
+    const r = parseExtraction(JSON.stringify({ events: [ev({ type: 'survey' })] }), ids);
+    expect(r.ok && r.events[0]?.type).toBe('other');
   });
 });
 
