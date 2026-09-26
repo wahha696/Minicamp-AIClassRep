@@ -1,9 +1,11 @@
 // 调度（FR-5）：轮询 messages.processed=0，按群分批跑 stages（filter → extract → reconcile）。
-// 别人入库后不用通知这里；同一时刻只跑一个批次；无论成败，一批消息处理完都置 processed=1，避免死循环。
+// 别人入库后不用通知这里；同一时刻只跑一个批次；一批消息处理完置 processed=1。
+// 例外：AI 连不上（网络 / 证书 / 服务挂了）时这批不置已处理，等 LLM_RETRY_MS 后重试，免得通知白白丢掉。
 import { db } from '../db/index.js';
 import type { Message } from '../types.js';
 import { type ExtractedEvent, extractEvents } from './extract.js';
 import { isNoise } from './filter.js';
+import { llmStats } from './stats.js';
 import { applyEvents, listActiveEvents } from './reconcile.js';
 
 const TICK_MS = 5_000;
@@ -11,6 +13,9 @@ const MIN_PENDING = 15; // 攒够这么多条就处理
 const MAX_WAIT_MS = 20_000; // 或者最早一条已经等了这么久
 const BATCH = 30;
 const CONTEXT = 10;
+export const LLM_RETRY_MS = 60_000; // AI 连不上后，隔这么久再试
+
+let llmRetryAt = 0; // 在这之前不自动处理（手动 runPipelineNow 不受限）
 
 /** 一个批次在各 stage 之间传递的状态 */
 export interface Batch {
@@ -20,6 +25,7 @@ export interface Batch {
   messages: Message[]; // 本批全部消息（按 sent_at 升序）
   candidates: Message[]; // 过滤后留下的
   extracted: ExtractedEvent[];
+  llmFailed?: boolean; // AI 没调通：这批留着下次重试
 }
 
 /** 以后插 Jev 只需要往 stages 里加一个（架构.md §6） */
@@ -51,6 +57,7 @@ const extractStage: Stage = async (b) => {
   )
     .reverse()
     .map((m) => ({ ...m, group_name: b.groupName }));
+  const failedBefore = llmStats.failed;
   b.extracted = await extractEvents({
     groupName: b.groupName,
     candidates: b.candidates,
@@ -58,7 +65,13 @@ const extractStage: Stage = async (b) => {
     now: b.now,
     activeEvents: listActiveEvents(b.groupId, b.now),
   });
+  if (llmStats.failed > failedBefore) {
+    b.llmFailed = true;
+    throw new LlmUnavailable(); // 后面的 stage 不用跑了
+  }
 };
+
+class LlmUnavailable extends Error {}
 
 const reconcileStage: Stage = (b) => {
   applyEvents(b.groupId, b.extracted, b.candidates);
@@ -108,7 +121,12 @@ async function processBatch(g: PendingGroup): Promise<number> {
   try {
     for (const stage of stages) await stage(b);
   } catch (e) {
-    console.warn(`[pipeline] 群 ${g.group_id} 这批处理出错，消息仍置为已处理：`, e);
+    if (!b.llmFailed) console.warn(`[pipeline] 群 ${g.group_id} 这批处理出错，消息仍置为已处理：`, e);
+  }
+  if (b.llmFailed) {
+    llmRetryAt = Date.now() + LLM_RETRY_MS;
+    console.warn(`[pipeline] AI 连不上，群 ${g.group_id} 的 ${rows.length} 条消息 ${LLM_RETRY_MS / 1000}s 后重试`);
+    return 0;
   }
   const { changes } = db
     .prepare('UPDATE messages SET processed = 1 WHERE message_id IN (SELECT value FROM json_each(?))')
@@ -120,6 +138,7 @@ async function processBatch(g: PendingGroup): Promise<number> {
 async function drain(force: boolean, now?: number): Promise<void> {
   for (;;) {
     const t = now ?? Date.now();
+    if (!force && Date.now() < llmRetryAt) return; // AI 刚连不上，先歇一会
     const due = pendingGroups().filter((g) => force || g.pending >= MIN_PENDING || t - g.oldest >= MAX_WAIT_MS);
     if (due.length === 0) return;
     let progress = 0;
@@ -153,6 +172,11 @@ export function runPipelineNow(): Promise<void> {
 }
 
 let timer: ReturnType<typeof setInterval> | undefined;
+
+/** 测试用：清掉「AI 连不上，歇一会」的状态 */
+export function resetLlmRetry(): void {
+  llmRetryAt = 0;
+}
 
 export function startScheduler(): void {
   timer ??= setInterval(() => void tick(), TICK_MS);

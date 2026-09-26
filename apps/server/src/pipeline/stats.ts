@@ -3,7 +3,8 @@
 import type { PipelineStats } from '../types.js';
 
 /** llm：最近一次调用的结果；配了 key 但还没调用过算 ok（没配 key 由 getPipelineStats 报 unconfigured） */
-export const llmStats: { llm: PipelineStats['llm']; called: number } = {
+export const llmStats: { llm: PipelineStats['llm']; called: number; failed: number } = {
   llm: 'ok',
   called: 0,
+  failed: 0, // 累计连不上 AI 的次数；调度器靠它判断这批要不要留着重试
 };
