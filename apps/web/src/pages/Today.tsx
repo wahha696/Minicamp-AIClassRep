@@ -1,8 +1,9 @@
 // 今日页 /（D2，FR-7.1）：顶部大字摘要 + 按时间排序的事件卡片，每 10s 刷新。
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ApiError, exportIcsUrl, getToday, syncNow } from '../api/client';
 import EventCard from '../components/EventCard';
+import EventDrawer from '../components/EventDrawer';
 import { useToast } from '../components/Toast';
 import { usePolling } from '../hooks/usePolling';
 import { toastError } from '../lib/errors';
@@ -12,8 +13,7 @@ export default function Today() {
   const { data, error, loading, refresh } = usePolling(getToday, 10_000);
   const toast = useToast();
   const [syncing, setSyncing] = useState(false);
-  // 点卡片选中的事件；详情抽屉在 D4 接上
-  const [, setSelectedId] = useState<number | null>(null);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
 
   async function onSync() {
     setSyncing(true);
@@ -29,6 +29,7 @@ export default function Today() {
     }
   }
 
+  const closeDrawer = useCallback(() => setSelectedId(null), []);
   const { from, to } = shanghaiDayRange(0);
 
   return (
@@ -101,6 +102,8 @@ export default function Today() {
           </Link>
         </div>
       )}
+
+      <EventDrawer id={selectedId} onClose={closeDrawer} onChanged={() => void refresh()} />
     </section>
   );
 }

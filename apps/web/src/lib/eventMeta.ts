@@ -1,5 +1,5 @@
 // 事件类型的固定配色与中文名（FR-7.3，D-前端.md「设计要求」）。今日/本周/详情共用。
-import type { EventStatus, EventType } from '../api/types';
+import type { EventDTO, EventStatus, EventType } from '../api/types';
 
 export const TYPE_META: Record<EventType, { label: string; color: string }> = {
   exam: { label: '考试', color: '#ef4444' },
@@ -16,6 +16,14 @@ export const STATUS_TEXT: Record<EventStatus, string> = {
   done: '已完成',
   cancelled: '已取消',
 };
+
+/**
+ * 有变更记录（被改期/改地点/取消过）→ 卡片显示「已按最新通知更新」。
+ * 列表接口不带 history；version 只在流水线写 event_history 时 +1（手动 PATCH 不改 version），所以 version>1 即有变更记录。
+ */
+export function isUpdated(e: Pick<EventDTO, 'version'>): boolean {
+  return e.version > 1;
+}
 
 /** 后端将来多出新类型时不崩，按「其他」显示 */
 export function typeMeta(type: string) {
