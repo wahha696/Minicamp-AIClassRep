@@ -4,6 +4,7 @@ import FirstRunGuard from './components/FirstRunGuard';
 import Layout from './components/Layout';
 import { ToastProvider } from './components/Toast';
 import Placeholder from './pages/Placeholder';
+import Today from './pages/Today';
 
 export default function App() {
   return (
@@ -12,7 +13,7 @@ export default function App() {
         <Routes>
           <Route element={<FirstRunGuard />}>
             <Route element={<Layout />}>
-              <Route index element={<Placeholder title="今日" task="D2" />} />
+              <Route index element={<Today />} />
               <Route path="week" element={<Placeholder title="本周" task="D3" />} />
               <Route path="groups" element={<Placeholder title="群管理" task="D6" />} />
               <Route path="connect" element={<Placeholder title="连接 QQ" task="D5" />} />
