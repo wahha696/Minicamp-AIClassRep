@@ -3,6 +3,7 @@ import { ConnectStatusProvider } from './components/ConnectStatus';
 import FirstRunGuard from './components/FirstRunGuard';
 import Layout from './components/Layout';
 import { ToastProvider } from './components/Toast';
+import Connect from './pages/Connect';
 import Placeholder from './pages/Placeholder';
 import Today from './pages/Today';
 import Week from './pages/Week';
@@ -17,7 +18,7 @@ export default function App() {
               <Route index element={<Today />} />
               <Route path="week" element={<Week />} />
               <Route path="groups" element={<Placeholder title="群管理" task="D6" />} />
-              <Route path="connect" element={<Placeholder title="连接 QQ" task="D5" />} />
+              <Route path="connect" element={<Connect />} />
               <Route path="demo" element={<Placeholder title="演示控制台" task="D7" />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>

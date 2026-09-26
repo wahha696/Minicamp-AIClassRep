@@ -109,4 +109,15 @@ export const {
 
 export const exportIcsUrl = (from?: number, to?: number) => `/api/export.ics${rangeQuery(from, to)}`;
 export const eventIcsUrl = (id: number) => `/api/events/${id}/export.ics`;
-export const qrcodeUrl = () => `/api/connect/qrcode?t=${Date.now()}`;
+export const qrcodeUrl = () => (isMock ? MOCK_QRCODE : `/api/connect/qrcode?t=${Date.now()}`);
+
+// mock 模式没有后端，给连接页一张占位「二维码」看效果
+const MOCK_QRCODE =
+  'data:image/svg+xml,' +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="#fff"/>' +
+      '<g fill="#0f172a"><rect x="12" y="12" width="56" height="56"/><rect x="132" y="12" width="56" height="56"/><rect x="12" y="132" width="56" height="56"/></g>' +
+      '<g fill="#fff"><rect x="22" y="22" width="36" height="36"/><rect x="142" y="22" width="36" height="36"/><rect x="22" y="142" width="36" height="36"/></g>' +
+      '<g fill="#0f172a"><rect x="30" y="30" width="20" height="20"/><rect x="150" y="30" width="20" height="20"/><rect x="30" y="150" width="20" height="20"/></g>' +
+      '<text x="100" y="108" font-size="16" text-anchor="middle" fill="#64748b">模拟二维码</text></svg>',
+  );
