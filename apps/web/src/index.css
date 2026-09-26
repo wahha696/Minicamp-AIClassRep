@@ -1,1 +1,12 @@
 @import "tailwindcss";
+
+/* 详情抽屉（D4）：电脑右侧滑入，手机底部升起 */
+@keyframes drawer-left {
+  from { transform: translateX(100%); }
+}
+@keyframes drawer-up {
+  from { transform: translateY(100%); }
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+}

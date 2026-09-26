@@ -1,7 +1,7 @@
 // 事件卡片（D2 今日页用，D3 本周页可复用）：左侧类型色条、类型标签、标题、时间、地点、群名。
-// pending_confirm → 「待确认」小标签；done → 整张置灰 + 标题划线。
+// pending_confirm → 「待确认」小标签；done → 整张置灰 + 标题划线；有变更记录 →「已按最新通知更新」。
 import type { EventDTO } from '../api/types';
-import { typeMeta } from '../lib/eventMeta';
+import { isUpdated, typeMeta } from '../lib/eventMeta';
 import { eventTimeText } from '../lib/time';
 
 export default function EventCard({ event, onClick }: { event: EventDTO; onClick?: () => void }) {
@@ -30,6 +30,9 @@ export default function EventCard({ event, onClick }: { event: EventDTO; onClick
             <span className="rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-xs text-amber-700">
               待确认
             </span>
+          )}
+          {isUpdated(event) && (
+            <span className="rounded bg-sky-50 px-1.5 py-0.5 text-xs text-sky-700">已按最新通知更新</span>
           )}
           {done && <span className="text-xs text-slate-500">已完成</span>}
         </div>

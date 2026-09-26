@@ -1,9 +1,10 @@
 // 本周页 /week（D3，FR-7.2）：从今天起 7 天，电脑上 7 列、手机上 7 段纵向列表，今天高亮。
 // 只有截止时间的事件显示为红底带「DDL」徽标的条目，和普通事件一眼能区分。
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { exportIcsUrl, getEvents } from '../api/client';
+import EventDrawer from '../components/EventDrawer';
 import { usePolling } from '../hooks/usePolling';
-import { typeMeta } from '../lib/eventMeta';
+import { isUpdated, typeMeta } from '../lib/eventMeta';
 import { hhmm, weekdayDate } from '../lib/time';
 import { groupByDay, weekRange, type WeekItem } from '../lib/week';
 
@@ -41,6 +42,11 @@ function Item({ item, onClick }: { item: WeekItem; onClick: () => void }) {
           {event.status === 'pending_confirm' && (
             <span className="rounded border border-amber-300 bg-amber-50 px-1 leading-4 text-amber-700">待确认</span>
           )}
+          {isUpdated(event) && (
+            <span className="rounded bg-sky-50 px-1 leading-4 text-sky-700" title="已按最新通知更新">
+              已更新
+            </span>
+          )}
         </div>
         <div className={`mt-0.5 line-clamp-2 font-medium text-slate-800 ${done ? 'line-through' : ''}`}>
           {event.title}
@@ -53,8 +59,8 @@ function Item({ item, onClick }: { item: WeekItem; onClick: () => void }) {
 
 export default function Week() {
   const { data, error, loading, refresh } = usePolling(fetchWeek, 10_000);
-  // 点条目选中的事件；详情抽屉在 D4 接上
-  const [, setSelectedId] = useState<number | null>(null);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const closeDrawer = useCallback(() => setSelectedId(null), []);
 
   const days = groupByDay(data ?? []);
   const { from, to } = weekRange();
@@ -120,6 +126,8 @@ export default function Week() {
           </div>
         ))}
       </div>
+
+      <EventDrawer id={selectedId} onClose={closeDrawer} onChanged={() => void refresh()} />
     </section>
   );
 }
