@@ -104,7 +104,10 @@ export function buildDemoMessages(name: string, now: number = Date.now()): Messa
 
 // QQ 复制格式的行：整行是「昵称 + 时间」，内容在下一行。必须整行匹配，
 // 否则会被 COLON_RE 抢走（时间戳本身带冒号）。
-const TIME_RE = /^([^:：]{1,32}?)\s+(\d{1,2}:\d{2}(?::\d{2})?)\s*$/;
+// QQ 桌面版复制出来常带日期（「张老师 2026/9/26 12:30:45」），日期可选，不算进昵称。
+const TIME_RE = /^([^:：]{1,32}?)\s+(?:\d{4}[/-]\d{1,2}[/-]\d{1,2}\s+)?(\d{1,2}:\d{2}(?::\d{2})?)\s*$/;
+/** 群名缺省时的兜底，避免 group_id 变成 'demo-import-' */
+const DEFAULT_IMPORT_GROUP = '粘贴导入';
 // 「昵称：内容」：昵称里不能有空格（否则 "张老师 12:30:45" 会被误判），内容里可以有冒号
 const COLON_RE = /^(\S{1,32}?)[:：]\s*(.*)$/;
 
@@ -124,8 +127,10 @@ export function parseImportedText(
   const lines = text.split(/\r?\n/);
   const isTimeLine = (line: string): boolean => TIME_RE.test(line.trim());
   const isColonLine = (line: string): boolean => COLON_RE.test(line.trim());
-  // 有 QQ 时间戳格式的行 → 按 QQ 格式解析；否则按「昵称：内容」
-  const mode: 'qq' | 'colon' = lines.some(isTimeLine) ? 'qq' : 'colon';
+  // 格式看「第一条像消息的行」：QQ 格式必然以「昵称 时间」开头。
+  // 不能用"任意一行像时间行"——「张老师：明天小测\n时间 14:30」这种正文会把整段误判成 QQ 格式。
+  const firstMsgLine = lines.map((l) => l.trim()).find((l) => isTimeLine(l) || isColonLine(l));
+  const mode: 'qq' | 'colon' = firstMsgLine !== undefined && isTimeLine(firstMsgLine) ? 'qq' : 'colon';
 
   let name = groupName.trim();
   const bodies: { sender: string; text: string }[] = [];
@@ -166,6 +171,7 @@ export function parseImportedText(
     pending = null;
   });
 
+  if (name === '') name = DEFAULT_IMPORT_GROUP;
   const group_id = `demo-import-${name}`;
   return bodies
     .filter((b) => b.sender !== '' || b.text !== '')

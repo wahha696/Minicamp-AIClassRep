@@ -190,6 +190,29 @@ describe('parseImportedText', () => {
     const msgs = parseImportedText('群', 'A：一\r\nB：二\r\n');
     expect(msgs).toHaveLength(2);
   });
+
+  // ===== B6 审核补充
+  it('冒号格式正文里有「时间 14:30」这种行，不会被误判成 QQ 格式', () => {
+    const msgs = parseImportedText('高数', '张老师：明天随堂小测\n时间 14:30\n地点 A301');
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]!.sender_name).toBe('张老师');
+    expect(msgs[0]!.text).toBe('明天随堂小测\n时间 14:30\n地点 A301');
+  });
+
+  it('QQ 格式带日期（张老师 2026/9/26 12:30:45）：日期不进昵称', () => {
+    const msgs = parseImportedText('高数', '张老师 2026/9/26 12:30:45\n明天小测\n小王 2026-09-26 12:31\n收到');
+    expect(msgs.map((m) => [m.sender_name, m.text])).toEqual([
+      ['张老师', '明天小测'],
+      ['小王', '收到'],
+    ]);
+  });
+
+  it('群名为空且第一行就是消息：用兜底群名，group_id 不会是 demo-import-', () => {
+    const msgs = parseImportedText('', '张老师：明天小测');
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]!.group_name).toBe('粘贴导入');
+    expect(msgs[0]!.group_id).toBe('demo-import-粘贴导入');
+  });
 });
 
 // ===== HTTP 路由
