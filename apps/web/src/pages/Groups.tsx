@@ -6,6 +6,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import { useToast } from '../components/Toast';
 import { usePolling } from '../hooks/usePolling';
 import { toastError } from '../lib/errors';
+import { filterGroups } from '../lib/groups';
 
 export default function Groups() {
   const { data, error, loading, refresh } = usePolling(getGroups, 10_000);
@@ -14,6 +15,8 @@ export default function Groups() {
   const [pending, setPending] = useState<Record<string, boolean>>({});
   const [toDelete, setToDelete] = useState<GroupDTO | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [query, setQuery] = useState('');
+  const shown = data ? filterGroups(data, query) : null;
 
   async function onToggle(g: GroupDTO, enabled: boolean) {
     setPending((p) => ({ ...p, [g.group_id]: enabled }));
@@ -77,8 +80,39 @@ export default function Groups() {
       )}
 
       {data && data.length > 0 && (
-        <ul className="mt-6 divide-y divide-slate-100 overflow-hidden rounded-xl border border-slate-200 bg-white">
-          {data.map((g) => {
+        <div className="relative mt-6">
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={2}
+            strokeLinecap="round"
+            className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+            aria-hidden
+          >
+            <circle cx="11" cy="11" r="7" />
+            <path d="m20 20-3.5-3.5" />
+          </svg>
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="搜索群名或群号"
+            aria-label="搜索群"
+            className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+          />
+        </div>
+      )}
+
+      {shown && data!.length > 0 && shown.length === 0 && (
+        <div className="mt-4 rounded-xl border border-dashed border-slate-300 bg-white px-6 py-10 text-center text-sm text-slate-500">
+          没有找到包含「{query.trim()}」的群
+        </div>
+      )}
+
+      {shown && shown.length > 0 && (
+        <ul className="mt-4 divide-y divide-slate-100 overflow-hidden rounded-xl border border-slate-200 bg-white">
+          {shown.map((g) => {
             const enabled = pending[g.group_id] ?? g.enabled;
             const empty = g.message_count === 0 && g.event_count === 0;
             return (
