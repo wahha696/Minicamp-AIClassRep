@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { db } from '../db/index.js';
 import { env } from '../env.js';
 import { buildIcs } from '../ics.js';
-import { buildDemoMessages, listScenarios, parseImportedText } from '../ingest/demo.js';
+import { buildDemoMessages, listScenarios, parseImportedText, scenarioGroupId } from '../ingest/demo.js';
 import { ingestMessages } from '../ingest/index.js';
 import { runPipelineNow } from '../pipeline/index.js';
 import type {
@@ -400,7 +400,11 @@ export function registerBusinessRoutes(app: Hono): void {
   // ===== 演示与粘贴导入（B6）
 
   // 可用剧本列表
-  app.get('/api/demo/scenarios', (c) => c.json(listScenarios()));
+  // active：这个剧本的演示群当前是否有数据（回放过且没取消），前端据此显示「回放」或「取消」
+  app.get('/api/demo/scenarios', (c) => {
+    const exists = db.prepare('SELECT 1 FROM groups WHERE group_id = ?');
+    return c.json(listScenarios().map((s) => ({ ...s, active: exists.get(s.group_id) !== undefined })));
+  });
 
   // 回放剧本：注入后立即跑一次流水线
   app.post('/api/demo/replay', async (c) => {
@@ -427,31 +431,25 @@ export function registerBusinessRoutes(app: Hono): void {
     const demoGroups = db
       .prepare("SELECT group_id FROM groups WHERE group_id LIKE 'demo-%'")
       .all() as unknown as { group_id: string }[];
+    deleteGroupsData(demoGroups.map((g) => g.group_id));
+    return c.json({ ok: true });
+  });
 
-    const delHistory = db.prepare(
-      'DELETE FROM event_history WHERE event_id IN (SELECT id FROM events WHERE group_id = ?)',
-    );
-    const delSources = db.prepare(
-      'DELETE FROM event_sources WHERE event_id IN (SELECT id FROM events WHERE group_id = ?)',
-    );
-    const delEvents = db.prepare('DELETE FROM events WHERE group_id = ?');
-    const delMessages = db.prepare('DELETE FROM messages WHERE group_id = ?');
-    const delGroup = db.prepare('DELETE FROM groups WHERE group_id = ?');
-
-    db.exec('BEGIN IMMEDIATE');
+  // 取消某个剧本的回放：删掉这个剧本对应演示群的全部数据，其他演示群和真实群不动
+  app.post('/api/demo/undo', async (c) => {
+    if (!env.DEMO_MODE) return c.json({ error: '演示模式已关闭' }, 403);
+    let raw: unknown;
     try {
-      for (const { group_id } of demoGroups) {
-        delHistory.run(group_id);
-        delSources.run(group_id);
-        delEvents.run(group_id);
-        delMessages.run(group_id);
-        delGroup.run(group_id);
-      }
-      db.exec('COMMIT');
-    } catch (err) {
-      db.exec('ROLLBACK');
-      throw err;
+      raw = await c.req.json();
+    } catch {
+      return c.json({ error: '请求体不是合法 JSON' }, 400);
     }
+    const parsed = replaySchema.safeParse(raw);
+    if (!parsed.success) return c.json({ error: '需要 { scenario: "剧本名" }' }, 400);
+    const groupId = scenarioGroupId(parsed.data.scenario);
+    if (groupId === null) return c.json({ error: '剧本不存在' }, 404);
+    if (!groupId.startsWith('demo-')) return c.json({ error: '只能取消演示群' }, 400);
+    deleteGroupsData([groupId]);
     return c.json({ ok: true });
   });
 
@@ -473,6 +471,34 @@ export function registerBusinessRoutes(app: Hono): void {
     await runPipelineNow();
     return c.json({ messages: inserted });
   });
+}
+
+/** 在一个事务里删掉若干群及其消息、事件、来源、变更记录 */
+function deleteGroupsData(groupIds: string[]): void {
+  const delHistory = db.prepare(
+    'DELETE FROM event_history WHERE event_id IN (SELECT id FROM events WHERE group_id = ?)',
+  );
+  const delSources = db.prepare(
+    'DELETE FROM event_sources WHERE event_id IN (SELECT id FROM events WHERE group_id = ?)',
+  );
+  const delEvents = db.prepare('DELETE FROM events WHERE group_id = ?');
+  const delMessages = db.prepare('DELETE FROM messages WHERE group_id = ?');
+  const delGroup = db.prepare('DELETE FROM groups WHERE group_id = ?');
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    for (const id of groupIds) {
+      delHistory.run(id);
+      delSources.run(id);
+      delEvents.run(id);
+      delMessages.run(id);
+      delGroup.run(id);
+    }
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
 }
 
 /** event_history.changed_fields 存的是 JSON；坏数据不让整个详情接口挂掉 */

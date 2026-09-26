@@ -57,14 +57,17 @@
 - `waiting_qr`：大图 `<img src={'/api/connect/qrcode?t='+Date.now()}>`（每 2s 换 t）+「用手机 QQ 扫码登录（仅首次需要）」
 - `qq_conflict`：「ClassRep 需要接管电脑版 QQ，期间请用手机 QQ 聊天」+ 大按钮「关闭电脑版 QQ 并继续」
 - `error`：`message` 文案 + 「重启采集端」+「下载最新版 QQ」链接 `https://im.qq.com/pcqq`
-- `online`：跳转首页；若是本次首次看到 online（localStorage 没记过）弹一次提示「电脑版 QQ 已由 ClassRep 接管，聊天请用手机 QQ」
+- `online`：**不自动跳走**，显示「✅ QQ 已连接（QQ号），正在接收群消息」+「查看今日日程 →」按钮；若是本机首次看到 online（localStorage 没记过）弹一次提示「电脑版 QQ 已由 ClassRep 接管，聊天请用手机 QQ」
 - 页面底部小字链接「没有 QQ？先用演示模式看看 →」跳 `/demo`（此时不再被守卫拦截：点击后 `localStorage.skipConnect=1`，守卫放行）。
+- 「AI 接入」卡片（FR-11.6）：服务商下拉（目前只有 DeepSeek）+ API Key 密码框 + 保存；已配置时显示「已接入 · sk-****xxxx」（来自 .env 时注明）+「更换」。
 
 **D6. 群管理页 `/groups`**（FR-10）
 表格/卡片列表：群名、消息数、事件数、开关（`PATCH`）、「删除本群数据」（二次确认弹窗，文案「将删除该群的所有消息和日程，无法恢复」）。说明文字：「数据只保存在你的电脑上，原始消息 7 天后自动清理」。
+顶部模糊搜索框（FR-10.4，`lib/groups.ts` 的 `filterGroups`），没结果时显示「没有找到和「x」相关的群」。
 
 **D7. 演示控制台 `/demo`**（FR-11）
 - 剧本列表（`/api/demo/scenarios`），每个一个「回放」按钮，回放中显示 loading，完成后 toast「已注入 N 条消息」。
+- 回放过的剧本（`active: true`）按钮变为红色「取消」（`POST /api/demo/undo`），只删这个剧本的假数据（FR-11.5）。
 - 「清空演示数据」按钮（二次确认）。
 - 「粘贴聊天记录」：群名输入框 + 大文本框 + 提交。
 - 统计卡：累计过滤 `filtered_count` 条、AI 调用 `llm_called_count` 次（读 `/health`，FR-3.2）。
@@ -77,4 +80,4 @@
 
 ## 我不做
 
-后端任何代码。后端返回的数据不对、缺字段 → 在群里找 B/C，不要自己改后端。
+原则上不改后端。例外（已在群里同步）：`/api/settings/llm`（`routes/settings.ts`、`llm-settings.ts`）、`/api/demo/undo`、后台模式 `presence.ts`、@ 规则（`onebot.ts`/`history.ts`），以及 `scripts/dev.mjs` 系列开发启动脚本。其他后端问题仍找 B/C。

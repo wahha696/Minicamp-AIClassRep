@@ -40,7 +40,8 @@ B 的 `db`（`node:sqlite` 的 `DatabaseSync`）、`env`、`types.ts`。我直�
 
 **C3. `extract.ts`：`extractEvents(input): Promise<ExtractedEvent[]>`**
 - 输入：`{ groupName, candidates: 消息[], context: 消息[], now: number, activeEvents: 该群近 14 天 active 事件的精简列表 }`。
-- 用 `openai` 包：`new OpenAI({ baseURL: env.LLM_BASE_URL, apiKey: env.LLM_API_KEY })`，`response_format: { type: 'json_object' }`，`temperature: 0`。
+- 用 `openai` 包：配置从 `getLlmConfig()`（`llm-settings.ts`）取——连接页保存的 `data/llm.json` 优先，其次 `.env`；配置变了（`version` 变化）自动重建客户端。
+  `response_format: { type: 'json_object' }`，`temperature: 0`。提示词第 1 条注明：没有 @ 任何人的通知视为对全体同学，照常提取；`[at]` 表示 @全体成员 或 @了我。
 - system prompt 要点（中文写）：你是大学生的课代表；当前时间 `YYYY-MM-DD HH:mm 星期X（Asia/Shanghai）`；只提取需要学生行动或到场的事项；相对时间换算为绝对时间，输出 `YYYY-MM-DDTHH:mm+08:00` 字符串；「周五」指本周五，若已过则下周五；只有日期没时间的截止 → 当天 23:59；不确定的字段给 null；闲聊返回空数组；**若是对下面已有事件的改期/取消/补充，填 `update_of` 为已有事件 id，并用 `action` 说明**。
 - 输出 zod schema：
   ```ts
@@ -54,7 +55,7 @@ B 的 `db`（`node:sqlite` 的 `DatabaseSync`）、`env`、`types.ts`。我直�
   }> }
   ```
   返回前把时间字符串转为毫秒时间戳（`Date.parse`）。
-- 失败处理（FR-5.4）：JSON 解析或 zod 校验失败 → 把错误信息附在对话里重试 1 次 → 再失败返回 `[]` 并 `console.warn`，**不抛异常**。网络错误同样返回 `[]`，并把 stats 的 `llm` 置为 `'error'`；成功一次置回 `'ok'`；`LLM_API_KEY` 为空时不调用，`llm='unconfigured'`。
+- 失败处理（FR-5.4）：JSON 解析或 zod 校验失败 → 把错误信息附在对话里重试 1 次 → 再失败返回 `[]` 并 `console.warn`，**不抛异常**。网络错误同样返回 `[]`，并把 stats 的 `llm` 置为 `'error'`；成功一次置回 `'ok'`；key 为空（网页和 `.env` 都没配）时不调用，`llm='unconfigured'`。
 - `source_message_ids` 里不在输入中的 id 要丢弃。
 - 验收：写一个 `pnpm --filter server exec tsx src/pipeline/try-extract.ts reschedule` 小脚本（可提交），打印对剧本的提取结果；「明天下午两点」换算正确。
 

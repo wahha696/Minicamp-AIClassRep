@@ -18,6 +18,7 @@ import { installCrashHandlers } from './crash-log.js';
 import { registerBusinessRoutes } from './routes/business.js';
 import { registerConnectRoutes } from './routes/connect.js';
 import { registerSettingsRoutes } from './routes/settings.js';
+import { registerPresence } from './presence.js';
 import { DATA_DIR, WEB_DIST } from './paths.js';
 import type { HealthDTO } from './types.js';
 
@@ -60,6 +61,10 @@ app.get('/health', (c) => {
 registerBusinessRoutes(app);
 registerConnectRoutes(app);
 registerSettingsRoutes(app);
+
+// 后台模式（scripts/dev.mjs --background 设 AUTO_EXIT=1）：网页全关掉后自动退出
+const AUTO_EXIT = process.env.AUTO_EXIT === '1';
+if (AUTO_EXIT) registerPresence(app, () => shutdown());
 
 // 00-总约定 §7：错误一律 { error: '中文' }；不存在的接口也不例外（默认是纯文本 404）
 app.notFound((c) => c.json({ error: '接口不存在' }, 404));

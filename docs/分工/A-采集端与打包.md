@@ -57,6 +57,7 @@ apps/server/src/routes/connect.ts   /api/connect/*、/api/sync
 - 1s 一次尝试 `new WebSocket('ws://127.0.0.1:3001')`；首次 online 后断开则指数退避 2s→4s→…→30s 无限重连。
 - 收到 `meta_event` 且 `meta_event_type==='lifecycle'` → `self_id` 写 `settings.uin` → 通知 state 进 `online` → 异步调 `refreshGroups()` 和 `syncHistory()`。
 - `post_type` 为 `message` 或 `message_sent`，且 `message_type==='group'` → 转 `Message` → `ingestMessages([m], 'onebot')`。
+- **@ 规则（FR-1.6）**：`mentionOf(segments, selfId)` 返回 `none/all/me/other`；**只 @了别人（`other`）的消息直接丢弃不入库**，`history.ts` 用 `isMentionOther` 同样过滤。selfId 未知时按 @我 处理。
 - 消息段转文本 `segmentsToText(segments)`：`text`→原文；`at`→`[at]`（`qq==='all'` 也是 `[at]`）；`image`→`[图片]`；`face`/`mface`→`[表情]`；`reply`→空；`json`→`[卡片]`；`forward`→`[转发]`；`file`→`[文件]`；`record`→`[语音]`；`video`→`[视频]`；其他→`[消息]`。**任何异常都 catch，不能让连接断掉。**
 - `group_name`：优先用内存里 `get_group_list` 的缓存；没有就用 `String(group_id)`。
 - `sender_name`：`sender.card || sender.nickname || '未知'`。
