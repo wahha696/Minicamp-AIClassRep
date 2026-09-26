@@ -32,6 +32,7 @@ export interface Api {
   importText(groupName: string, text: string): Promise<{ messages: number }>;
   getConnectStatus(): Promise<ConnectStatusDTO>;
   restartConnect(): Promise<{ ok: true }>;
+  logoutConnect(): Promise<{ ok: true }>;
   syncNow(): Promise<{ groups: number; messages: number }>;
   getHealth(): Promise<HealthDTO>;
   getLlmSettings(): Promise<LlmSettingsDTO>;
@@ -87,6 +88,7 @@ const realApi: Api = {
   importText: (groupName, text) => request('POST', '/api/import/text', { groupName, text }),
   getConnectStatus: () => request('GET', '/api/connect/status'),
   restartConnect: () => request('POST', '/api/connect/restart'),
+  logoutConnect: () => request('POST', '/api/connect/logout'),
   syncNow: () => request('POST', '/api/sync'),
   getHealth: () => request('GET', '/health'),
   getLlmSettings: () => request('GET', '/api/settings/llm'),
@@ -110,6 +112,7 @@ export const {
   importText,
   getConnectStatus,
   restartConnect,
+  logoutConnect,
   syncNow,
   getHealth,
   getLlmSettings,

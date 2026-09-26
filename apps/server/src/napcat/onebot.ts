@@ -20,6 +20,7 @@ let ws: WebSocket | null = null;
 let stopped = false;           // stopOnebotClient 后不再重连
 let everOnline = false;        // 本次运行曾收到 lifecycle（= 曾登录成功）
 let selfId: string | null = null;
+let selfNickname: string | null = null; // get_login_info 拿到的昵称（右上角账号信息用）
 let kicked = false;            // 收到 bot_offline：不再自动重连，等用户点「重新连接」
 let reconnectTimer: NodeJS.Timeout | null = null;
 let backoffMs = BACKOFF_START_MS;
@@ -226,6 +227,13 @@ export function isMentionOther(item: unknown): boolean {
 /** lifecycle 后异步执行：refreshGroups → syncHistory。动态 import 避免 onebot ⇄ history 加载环。 */
 async function afterOnline(): Promise<void> {
   try {
+    const info = await callAction<Json>('get_login_info', {});
+    const nick = str(info?.nickname).trim();
+    if (nick !== '') selfNickname = nick;
+  } catch {
+    // 昵称拿不到不致命，页面显示 QQ 号
+  }
+  try {
     await refreshGroups();
   } catch {
     // 群名刷不出来不致命，下次 online 再试
@@ -342,6 +350,11 @@ export function getOnebotFacts(): OnebotFacts {
   };
 }
 
+/** 当前登录者的 QQ 昵称（还没拿到返回 null） */
+export function getSelfNickname(): string | null {
+  return selfNickname;
+}
+
 /** WS 已连上且已收到 lifecycle self_id（= online，POST /api/sync 用） */
 export function isOnline(): boolean {
   return ws !== null && ws.readyState === WebSocket.OPEN && selfId !== null;
@@ -356,6 +369,7 @@ export function resetAfterRestart(): void {
   kicked = false;
   everOnline = false;
   selfId = null;
+  selfNickname = null;
   backoffMs = BACKOFF_START_MS;
   connect();
 }

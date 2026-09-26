@@ -25,7 +25,7 @@ export const QQ_STATE_TEXT: Record<ConnectState, string> = {
 
 const LLM_TEXT: Record<HealthDTO['llm'], string> = {
   ok: '正常',
-  error: '最近一次调用失败',
+  error: '最近一次连不上 AI 服务（检查网络或 API Key），消息会保留，1 分钟后自动重试',
   unconfigured: '未配置',
 };
 

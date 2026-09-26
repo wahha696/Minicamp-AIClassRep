@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { buildNapcatEnv, buildSpawnArgs, getUin, pruneRecent, setUin } from './manager.js';
+import { buildNapcatEnv, buildSpawnArgs, clearUin, getUin, pruneRecent, setUin } from './manager.js';
 import { NAPCAT_DIR } from './paths.js';
 
 const tempDirs: string[] = [];
@@ -67,6 +67,9 @@ describe('settings.json（data/settings.json，只有 A 读写）', () => {
     setUin('123456789', dir);
     expect(getUin(dir)).toBe('123456789');
     expect(JSON.parse(readFileSync(join(dir, 'settings.json'), 'utf8'))).toEqual({ uin: '123456789' });
+    clearUin(dir); // 退出登录：忘掉 QQ 号
+    expect(getUin(dir)).toBeUndefined();
+    clearUin(dir); // 没有文件也不报错
   });
 
   it('文件不存在或内容损坏时 getUin 返回 undefined 而不抛', () => {

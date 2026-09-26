@@ -15,6 +15,7 @@ import { getPipelineStats, startScheduler } from './pipeline/index.js';
 import { startCleanupJob } from './jobs/cleanup.js';
 import { lanReadOnly } from './lan-guard.js';
 import { installCrashHandlers } from './crash-log.js';
+import { trustSystemCertificates } from './system-ca.js';
 import { registerBusinessRoutes } from './routes/business.js';
 import { registerConnectRoutes } from './routes/connect.js';
 import { registerPetChatRoutes } from './routes/pet-chat.js';
@@ -22,6 +23,8 @@ import { registerSettingsRoutes } from './routes/settings.js';
 import { registerPresence } from './presence.js';
 import { DATA_DIR, WEB_DIST } from './paths.js';
 import type { HealthDTO } from './types.js';
+
+trustSystemCertificates(); // 杀毒软件拦截 HTTPS 时也能连上 AI（见 system-ca.ts）
 
 const START_PORT = 8000;
 const END_PORT = 8010;

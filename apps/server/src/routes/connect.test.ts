@@ -5,14 +5,15 @@ import { dirname, join } from 'node:path';
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { restartMock, isOnlineMock, syncHistoryMock, getConnectStatusMock } = vi.hoisted(() => ({
+const { logoutMock, restartMock, isOnlineMock, syncHistoryMock, getConnectStatusMock } = vi.hoisted(() => ({
+  logoutMock: vi.fn(),
   restartMock: vi.fn(),
   isOnlineMock: vi.fn(),
   syncHistoryMock: vi.fn(),
   getConnectStatusMock: vi.fn(),
 }));
 
-vi.mock('../napcat/index.js', () => ({ restartNapcat: restartMock }));
+vi.mock('../napcat/index.js', () => ({ restartNapcat: restartMock, logoutNapcat: logoutMock }));
 vi.mock('../napcat/onebot.js', () => ({ isOnline: isOnlineMock }));
 vi.mock('../ingest/history.js', () => ({ syncHistory: syncHistoryMock }));
 vi.mock('../napcat/state.js', () => ({ getConnectStatus: getConnectStatusMock }));
@@ -85,6 +86,24 @@ describe('POST /api/connect/restart', () => {
     expect(res.status).toBe(500);
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain('重启采集端失败');
+  });
+});
+
+describe('POST /api/connect/logout', () => {
+  it('成功 → { ok: true }，只调 logout 不调 restart', async () => {
+    logoutMock.mockResolvedValue(undefined);
+    const res = await app().request('/api/connect/logout', { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(logoutMock).toHaveBeenCalledOnce();
+    expect(restartMock).not.toHaveBeenCalled();
+  });
+
+  it('logout 抛错 → 500 + 中文 error', async () => {
+    logoutMock.mockRejectedValue(new Error('boom'));
+    const res = await app().request('/api/connect/logout', { method: 'POST' });
+    expect(res.status).toBe(500);
+    expect(((await res.json()) as { error: string }).error).toContain('退出登录失败');
   });
 });
 
