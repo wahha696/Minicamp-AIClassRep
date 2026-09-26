@@ -10,7 +10,8 @@ import type { Message } from '../types.js';
 import { type ExtractInput, type ExtractedEvent, extractEvents } from './extract.js';
 import { isNoise } from './filter.js';
 import { getPipelineStats } from './index.js';
-import { runPipelineNow, tick } from './scheduler.js';
+import { llmStats } from './stats.js';
+import { resetLlmRetry, runPipelineNow, tick } from './scheduler.js';
 
 vi.mock('./extract.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./extract.js')>()),
@@ -68,6 +69,7 @@ beforeEach(() => {
   openDb(':memory:');
   extract.mockReset();
   extract.mockResolvedValue([]);
+  resetLlmRetry();
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -110,6 +112,27 @@ describe('runPipelineNow', () => {
     ingestMessages(chat('demo-a', 20), 'demo');
     extract.mockRejectedValue(new Error('boom'));
     await expect(runPipelineNow()).resolves.toBeUndefined();
+    expect(count('processed = 0')).toBe(0);
+  });
+
+  it('AI 连不上：这批不置已处理，歇一会；之后连上了再处理', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    ingestMessages(chat('demo-a', 20), 'demo');
+    extract.mockImplementation(async () => {
+      llmStats.failed++; // 真的 extractEvents 连不上时就是这样
+      return [];
+    });
+    await runPipelineNow();
+    expect(count('processed = 0')).toBe(20);
+    expect(extract).toHaveBeenCalledOnce(); // 没有空转
+
+    extract.mockClear();
+    await tick(); // 刚失败，自动调度先不重试
+    expect(extract).not.toHaveBeenCalled();
+
+    extract.mockResolvedValue([]);
+    resetLlmRetry(); // 相当于等过了 60s
+    await tick(Date.now() + 60_000);
     expect(count('processed = 0')).toBe(0);
   });
 

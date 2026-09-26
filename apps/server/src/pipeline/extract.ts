@@ -221,7 +221,7 @@ function getClient(): LlmClient {
       baseURL: cfg.baseURL || undefined,
       apiKey: cfg.apiKey,
       timeout: 60_000,
-      maxRetries: 1,
+      maxRetries: 2, // 网络抖一下（连不上 / 超时）自动再试，SDK 自带退避
     });
     clientVersion = cfg.version;
   }
@@ -258,6 +258,7 @@ export async function extractEvents(
       raw = res.choices[0]?.message.content?.trim() ?? '';
     } catch (e) {
       llmStats.llm = 'error';
+      llmStats.failed++;
       console.warn('[extract] LLM 调用失败：', (e as Error).message);
       return [];
     }

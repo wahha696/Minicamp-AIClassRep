@@ -70,7 +70,8 @@ B 的 `db`（`node:sqlite` 的 `DatabaseSync`）、`env`、`types.ts`。我直�
 
 **C5. `scheduler.ts` + `index.ts`**
 - `startScheduler()`：每 5 秒检查一次；某群「未处理消息数 ≥ 15」或「最早一条未处理消息已等 ≥ 20 秒」→ 处理该群。同一时刻只跑一个批次（加锁）。
-- 处理一个群：取该群 `processed=0` 的消息（按 sent_at 升序，最多 30 条）→ 规则过滤，噪声置 `filtered_out=1` → 剩下的作为 candidates，另取它们之前的 10 条消息作 context → `extractEvents` → `applyEvents` → 全部置 `processed=1`（**LLM 失败也置 1，避免死循环**）。
+- 处理一个群：取该群 `processed=0` 的消息（按 sent_at 升序，最多 30 条）→ 规则过滤，噪声置 `filtered_out=1` → 剩下的作为 candidates，另取它们之前的 10 条消息作 context → `extractEvents` → `applyEvents` → 全部置 `processed=1`。例外：**AI 连不上**（网络 / 证书 / 服务挂了，SDK 已自动重试 2 次）时这批**不置 1**，调度器歇 60s 再试，免得通知丢掉；AI 能连上但输出不合法等其他错误仍置 1，避免死循环。
+- 杀毒软件（如卡巴斯基）拦截 HTTPS 会导致 Node 报 `SELF_SIGNED_CERT_IN_CHAIN`：`src/system-ca.ts` 在启动时把 Windows 系统证书并进 Node 的信任列表。
 - 候选为空则不调 LLM。
 - `runPipelineNow()`：立即把所有群处理完（循环直到没有 `processed=0`），等待正在跑的批次结束后再开始。
 - `getPipelineStats()`：`filtered_count` 从库里 `COUNT(*) WHERE filtered_out=1`；`llm_called_count` 内存累加；`llm` 状态见 C3。
