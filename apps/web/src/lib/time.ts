@@ -43,6 +43,12 @@ export function dayLabel(ts: number, now = Date.now()): string {
   return `${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
 }
 
+/** 本周页列标题：「周三 10/1」 */
+export function weekdayDate(ts: number): string {
+  const d = new Date(ts + OFFSET);
+  return `${WEEKDAYS[d.getUTCDay()]} ${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
+}
+
 /** 「今天 14:00」「周五 14:00」 */
 export function formatWhen(ts: number, now = Date.now()): string {
   return `${dayLabel(ts, now)} ${hhmm(ts)}`;
