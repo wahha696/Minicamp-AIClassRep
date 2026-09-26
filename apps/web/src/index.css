@@ -10,3 +10,12 @@
 @keyframes fade-in {
   from { opacity: 0; }
 }
+
+/* toast：新消息从下方淡入；被挤掉/到时的消息向上飘并淡出，同时收起高度让下面的顶上来 */
+@keyframes toast-enter {
+  from { opacity: 0; transform: translateY(8px); }
+}
+@keyframes toast-leave {
+  from { opacity: 1; transform: translateY(0); max-height: 4rem; padding-top: 0.5rem; }
+  to { opacity: 0; transform: translateY(-16px); max-height: 0; padding-top: 0; }
+}
