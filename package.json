@@ -8,7 +8,8 @@
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
     "pack:win": "node scripts/pack.mjs",
-    "start": "node scripts/dev.mjs"
+    "start": "node scripts/dev.mjs",
+    "shortcut": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/create-shortcut.ps1"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
