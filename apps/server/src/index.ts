@@ -1,0 +1,172 @@
+// ClassRep 后端入口：启动顺序见 00-总约定 §6。
+// 读 .env → openDb() → 建 Hono app → 局域网只读中间件 → 注册路由 → 静态文件
+// → 监听（8000 起顺延）→ startScheduler() → startNapcat() → 清理任务 → 打包版才自动开浏览器
+import { exec } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { serve } from '@hono/node-server';
+import { Hono } from 'hono';
+import { env } from './env.js';
+import { db, openDb } from './db/index.js';
+import { startNapcat, stopNapcat } from './napcat/index.js';
+import { getConnectStatus } from './napcat/state.js';
+import { getPipelineStats, startScheduler } from './pipeline/index.js';
+import { startCleanupJob } from './jobs/cleanup.js';
+import { registerBusinessRoutes } from './routes/business.js';
+import { registerConnectRoutes } from './routes/connect.js';
+import { WEB_DIST } from './paths.js';
+import type { HealthDTO } from './types.js';
+
+const START_PORT = 8000;
+const END_PORT = 8010;
+const STARTED_AT = Date.now();
+
+// 打包版（前端产物在 ROOT/app/web/dist 下）才自动开浏览器；开发时用 Vite 的 5173
+const isPackaged = WEB_DIST.includes(`${join('app', 'web', 'dist')}`);
+
+/** @hono/node-server 会把 Node 的 req/res 挂在 c.env 上 */
+interface NodeServerEnv {
+  incoming: { socket: { remoteAddress?: string } };
+}
+
+const app = new Hono();
+
+// 局域网只读中间件：非 loopback 且方法不是 GET/HEAD → 403
+const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+app.use('*', async (c, next) => {
+  const raw = (c.env as NodeServerEnv).incoming.socket.remoteAddress ?? '';
+  const addr = raw.startsWith('::ffff:') ? raw.slice('::ffff:'.length) : raw;
+  const isLocal = LOOPBACK.has(raw) || LOOPBACK.has(addr) || addr === '';
+  const method = c.req.method;
+  if (!isLocal && method !== 'GET' && method !== 'HEAD') {
+    return c.json({ error: '局域网访问只读' }, 403);
+  }
+  await next();
+});
+
+app.get('/health', (c) => {
+  let dbState: HealthDTO['db'] = 'ok';
+  try {
+    db.prepare('SELECT 1').get();
+  } catch {
+    dbState = 'error';
+  }
+  const stats = getPipelineStats();
+  const qq = getConnectStatus().state;
+  const body: HealthDTO = {
+    status: dbState === 'ok' && qq === 'online' && stats.llm !== 'error' ? 'ok' : 'degraded',
+    db: dbState,
+    qq,
+    llm: stats.llm,
+    jev: 'disabled',
+    filtered_count: stats.filtered_count,
+    llm_called_count: stats.llm_called_count,
+    uptime: Math.round((Date.now() - STARTED_AT) / 1000),
+  };
+  return c.json(body);
+});
+
+registerBusinessRoutes(app);
+registerConnectRoutes(app);
+
+// 静态文件：WEB_DIST 存在才 serve，非 /api、非 /health 的 GET 回落到 index.html
+if (existsSync(WEB_DIST)) {
+  const INDEX_HTML = join(WEB_DIST, 'index.html');
+  app.use('*', async (c, next) => {
+    if (c.req.method !== 'GET' && c.req.method !== 'HEAD') return next();
+    const path = c.req.path;
+    if (path.startsWith('/api') || path === '/health') return next();
+    const rel = path === '/' ? 'index.html' : decodeURIComponent(path).replace(/^\/+/, '');
+    const file = join(WEB_DIST, rel);
+    if (rel !== 'index.html' && !file.startsWith(WEB_DIST)) {
+      return c.json({ error: '非法路径' }, 400);
+    }
+    if (existsSync(file)) {
+      const type = mimeOf(file);
+      const body = await readFile(file);
+      return c.body(body, 200, { 'Content-Type': type });
+    }
+    const html = await readFile(INDEX_HTML);
+    return c.body(html, 200, { 'Content-Type': 'text/html; charset=utf-8' });
+  });
+}
+
+const MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.txt': 'text/plain; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+};
+
+function mimeOf(file: string): string {
+  const dot = file.lastIndexOf('.');
+  if (dot < 0) return 'application/octet-stream';
+  return MIME[file.slice(dot).toLowerCase()] ?? 'application/octet-stream';
+}
+
+/** 端口从 8000 起，EADDRINUSE 则 +1 重试，最多到 8010 */
+async function listenWithFallback(): Promise<number> {
+  for (let port = START_PORT; port <= END_PORT; port++) {
+    const ok = await new Promise<boolean>((resolve) => {
+      const server = serve({ fetch: app.fetch, port, hostname: '0.0.0.0' }, () => resolve(true));
+      server.on('error', (err: NodeJS.ErrnoException) => {
+        if (err.code === 'EADDRINUSE') {
+          console.log(`端口 ${port} 被占用，换 ${port + 1} 试试`);
+        } else {
+          console.error(`监听 ${port} 失败：${err.message}`);
+        }
+        resolve(false);
+      });
+    });
+    if (ok) return port;
+  }
+  throw new Error(`端口 ${START_PORT}~${END_PORT} 都被占用了`);
+}
+
+openDb();
+
+const port = await listenWithFallback();
+console.log(`ClassRep 已启动：http://localhost:${port}`);
+
+startScheduler();
+startNapcat();
+startCleanupJob();
+
+if (isPackaged) {
+  // 打包版才自动打开浏览器（架构.md §3）
+  exec(`start "" http://localhost:${port}`);
+}
+
+let stopping = false;
+function shutdown(): void {
+  if (stopping) return;
+  stopping = true;
+  try {
+    stopNapcat();
+  } catch {
+    // 退出路径上不再抛
+  }
+  try {
+    db.close();
+  } catch {
+    // 同上
+  }
+  console.log('ClassRep 已退出');
+  process.exit(0);
+}
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

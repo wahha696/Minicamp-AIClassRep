@@ -1,0 +1,6 @@
+packages:
+  - apps/*
+
+# esbuild 的安装脚本必须放行，否则 vite/打包会拿不到原生二进制
+onlyBuiltDependencies:
+  - esbuild

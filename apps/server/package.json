@@ -1,0 +1,24 @@
+{
+  "name": "server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.0",
+    "hono": "^4.9.0",
+    "openai": "^6.0.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.25.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

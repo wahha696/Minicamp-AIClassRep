@@ -6,3 +6,19 @@ dist/
 
 # 本地工具与账号数据（含 API Key、WebUI token、QQ 账号配置）
 tools/
+
+# 采集端（含账号数据，不通过 git 传）
+napcat/
+
+# 运行时数据（只保留仿真剧本 data/mock/）
+data/*
+!data/mock/
+
+# 打包产物与私密配置
+release/
+.env.release
+
+# corepack 下载的 pnpm（本机缓存）与 pnpm 包仓库缓存
+.corepack/
+.pnpm-store/
+*.tsbuildinfo
