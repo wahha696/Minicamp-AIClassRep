@@ -9,6 +9,7 @@ import { MOCK_DIR } from '../paths.js';
 import type { Message } from '../types.js';
 import { type ExtractInput, type ExtractedEvent, extractEvents } from './extract.js';
 import { isNoise } from './filter.js';
+import { filterWithJev } from './jev.js';
 import { getPipelineStats } from './index.js';
 import { llmStats } from './stats.js';
 import { resetLlmRetry, runPipelineNow, tick } from './scheduler.js';
@@ -17,7 +18,9 @@ vi.mock('./extract.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./extract.js')>()),
   extractEvents: vi.fn(),
 }));
+vi.mock('./jev.js', () => ({ filterWithJev: vi.fn() }));
 const extract = vi.mocked(extractEvents);
+const jev = vi.mocked(filterWithJev);
 
 const NOW = Date.now();
 
@@ -69,6 +72,8 @@ beforeEach(() => {
   openDb(':memory:');
   extract.mockReset();
   extract.mockResolvedValue([]);
+  jev.mockReset();
+  jev.mockResolvedValue(null);
   resetLlmRetry();
 });
 afterEach(() => vi.restoreAllMocks());
@@ -141,6 +146,38 @@ describe('runPipelineNow', () => {
     await runPipelineNow();
     expect(extract).not.toHaveBeenCalled();
     expect(count('filtered_out = 1')).toBe(20);
+  });
+
+  it('Jev 丢弃闲聊、保留改期，并在没有剩余候选时省去 LLM', async () => {
+    const messages = chat('demo-jev', 3, '今天作业提交安排是什么');
+    messages[0]!.text = '下周二交实验报告';
+    messages[1]!.text = '今晚约饭吗同学们';
+    messages[2]!.text = '实验报告改成周五交';
+    ingestMessages(messages, 'demo');
+    jev.mockImplementationOnce(async (candidates) => [candidates[0]!, candidates[2]!]);
+    await runPipelineNow();
+    expect(extract.mock.calls[0]![0].candidates.map((m) => m.text)).toEqual([
+      '下周二交实验报告', '实验报告改成周五交',
+    ]);
+    expect(count('filtered_out = 1')).toBe(1);
+    expect(getPipelineStats().jev_filtered_count).toBeGreaterThanOrEqual(1);
+
+    const onlyChat = chat('demo-jev', 1, '晚上一起打游戏吗');
+    onlyChat[0]!.message_id = 'another-chat';
+    ingestMessages(onlyChat, 'demo');
+    jev.mockResolvedValueOnce([]);
+    extract.mockClear();
+    await runPipelineNow();
+    expect(extract).not.toHaveBeenCalled();
+  });
+
+  it('Jev 失败时原候选全部交给 LLM', async () => {
+    const messages = chat('demo-jev-fallback', 2, '明天考试地点有改动');
+    ingestMessages(messages, 'demo');
+    jev.mockResolvedValueOnce(null);
+    await runPipelineNow();
+    expect(extract.mock.calls[0]![0].candidates).toHaveLength(2);
+    expect(count('filtered_out = 1')).toBe(0);
   });
 
   it('关掉的群不处理，也不会空转', async () => {

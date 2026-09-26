@@ -31,7 +31,13 @@ const LLM_TEXT: Record<HealthDTO['llm'], string> = {
 
 /** health 为 undefined 表示读不到 /health（后端没开或断网） */
 export function lightsFromHealth(health: HealthDTO | undefined): Light[] {
-  const jev: Light = { key: 'jev', label: '快判', color: 'gray', tip: '快判层：预留，暂未启用' };
+  const jev: Light = !health || health.jev === 'disabled'
+    ? { key: 'jev', label: '快判', color: 'gray', tip: 'Jev 快判：已关闭' }
+    : health.jev === 'ok'
+      ? { key: 'jev', label: '快判', color: 'green', tip: 'Jev 快判：正常' }
+      : { key: 'jev', label: '快判', color: 'red', tip: health.jev === 'unconfigured'
+          ? 'Jev 快判：未配置 TypeSafe API Key，消息仍由 AI 处理'
+          : 'Jev 快判：最近一次调用失败，消息已交给 AI 处理' };
   if (!health) {
     const down = '无法连接到 ClassRep，请确认启动窗口没有关闭';
     return [

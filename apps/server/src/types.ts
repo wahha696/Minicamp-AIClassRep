@@ -80,15 +80,17 @@ export interface ConnectStatusDTO {
 }
 
 export interface PipelineStats {
-  filtered_count: number;    // 累计被规则过滤掉的消息数
+  filtered_count: number;    // 累计被规则或 Jev 过滤掉的消息数
+  jev_filtered_count: number; // 本进程 Jev 累计过滤的消息数
+  jev_called_count: number; // 本进程 Jev 累计调用次数
   llm_called_count: number;  // 累计 LLM 调用次数
   llm: 'ok' | 'error' | 'unconfigured';  // 最近一次调用结果；没配 key 为 unconfigured
+  jev: 'ok' | 'error' | 'unconfigured' | 'disabled';
 }
 
 export interface HealthDTO extends PipelineStats {
   status: 'ok' | 'degraded';
   db: 'ok' | 'error';
   qq: ConnectState;
-  jev: 'disabled';
   uptime: number;       // 秒
 }

@@ -102,8 +102,10 @@ export default function Demo() {
 
       {/* 统计卡（FR-3.2） */}
       <div className="grid grid-cols-2 gap-3">
-        <Stat label="规则累计过滤" value={h?.filtered_count} unit="条" hint="闲聊、表情、「收到」等噪声" />
-        <Stat label="AI 累计调用" value={h?.llm_called_count} unit="次" hint="只有可能是通知的消息才交给 AI" />
+        <Stat label="累计过滤" value={h?.filtered_count} unit="条" hint="规则与 Jev 合计" />
+        <Stat label="Jev 快判过滤" value={h?.jev_filtered_count} unit="条" hint="本次启动后 Jev 判断为无日程信息的消息" />
+        <Stat label="Jev 累计调用" value={h?.jev_called_count} unit="次" hint="每批候选消息一起判断" />
+        <Stat label="AI 累计调用" value={h?.llm_called_count} unit="次" hint="快判保留的消息交给 AI 提取日程" />
       </div>
 
       <Card title="回放剧本">

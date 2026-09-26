@@ -66,6 +66,10 @@ export function buildEnv(src: Record<string, string | undefined>) {
     LLM_BASE_URL: src.LLM_BASE_URL ?? '',
     LLM_API_KEY: src.LLM_API_KEY ?? '',
     LLM_MODEL: src.LLM_MODEL ?? '',
+    ENABLE_JEV: (src.ENABLE_JEV ?? 'true').trim().toLowerCase() === 'true',
+    TYPESAFE_API_KEY: src.TYPESAFE_API_KEY ?? '',
+    JEV_MODEL: src.JEV_MODEL?.trim() || 'jev-latest',
+    JEV_TIMEOUT_MS: positiveNum(src.JEV_TIMEOUT_MS, 5_000),
     DEMO_MODE: (src.DEMO_MODE ?? 'true').trim() === 'true',
     RAW_MSG_TTL_DAYS: positiveNum(src.RAW_MSG_TTL_DAYS, 7),
   };

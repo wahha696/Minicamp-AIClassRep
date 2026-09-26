@@ -114,7 +114,7 @@ describe('mock 模式', () => {
     const h = await c.getHealth();
     expect(h).toMatchObject({ db: 'ok', jev: 'disabled' });
     expect(Object.keys(h).sort()).toEqual(
-      ['db', 'filtered_count', 'jev', 'llm', 'llm_called_count', 'qq', 'status', 'uptime'],
+      ['db', 'filtered_count', 'jev', 'jev_called_count', 'jev_filtered_count', 'llm', 'llm_called_count', 'qq', 'status', 'uptime'],
     );
   });
 });
