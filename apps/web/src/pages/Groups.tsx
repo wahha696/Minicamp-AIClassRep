@@ -6,7 +6,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import { useToast } from '../components/Toast';
 import { usePolling } from '../hooks/usePolling';
 import { toastError } from '../lib/errors';
-import { filterGroups } from '../lib/groups';
+import { filterGroups, groupsToChange, runInBatches } from '../lib/groups';
 
 export default function Groups() {
   const { data, error, loading, refresh } = usePolling(getGroups, 10_000);
@@ -17,6 +17,33 @@ export default function Groups() {
   const [deleting, setDeleting] = useState(false);
   const [query, setQuery] = useState('');
   const shown = data ? filterGroups(data, query) : null;
+  const [bulk, setBulk] = useState<boolean | null>(null); // 正在一键全开(true) / 全关(false)
+
+  /** 一键全开 / 全关：只作用于当前列表里显示的群（搜索时就是搜索结果） */
+  async function onBulk(enabled: boolean) {
+    if (!shown) return;
+    const targets = groupsToChange(shown, enabled);
+    if (targets.length === 0) {
+      toast(enabled ? '已经全部开启了' : '已经全部关闭了');
+      return;
+    }
+    setBulk(enabled);
+    setPending((p) => ({ ...p, ...Object.fromEntries(targets.map((g) => [g.group_id, enabled])) }));
+    try {
+      const failed = await runInBatches(targets, 8, (g) => patchGroup(g.group_id, enabled));
+      await refresh();
+      const ok = targets.length - failed;
+      if (failed === 0) toast(enabled ? `已开启 ${ok} 个群的监听` : `已关闭 ${ok} 个群的监听`);
+      else toast(`${ok} 个成功，${failed} 个失败（在手机上操作会失败，请在电脑上操作）`, 'error');
+    } finally {
+      setPending((p) => {
+        const next = { ...p };
+        for (const g of targets) delete next[g.group_id];
+        return next;
+      });
+      setBulk(null);
+    }
+  }
 
   async function onToggle(g: GroupDTO, enabled: boolean) {
     setPending((p) => ({ ...p, [g.group_id]: enabled }));
@@ -101,6 +128,33 @@ export default function Groups() {
             aria-label="搜索群"
             className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
           />
+        </div>
+      )}
+
+      {shown && shown.length > 0 && (
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-sm">
+          <span className="text-slate-500">
+            {query.trim() ? `找到 ${shown.length} 个群` : `共 ${shown.length} 个群`}，监听中{' '}
+            {shown.filter((g) => pending[g.group_id] ?? g.enabled).length} 个
+          </span>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => void onBulk(true)}
+              disabled={bulk !== null}
+              className="rounded-lg border border-emerald-200 px-3 py-1.5 text-emerald-700 hover:bg-emerald-50 disabled:opacity-60"
+            >
+              {bulk === true ? '开启中…' : query.trim() ? '全部开启（搜索结果）' : '一键全部开启'}
+            </button>
+            <button
+              type="button"
+              onClick={() => void onBulk(false)}
+              disabled={bulk !== null}
+              className="rounded-lg border border-slate-300 px-3 py-1.5 text-slate-600 hover:bg-slate-50 disabled:opacity-60"
+            >
+              {bulk === false ? '关闭中…' : query.trim() ? '全部关闭（搜索结果）' : '一键全部关闭'}
+            </button>
+          </div>
         </div>
       )}
 
