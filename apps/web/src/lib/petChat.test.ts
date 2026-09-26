@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { EventDTO } from '../api/types';
 import { eventTimeText } from './time';
-import { groupListText, petReply, QUICK_QUESTIONS } from './petChat';
+import { dayListText, groupListText, petReply, QUICK_QUESTIONS } from './petChat';
 
 const MIN = 60_000;
 const H = 3_600_000;
@@ -103,5 +103,35 @@ describe('对话框：状态与闲聊', () => {
 
   it('空输入不崩', () => {
     expect(petReply('  ', ctx()).text.length).toBeGreaterThan(0);
+  });
+
+  it('matched 标记：命中规则为 true，只有兜底是 false（LLM 路由依据，PET-12）', () => {
+    expect(petReply('同步一下', ctx()).matched).toBe(true);
+    expect(petReply('给我讲个笑话吧', ctx()).matched).toBe(false);
+  });
+
+  it('「明天干什么」→ 拉明天整天的事件，不再答今天的日程', () => {
+    const a = petReply('明天干什么', ctx());
+    expect(a.matched).toBe(true);
+    expect(a.needEvents).toBeDefined();
+    const midnight = new Date(NOW).setHours(0, 0, 0, 0);
+    expect(a.needEvents?.label).toBe('明天');
+    expect(a.needEvents?.from).toBe(midnight + 86_400_000);
+    expect(a.needEvents!.to - a.needEvents!.from).toBe(24 * H);
+  });
+
+  it('「后天有什么事」→ 后天整天', () => {
+    const a = petReply('后天有什么事', ctx());
+    expect(a.needEvents?.label).toBe('后天');
+    expect(a.needEvents!.to - a.needEvents!.from).toBe(24 * H);
+    expect(a.matched).toBe(true);
+  });
+
+  it('dayListText：有事说事 / 都办完 / 没安排', () => {
+    const tomorrow = NOW + 24 * H;
+    expect(dayListText([ev({ start_at: tomorrow + 2 * H, end_at: tomorrow + 3 * H })], NOW, '明天'))
+      .toContain('明天 1 件事');
+    expect(dayListText([ev({ status: 'done', start_at: tomorrow })], NOW, '明天')).toContain('都办完啦');
+    expect(dayListText([], NOW, '明天')).toBe('明天没有安排，好好休息~');
   });
 });

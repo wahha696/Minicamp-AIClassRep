@@ -42,7 +42,7 @@ B 的 `db`（`node:sqlite` 的 `DatabaseSync`）、`env`、`types.ts`。我直�
 - 输入：`{ groupName, candidates: 消息[], context: 消息[], now: number, activeEvents: 该群近 14 天 active 事件的精简列表 }`。
 - 用 `openai` 包：配置从 `getLlmConfig()`（`llm-settings.ts`）取——连接页保存的 `data/llm.json` 优先，其次 `.env`；配置变了（`version` 变化）自动重建客户端。
   `response_format: { type: 'json_object' }`，`temperature: 0`。提示词第 1 条注明：没有 @ 任何人的通知视为对全体同学，照常提取；`[at]` 表示 @全体成员 或 @了我。
-- system prompt 要点（中文写）：你是大学生的课代表；当前时间 `YYYY-MM-DD HH:mm 星期X（Asia/Shanghai）`；只提取需要学生行动或到场的事项；相对时间换算为绝对时间，输出 `YYYY-MM-DDTHH:mm+08:00` 字符串；「周五」指本周五，若已过则下周五；只有日期没时间的截止 → 当天 23:59；不确定的字段给 null；闲聊返回空数组；**若是对下面已有事件的改期/取消/补充，填 `update_of` 为已有事件 id，并用 `action` 说明**。
+- system prompt 要点（中文写）：你是大学生的课代表；当前时间 `YYYY-MM-DD HH:mm 星期X（Asia/Shanghai）`；只提取需要学生行动或到场的事项；相对时间换算为绝对时间，输出 `YYYY-MM-DDTHH:mm+08:00` 字符串；「周五」指本周五，若已过则下周五；只有日期没时间的截止 → 当天 23:59；不确定的字段给 null；**说定了时间的约定（聚餐、吃饭、出游、打球等）也算，type=activity；没定时间的「约饭吗」「有人开黑吗」这类提议/询问不算**；闲聊返回空数组；**若是对下面已有事件的改期/取消/补充，填 `update_of` 为已有事件 id，并用 `action` 说明**。
 - 输出 zod schema：
   ```ts
   { events: Array<{
