@@ -3,7 +3,7 @@
 import OpenAI from 'openai';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 import { z } from 'zod';
-import { env } from '../env.js';
+import { getLlmConfig } from '../llm-settings.js';
 import type { EventType, Message } from '../types.js';
 import { llmStats } from './stats.js';
 
@@ -178,7 +178,7 @@ export function buildSystemPrompt(now: number): string {
 ${calendar(now)}
 
 规则：
-1. 只提取需要学生行动或到场的事项：考试/小测、作业与提交截止、开会、活动、需要照做的通知（选课、填表、缴费等）。闲聊、约饭、开黑、拼车、吐槽都不算。
+1. 只提取需要学生行动或到场的事项：考试/小测、作业与提交截止、开会、活动、需要照做的通知（选课、填表、缴费等）。闲聊、约饭、开黑、拼车、吐槽都不算。没有 @ 任何人的通知视为对全体同学的通知，照常提取；[at] 表示 @全体成员 或 @了我，同样照常提取。
 2. 相对时间（今天、明天、后天、今晚、下周三……）以**该消息的发送时间**为基准换算成绝对时间，先在日历里找到发送日期所在的那一行，再查表，不要心算星期：「周五 / 本周五」指发送日期所在那一行的周五，若该时刻在发送时间之前（已经过了）则指下一行的周五；「下周X」指发送日期所在行的下一行的周X——哪怕本周的周X还没到，「下周X」也不是本周的周X（周一发的「下周三」是 9 天后，不是 2 天后；周日发的「下周三」是 3 天后）。
 3. 所有时间输出为 "YYYY-MM-DDTHH:mm+08:00" 字符串。考试/会议/活动填 start_at（知道结束时间再填 end_at）；作业/截止类填 deadline_at。只说了日期没说具体时间的截止，按当天 23:59。
 4. 不确定的字段给 null，不要编造。
@@ -212,13 +212,19 @@ export interface LlmClient {
 }
 
 let defaultClient: LlmClient | undefined;
+let clientVersion = -1;
 function getClient(): LlmClient {
-  defaultClient ??= new OpenAI({
-    baseURL: env.LLM_BASE_URL || undefined,
-    apiKey: env.LLM_API_KEY,
-    timeout: 60_000,
-    maxRetries: 1,
-  });
+  const cfg = getLlmConfig();
+  // 网页上换了 key → 重建客户端
+  if (!defaultClient || clientVersion !== cfg.version) {
+    defaultClient = new OpenAI({
+      baseURL: cfg.baseURL || undefined,
+      apiKey: cfg.apiKey,
+      timeout: 60_000,
+      maxRetries: 1,
+    });
+    clientVersion = cfg.version;
+  }
   return defaultClient;
 }
 
@@ -227,7 +233,7 @@ export async function extractEvents(
   client: LlmClient | undefined = undefined,
 ): Promise<ExtractedEvent[]> {
   if (input.candidates.length === 0) return [];
-  if (!client && !env.LLM_API_KEY) {
+  if (!client && !getLlmConfig().apiKey) {
     llmStats.llm = 'unconfigured';
     return [];
   }
@@ -243,7 +249,7 @@ export async function extractEvents(
     try {
       llmStats.called++;
       const res = await llm.chat.completions.create({
-        model: env.LLM_MODEL || 'deepseek-chat',
+        model: getLlmConfig().model,
         messages,
         response_format: { type: 'json_object' },
         temperature: 0,

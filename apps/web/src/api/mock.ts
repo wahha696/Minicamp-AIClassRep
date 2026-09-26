@@ -12,6 +12,7 @@ import type {
   EventDTO,
   GroupDTO,
   HealthDTO,
+  LlmSettingsDTO,
   HistoryDTO,
   ScenarioDTO,
   SourceMessageDTO,
@@ -375,4 +376,18 @@ export const mockApi: Api = {
     };
     return delay(health);
   },
+
+  getLlmSettings() {
+    return delay({ ...mockLlm });
+  },
+
+  saveLlmSettings(provider, apiKey) {
+    const key = apiKey.trim();
+    if (!key) return fail('API Key 不能为空', 400);
+    if (!/^sk-[A-Za-z0-9_-]{8,}$/.test(key)) return fail('API Key 格式不对，应以 sk- 开头', 400);
+    mockLlm = { provider, configured: true, key_hint: `${key.slice(0, 3)}****${key.slice(-4)}`, source: 'web' };
+    return delay({ ...mockLlm });
+  },
 };
+
+let mockLlm: LlmSettingsDTO = { provider: 'deepseek', configured: false, key_hint: '', source: 'none' };

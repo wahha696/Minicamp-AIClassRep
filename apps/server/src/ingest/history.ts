@@ -3,7 +3,7 @@
 import { db } from '../db/index.js';
 import { env } from '../env.js';
 import { ingestMessages } from './index.js';
-import { callAction, getGroupNameCached, toMessage } from '../napcat/onebot.js';
+import { callAction, getGroupNameCached, isMentionOther, toMessage } from '../napcat/onebot.js';
 import type { Message } from '../types.js';
 
 let inflight: Promise<{ groups: number; messages: number }> | null = null;
@@ -43,6 +43,7 @@ async function doSync(): Promise<{ groups: number; messages: number }> {
       const resp = await callAction<unknown>('get_group_msg_history', { group_id: Number(groupId), count: 200 });
       const msgs: Message[] = [];
       for (const item of extractMessages(resp)) {
+        if (isMentionOther(item)) continue; // @规则：只 @了别人的消息忽略（与实时消息一致）
         const m = toMessage(withEventFields(item, groupId), () => getGroupNameCached(groupId));
         if (m !== null && m.sent_at >= since) msgs.push(m);
       }
