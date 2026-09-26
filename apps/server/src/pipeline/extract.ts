@@ -31,6 +31,7 @@ export interface ActiveEventBrief {
   end_at: number | null;
   deadline_at: number | null;
   location: string | null;
+  action_required: string | null; // 补充要求时 LLM 要在旧要求上合并，所以得让它看到
 }
 
 export interface ExtractInput {
@@ -92,7 +93,8 @@ const EventSchema = z.object({
     (v) => (typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : v),
     z.number().int().nullish().transform((v) => v ?? null),
   ),
-  type: z.enum(['exam', 'assignment', 'meeting', 'activity', 'announcement', 'other']),
+  // 编出来的类型（如 survey）归到 other，不值得为此重试一次
+  type: z.enum(['exam', 'assignment', 'meeting', 'activity', 'announcement', 'other']).catch('other'),
   // update / cancel 只填变化的字段，标题可以不给；这时是 ''，reconcile 按「不改」处理
   title: z.string().nullish().transform((v) => v?.trim() ?? ''),
   description: z.string().nullish().transform((v) => v?.trim() ?? ''),
@@ -146,19 +148,41 @@ function fmtEvent(e: ActiveEventBrief): string {
     end_at: t(e.end_at),
     deadline_at: t(e.deadline_at),
     location: e.location,
+    action_required: e.action_required,
   });
+}
+
+const DAY = 86400_000;
+
+/** 上周到下下周的日历（每周从周一开始），让 LLM 查表而不是自己推算星期 */
+function calendar(now: number): string {
+  const d = new Date(now + TZ_OFFSET);
+  const today = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  const monday = today - ((d.getUTCDay() + 6) % 7) * DAY;
+  const labels = ['上周', '本周', '下周', '下下周'];
+  return labels
+    .map((label, w) => {
+      const days = Array.from({ length: 7 }, (_, i) => {
+        const x = new Date(monday + (w - 1) * 7 * DAY + i * DAY);
+        return `${pad(x.getUTCMonth() + 1)}-${pad(x.getUTCDate())}(${WEEKDAY[x.getUTCDay()]})`;
+      });
+      return `${label}：${days.join(' ')}`;
+    })
+    .join('\n');
 }
 
 export function buildSystemPrompt(now: number): string {
   return `你是大学班级群里的「AI 课代表」，负责从群消息里找出需要同学行动或到场的事项。
 当前时间：${fmtShanghai(now)}（Asia/Shanghai）。
+日历（${new Date(now + TZ_OFFSET).getUTCFullYear()} 年，每周从周一开始，「本周」指当前时间所在的周）：
+${calendar(now)}
 
 规则：
 1. 只提取需要学生行动或到场的事项：考试/小测、作业与提交截止、开会、活动、需要照做的通知（选课、填表、缴费等）。闲聊、约饭、开黑、拼车、吐槽都不算。
-2. 相对时间（今天、明天、后天、今晚、下周三……）以**该消息的发送时间**为基准换算成绝对时间。「周五」指发送时间所在周的周五，若那天已过则指下周五；「下周X」指下一周的周X（每周从周一开始）。
+2. 相对时间（今天、明天、后天、今晚、下周三……）以**该消息的发送时间**为基准换算成绝对时间，先在日历里找到发送日期所在的那一行，再查表，不要心算星期：「周五 / 本周五」指发送日期所在那一行的周五，若该时刻在发送时间之前（已经过了）则指下一行的周五；「下周X」指发送日期所在行的下一行的周X——哪怕本周的周X还没到，「下周X」也不是本周的周X（周一发的「下周三」是 9 天后，不是 2 天后；周日发的「下周三」是 3 天后）。
 3. 所有时间输出为 "YYYY-MM-DDTHH:mm+08:00" 字符串。考试/会议/活动填 start_at（知道结束时间再填 end_at）；作业/截止类填 deadline_at。只说了日期没说具体时间的截止，按当天 23:59。
 4. 不确定的字段给 null，不要编造。
-5. 下面会给出本群已有的事件（带 id）。如果某条消息是对已有事件的改期、换地点、补充要求，输出 action="update"、update_of=该事件 id，并**只填变化后的字段**，没变的字段给 null（填了的字段会整个覆盖旧值：补充要求时 action_required 要写合并后的完整要求；description 除非事项内容本身变了，否则给 null）；如果是取消，输出 action="cancel"、update_of=该事件 id。名字相近但不是同一件事的（比如「高数期中」和「线代期中」）不要混为一谈。已有事件的单纯重复提醒不要输出。
+5. 下面会给出本群已有的事件（带 id）。如果某条消息是对已有事件的改期、换地点、补充要求，输出 action="update"、update_of=该事件 id，并**只填变化后的字段**，没变的字段给 null（填了的字段会整个覆盖旧值：补充要求时 action_required 要写「已有事件的 action_required + 新要求」合并后的完整要求，旧要求一条都不能丢；description 除非事项内容本身变了，否则给 null）；如果是取消，输出 action="cancel"、update_of=该事件 id。名字相近但不是同一件事的（比如「高数期中」和「线代期中」）不要混为一谈。已有事件的单纯重复提醒不要输出。
 6. 同一批消息里既有原通知又有改动的，只输出一个按改动后信息填写的 create。
 7. confidence 是你对「这确实是一个需要行动的事项、且信息理解正确」的把握，0~1。
 8. source_message_ids 填提供该事项信息的消息 id（方括号里的内容，原样照抄）。

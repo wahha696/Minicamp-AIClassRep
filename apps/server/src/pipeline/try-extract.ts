@@ -65,6 +65,7 @@ for (let i = 0; i < msgs.length; i += BATCH) {
       target.end_at = ev.end_at ?? target.end_at;
       target.deadline_at = ev.deadline_at ?? target.deadline_at;
       target.location = ev.location ?? target.location;
+      target.action_required = ev.action_required ?? target.action_required;
       target.version++;
     } else {
       events.push({
@@ -75,6 +76,7 @@ for (let i = 0; i < msgs.length; i += BATCH) {
         end_at: ev.end_at,
         deadline_at: ev.deadline_at,
         location: ev.location,
+        action_required: ev.action_required,
         status: 'active',
         version: 1,
       });
