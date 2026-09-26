@@ -23,12 +23,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getGroups, getToday, syncNow } from '../api/client';
+import { getEvents, getGroups, getToday, syncNow } from '../api/client';
 import type { ConnectState } from '../api/types';
 import { useConnectStatus } from './ConnectStatus';
 import { usePolling } from '../hooks/usePolling';
 import { clamp, petGreeting, petLine } from '../lib/pet';
-import { groupListText, petReply, QUICK_QUESTIONS } from '../lib/petChat';
+import { dayListText, groupListText, petReply, QUICK_QUESTIONS } from '../lib/petChat';
 import type { ChatAction } from '../lib/petChat';
 import { askPetLlm, llmAvailable } from '../lib/petLlm';
 import nailongUrl from '../assets/nailong.jpg';
@@ -181,6 +181,13 @@ export default function Pet() {
       void getGroups()
         .then((gs) => pushMsg('bot', groupListText(gs)))
         .catch(() => pushMsg('bot', '群列表没取到，去「群管理」页看看吧。'));
+    }
+    if (answer.needEvents) {
+      // 明天/后天：拉对应整天的事件再回答（规则有真实数据，不走 LLM）
+      const { label, from, to } = answer.needEvents;
+      void getEvents(from, to)
+        .then((evs) => pushMsg('bot', dayListText(evs, Date.now(), label)))
+        .catch(() => pushMsg('bot', `${label}的安排没取到，去「本周」页看看吧。`));
     }
     if (answer.action) runAction(answer.action);
   }
