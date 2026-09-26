@@ -109,6 +109,10 @@ export function bannerFor(status: ConnectStatusDTO | undefined, pathname: string
 
 export const SKIP_CONNECT_KEY = 'skipConnect';
 
+/** D5：首次看到 online 时弹一次「电脑版 QQ 已由 ClassRep 接管」，弹过就记下，不再弹 */
+export const TAKEOVER_NOTICE_KEY = 'takeoverNoticeShown';
+export const TAKEOVER_NOTICE_TEXT = '电脑版 QQ 已由 ClassRep 接管，聊天请用手机 QQ';
+
 /** first_run 时把用户拦到 /connect；D5 里点「先用演示模式看看」会写 localStorage.skipConnect=1 放行 */
 export function shouldRedirectToConnect(
   status: ConnectStatusDTO | undefined,
