@@ -53,15 +53,22 @@ function loadEnvFiles(): void {
 
 loadEnvFiles();
 
-function num(raw: string | undefined, fallback: number): number {
+/** 正数才采用；空串、0、负数、非数字一律回落默认值（TTL=0 会把原始消息全删光） */
+function positiveNum(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
   const n = Number(raw);
-  return Number.isFinite(n) ? n : fallback;
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-export const env = {
-  LLM_BASE_URL: process.env.LLM_BASE_URL ?? '',
-  LLM_API_KEY: process.env.LLM_API_KEY ?? '',
-  LLM_MODEL: process.env.LLM_MODEL ?? '',
-  DEMO_MODE: (process.env.DEMO_MODE ?? 'true') === 'true',
-  RAW_MSG_TTL_DAYS: num(process.env.RAW_MSG_TTL_DAYS, 7),
-};
+/** 从一组环境变量算出 env（纯函数，测试直接喂对象，不依赖真实 process.env / .env） */
+export function buildEnv(src: Record<string, string | undefined>) {
+  return {
+    LLM_BASE_URL: src.LLM_BASE_URL ?? '',
+    LLM_API_KEY: src.LLM_API_KEY ?? '',
+    LLM_MODEL: src.LLM_MODEL ?? '',
+    DEMO_MODE: (src.DEMO_MODE ?? 'true').trim() === 'true',
+    RAW_MSG_TTL_DAYS: positiveNum(src.RAW_MSG_TTL_DAYS, 7),
+  };
+}
+
+export const env = buildEnv(process.env);

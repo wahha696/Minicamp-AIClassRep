@@ -42,7 +42,8 @@ export function ingestMessages(msgs: Message[], source: MessageSource): { insert
         groups.set(msg.group_id, { name: msg.group_name, enabled: 1 });
       } else {
         if (known.enabled === 0) continue; // 关掉的群，消息直接丢
-        if (known.name !== msg.group_name) {
+        // 空群名不覆盖已有群名（历史补齐等来源可能拿不到群名）
+        if (msg.group_name !== '' && known.name !== msg.group_name) {
           renameGroup.run(msg.group_name, msg.group_id);
           known.name = msg.group_name;
         }
@@ -79,7 +80,7 @@ export function upsertGroup(group_id: string, name: string, adapter: MessageSour
     ).run(group_id, name, adapter, Date.now());
     return;
   }
-  if (existing.name !== name) {
+  if (name !== '' && existing.name !== name) {
     db.prepare('UPDATE groups SET name = ? WHERE group_id = ?').run(name, group_id);
   }
 }

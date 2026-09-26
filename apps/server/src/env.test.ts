@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { env, parseEnvFile } from './env.js';
+import { buildEnv, env, parseEnvFile } from './env.js';
 import { ROOT } from './paths.js';
 
 describe('parseEnvFile', () => {
@@ -54,10 +54,27 @@ describe('env', () => {
     expect(typeof env.RAW_MSG_TTL_DAYS).toBe('number');
   });
 
-  it('默认值：DEMO_MODE=true、RAW_MSG_TTL_DAYS=7', () => {
-    // 仓库里没有 .env（只有 .env.example），也没有对应的真实环境变量
-    expect(env.DEMO_MODE).toBe(true);
-    expect(env.RAW_MSG_TTL_DAYS).toBe(7);
+  it('默认值：DEMO_MODE=true、RAW_MSG_TTL_DAYS=7（不依赖本机 .env / 环境变量）', () => {
+    expect(buildEnv({})).toEqual({
+      LLM_BASE_URL: '',
+      LLM_API_KEY: '',
+      LLM_MODEL: '',
+      DEMO_MODE: true,
+      RAW_MSG_TTL_DAYS: 7,
+    });
+  });
+
+  it('DEMO_MODE 只有 true 才开', () => {
+    expect(buildEnv({ DEMO_MODE: 'false' }).DEMO_MODE).toBe(false);
+    expect(buildEnv({ DEMO_MODE: 'TRUE1' }).DEMO_MODE).toBe(false);
+    expect(buildEnv({ DEMO_MODE: 'true' }).DEMO_MODE).toBe(true);
+  });
+
+  it('RAW_MSG_TTL_DAYS：空串 / 0 / 负数 / 非数字回落 7，正数照用', () => {
+    for (const bad of ['', '  ', '0', '-3', 'abc']) {
+      expect(buildEnv({ RAW_MSG_TTL_DAYS: bad }).RAW_MSG_TTL_DAYS).toBe(7);
+    }
+    expect(buildEnv({ RAW_MSG_TTL_DAYS: '3' }).RAW_MSG_TTL_DAYS).toBe(3);
   });
 
   it('.env.example 是合法可解析的样例（键与总约定 §6 一致）', () => {

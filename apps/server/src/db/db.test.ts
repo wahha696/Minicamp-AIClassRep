@@ -115,6 +115,14 @@ describe('db 建表', () => {
     expect(count.n).toBe(1);
   });
 
+  it('openDb 重复调用会关掉旧连接', () => {
+    openDb(':memory:');
+    const old = db;
+    openDb(':memory:');
+    expect(old.isOpen).toBe(false);
+    expect(db.isOpen).toBe(true);
+  });
+
   it('文件库的 journal_mode 是 WAL', () => {
     const dir = mkdtempSync(join(tmpdir(), 'classrep-db-'));
     tempDirs.push(dir);

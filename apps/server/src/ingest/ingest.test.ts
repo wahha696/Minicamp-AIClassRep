@@ -115,6 +115,16 @@ describe('ingestMessages', () => {
     expect(typeof row.created_at).toBe('number');
   });
 
+  it('空群名不覆盖已有群名', () => {
+    freshDb();
+    addGroup('g1', '高数(2)班');
+    ingestMessages([msg('m1', 'g1', '补齐来的消息', '')], 'history');
+    upsertGroup('g1', '', 'onebot');
+    const row = db.prepare('SELECT name FROM groups WHERE group_id = ?').get('g1') as { name: string };
+    expect(row.name).toBe('高数(2)班');
+    expect(countMessages()).toBe(1);
+  });
+
   it('空批次不报错、不改库', () => {
     freshDb();
     expect(ingestMessages([], 'onebot')).toEqual({ inserted: 0 });

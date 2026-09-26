@@ -1,20 +1,18 @@
 // node:sqlite 封装：打开 data/classrep.db（WAL）并建表。
 // 单进程单库：整个后端都 import 这里的 db；openDb() 负责建表（幂等）。
 import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { DATA_DIR } from '../paths.js';
 
 export const DB_FILE = join(DATA_DIR, 'classrep.db');
 
-// 先保证 data/ 存在，再打开库文件（首次运行时 data/ 还没有）
-mkdirSync(DATA_DIR, { recursive: true });
-
 /**
- * 唯一库实例。默认是 data/classrep.db；测试里可以 openDb(':memory:') 换成内存库。
+ * 唯一库实例。openDb() 之后才可用（import 本模块不会碰磁盘）；
+ * 测试里可以 openDb(':memory:') 换成内存库。
  * 别的模块请用 `db.prepare(...)`，不要在别处 new DatabaseSync。
  */
-export let db: DatabaseSync = new DatabaseSync(DB_FILE);
+export let db!: DatabaseSync;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS groups (
@@ -75,7 +73,10 @@ CREATE TABLE IF NOT EXISTS event_history (
  * 传 ':memory:' 则换成内存库（只有测试用），DATA_DIR 不会被创建。
  */
 export function openDb(path: string = DB_FILE): void {
-  if (path !== ':memory:') mkdirSync(DATA_DIR, { recursive: true });
+  // 首次运行时 data/ 还没有：先建目录再打开库文件
+  if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
+  // 重复调用（测试切库）时先关掉旧连接，避免句柄泄漏、Windows 上文件被锁
+  if (db?.isOpen) db.close();
   db = new DatabaseSync(path);
   db.exec('PRAGMA journal_mode=WAL');
   db.exec(SCHEMA);
