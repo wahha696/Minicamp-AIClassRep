@@ -2,9 +2,9 @@
 // 读 .env → openDb() → 建 Hono app → 局域网只读中间件 → 注册路由 → 静态文件
 // → 监听（8000 起顺延）→ startScheduler() → startNapcat() → 清理任务 → 打包版才自动开浏览器
 import { exec } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { env } from './env.js';
@@ -14,6 +14,7 @@ import { getConnectStatus } from './napcat/state.js';
 import { getPipelineStats, startScheduler } from './pipeline/index.js';
 import { startCleanupJob } from './jobs/cleanup.js';
 import { lanReadOnly } from './lan-guard.js';
+import { installCrashHandlers } from './crash-log.js';
 import { registerBusinessRoutes } from './routes/business.js';
 import { registerConnectRoutes } from './routes/connect.js';
 import { DATA_DIR, WEB_DIST } from './paths.js';
@@ -57,6 +58,13 @@ app.get('/health', (c) => {
 
 registerBusinessRoutes(app);
 registerConnectRoutes(app);
+
+// 00-总约定 §7：错误一律 { error: '中文' }；不存在的接口也不例外（默认是纯文本 404）
+app.notFound((c) => c.json({ error: '接口不存在' }, 404));
+app.onError((err, c) => {
+  console.error(`接口出错 ${c.req.method} ${c.req.path}：${err.message}`);
+  return c.json({ error: '服务器内部错误' }, 500);
+});
 
 // 静态文件：WEB_DIST 存在才 serve，非 /api、非 /health 的 GET 回落到 index.html
 if (existsSync(WEB_DIST)) {
@@ -171,18 +179,5 @@ process.on('exit', () => {
 });
 
 // ===== 未捕获异常：中文打印 + 追加写日志，进程不退出（演示时不能因为一条坏消息就整个挂掉）
-const LOG_FILE = join(DATA_DIR, 'logs', 'server.log');
-
-function logCrash(kind: string, err: unknown): void {
-  const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
-  console.error(`ClassRep 出现${kind}（已记日志，进程继续运行）：${detail}`);
-  try {
-    mkdirSync(dirname(LOG_FILE), { recursive: true });
-    appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${kind}：${detail}\n`, 'utf8');
-  } catch {
-    // 日志写不进去也不能让进程挂掉
-  }
-}
-
-process.on('uncaughtException', (err) => logCrash('未捕获异常', err));
-process.on('unhandledRejection', (reason) => logCrash('未处理的 Promise 拒绝', reason));
+// 防 EPIPE 死循环 / 日志上限见 crash-log.ts
+installCrashHandlers(join(DATA_DIR, 'logs', 'server.log'));
