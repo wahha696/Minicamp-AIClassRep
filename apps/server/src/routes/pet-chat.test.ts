@@ -83,6 +83,23 @@ describe('buildPetMessages：人设与顺序', () => {
     const msgs = buildPetMessages('嗨', [], {});
     expect(String((msgs[0] as { content: string }).content)).toContain('（暂无）');
   });
+
+  it('默认人设是奶龙；自定义风格会替换第一行但保留安全要求', () => {
+    const sys = (msgs: ReturnType<typeof buildPetMessages>) => String((msgs[0] as { content: string }).content);
+    expect(sys(buildPetMessages('嗨', [], {}))).toContain('奶龙');
+    const custom = sys(buildPetMessages('嗨', [], {}, '一只毒舌的猫娘课代表，句尾带喵'));
+    expect(custom).toContain('毒舌的猫娘课代表');
+    expect(custom).not.toContain('奶龙');
+    expect(custom).toContain('不要编造'); // 安全要求不能被自定义风格挤掉
+  });
+
+  it('自定义风格裁剪：120 字上限、换行压成空格；空串视为未配置', () => {
+    const p = parsePetChatBody({ message: '嗨', style: 'a\nb\t c'.padEnd(130, 'x') });
+    expect(p?.style?.length).toBeLessThanOrEqual(120);
+    expect(p?.style).not.toMatch(/[\n\t]/);
+    expect(parsePetChatBody({ message: '嗨', style: '   ' })?.style).toBeUndefined();
+    expect(parsePetChatBody({ message: '嗨' })?.style).toBeUndefined();
+  });
 });
 
 describe('petChatReply：成功与失败路径', () => {

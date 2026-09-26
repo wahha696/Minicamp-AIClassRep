@@ -23,14 +23,15 @@ export function llmAvailable(): boolean {
   return !isMock;
 }
 
-/** 问一句 DeepSeek（后端代理）。失败抛错，由调用方决定回退话术 */
-export async function askPetLlm(message: string, history: readonly PetLlmMsg[], ctx: PetLlmCtx): Promise<string> {
+/** 问一句 DeepSeek（后端代理）。失败抛错，由调用方决定回退话术。style = 用户自定义人设/说话风格（可选） */
+export async function askPetLlm(message: string, history: readonly PetLlmMsg[], ctx: PetLlmCtx, style?: string): Promise<string> {
   if (isMock) throw new Error('mock 模式没有 LLM');
   const res = await fetch('/api/pet/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       message,
+      style: style?.trim() ? style.trim().slice(0, 120) : undefined, // 空则服务端用默认奶龙人设
       // 只带最近 8 条，防止越聊越长；角色名映射到 OpenAI 协议在服务端做
       history: history.slice(-8).map((m) => ({ role: m.role, text: m.text.slice(0, 300) })),
       context: {

@@ -20,6 +20,9 @@
 // - PET-11 高频自主活动：6~12s 一次概率触发散步或跳一下（原来 16~38s），睡觉/收起时不闹腾。
 // - PET-12 对话接入 DeepSeek：规则引擎（lib/petChat.ts）优先——命中即答还能执行动作；
 //   没命中才走 /api/pet/chat 由后端持 key 调 DeepSeek；LLM 失败回退规则兜底，用户无感。
+// - PET-13 自定义形象与说话风格：右键「换形象」打开设置面板；图片压成 256px dataURL 存
+//   localStorage（classrep.pet.img），说话风格（classrep.pet.style）随对话发给后端改 LLM 人设；
+//   两者的初始/默认项都是奶龙，可一键恢复。规则引擎的固定话术不受风格影响。
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -40,6 +43,8 @@ const EDGE = 12; // 左右贴边留白(px)
 const STORE_X = 'classrep.pet.x';
 const STORE_Y = 'classrep.pet.y';
 const STORE_HIDDEN = 'classrep.pet.hidden';
+const STORE_IMG = 'classrep.pet.img';    // PET-13 自定义形象（dataURL；空 = 默认奶龙）
+const STORE_STYLE = 'classrep.pet.style'; // PET-13 自定义说话风格（空 = 默认奶龙人设）
 
 type Phase = 'idle' | 'walk' | 'drag';
 
@@ -89,6 +94,10 @@ export default function Pet() {
   const [chatOpen, setChatOpen] = useState(false);          // PET-7 双击对话框
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);          // 对话记录（收起桌宠也保留）
   const [nowTick, setNowTick] = useState(() => Date.now()); // 30s 心跳：驱动临期提醒与睡眠判断
+  // PET-13 自定义形象与说话风格（默认都是奶龙）
+  const [petImg, setPetImg] = useState<string>(() => readStore(STORE_IMG) || nailongUrl);
+  const [petStyle, setPetStyle] = useState<string>(() => readStore(STORE_STYLE) ?? '');
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const { data } = usePolling(getToday, 60_000);            // PET-4：只读低频轮询，失败静默
   const { data: conn } = useConnectStatus();                // PET-7：复用全局连接状态，零额外请求
@@ -173,7 +182,7 @@ export default function Pet() {
     } else {
       // PET-12：规则没命中 → 走后端 DeepSeek；失败/超时回退规则兜底话术
       const id = pushMsg('bot', '…');
-      void askPetLlm(text, msgsRef.current, ctx)
+      void askPetLlm(text, msgsRef.current, ctx, petStyle)
         .then((reply) => replaceMsg(id, reply))
         .catch(() => replaceMsg(id, answer.text));
     }
@@ -472,7 +481,7 @@ export default function Pet() {
           style={{ transform: `scaleX(${facing})`, transition: 'transform 0.25s ease' }}
         >
           <div className={phase === 'walk' ? 'pet-waddle' : anim === 'hop' ? 'pet-hop' : anim === 'land' ? 'pet-land' : undefined}>
-            <PetSprite sleeping={sleeping} />
+            <PetSprite sleeping={sleeping} src={petImg} />
           </div>
         </div>
 
@@ -502,6 +511,7 @@ export default function Pet() {
                 { label: '去本周', act: () => { setMenuOpen(false); nav('/week'); } },
                 { label: '去群管理', act: () => { setMenuOpen(false); nav('/groups'); } },
                 { divider: true },
+                { label: '换形象…', act: () => { setMenuOpen(false); setSettingsOpen(true); } },
                 { label: '收起桌宠', act: () => { setMenuOpen(false); hide(); } },
               ].map((item, i) =>
                 item.divider ? (
@@ -525,6 +535,24 @@ export default function Pet() {
         {chatOpen && (
           <div className={`absolute ${nearTop ? 'top-full mt-3' : 'bottom-full mb-3'} w-80 ${chatAlign}`}>
             <PetChatPanel msgs={msgs} onSend={send} onClose={() => setChatOpen(false)} />
+          </div>
+        )}
+
+        {/* PET-13 换形象/说话风格面板 */}
+        {settingsOpen && (
+          <div className={`absolute ${nearTop ? 'top-full mt-3' : 'bottom-full mb-3'} w-80 ${chatAlign}`}>
+            <PetSettingsPanel
+              img={petImg}
+              style={petStyle}
+              onPickImage={(f) => {
+                fileToPetImg(f)
+                  .then((dataUrl) => { setPetImg(dataUrl); writeStore(STORE_IMG, dataUrl); setSettingsOpen(false); speak('新形象不错吧~', 3000); })
+                  .catch(() => speak('这张图我读不出来，换一张试试？'));
+              }}
+              onResetImage={() => { setPetImg(nailongUrl); try { localStorage.removeItem(STORE_IMG); } catch { /* 忽略 */ } speak('还是奶龙最经典~', 3000); }}
+              onSaveStyle={(s) => { setPetStyle(s); writeStore(STORE_STYLE, s); setSettingsOpen(false); speak('好，以后就这么聊~', 3000); }}
+              onClose={() => setSettingsOpen(false)}
+            />
           </div>
         )}
       </div>
@@ -606,11 +634,146 @@ function PetChatPanel({ msgs, onSend, onClose }: {
   );
 }
 
-/** 桌宠素材（PET-1）：src/assets/nailong.jpg（奶龙图）。换素材直接替换 assets 里的图片文件即可 */
-function PetSprite({ sleeping }: { sleeping: boolean }) {
+/** 把用户选的图片压成 ≤256px 的 dataURL（控制 localStorage 体积；PNG 保透明） */
+function fileToPetImg(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (!file.type.startsWith('image/')) { reject(new Error('不是图片')); return; }
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const scale = Math.min(1, 256 / Math.max(img.naturalWidth, img.naturalHeight));
+      const w = Math.max(1, Math.round(img.naturalWidth * scale));
+      const h = Math.max(1, Math.round(img.naturalHeight * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const g = canvas.getContext('2d');
+      if (!g) { reject(new Error('canvas 不可用')); return; }
+      g.drawImage(img, 0, 0, w, h);
+      resolve(canvas.toDataURL('image/png'));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('图片读不出来')); };
+    img.src = url;
+  });
+}
+
+/** 桌宠设置面板（PET-13）：换形象 + 说话风格；纯展示，存取在 Pet */
+const STYLE_PRESETS: { label: string; value: string }[] = [
+  { label: '奶龙（默认）', value: '' },
+  { label: '正经课代表', value: '一个正经靠谱的学习助手，说话简洁专业，偶尔提醒我注意休息' },
+  { label: '傲娇学委', value: '傲娇的课代表，嘴上嫌弃但特别靠谱，句尾偶尔带「哼」' },
+  { label: '沙雕网友', value: '沙雕网友，爱玩梗爱吐槽，但还是会把日程和截止时间说清楚' },
+];
+
+function PetSettingsPanel({ img, style, onPickImage, onResetImage, onSaveStyle, onClose }: {
+  img: string;
+  style: string;
+  onPickImage: (file: File) => void;
+  onResetImage: () => void;
+  onSaveStyle: (style: string) => void;
+  onClose: () => void;
+}) {
+  const [draft, setDraft] = useState(style);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  return (
+    <div
+      className="pet-pop overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl"
+      onPointerDown={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.stopPropagation()}
+    >
+      <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/60 px-3.5 py-2">
+        <span className="text-sm font-medium text-slate-800">桌宠设置</span>
+        <button
+          type="button"
+          onClick={onClose}
+          title="关闭（Esc）"
+          className="rounded px-1.5 text-xs text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+        >
+          ✕
+        </button>
+      </div>
+      <div className="space-y-3 px-3 py-3">
+        {/* 形象 */}
+        <div className="flex items-center gap-3">
+          <img src={img} alt="桌宠形象" className="h-14 w-14 rounded-xl border border-slate-200 bg-white object-contain" draggable={false} />
+          <div className="flex flex-col gap-1.5">
+            <button
+              type="button"
+              onClick={() => fileRef.current?.click()}
+              className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-600 hover:bg-slate-50"
+            >
+              换图片…
+            </button>
+            <button
+              type="button"
+              onClick={onResetImage}
+              className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 hover:bg-slate-50"
+            >
+              恢复默认（奶龙）
+            </button>
+          </div>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) onPickImage(f); e.target.value = ''; }}
+          />
+        </div>
+        {/* 说话风格：发给 DeepSeek 的人设；留空 = 默认奶龙 */}
+        <div>
+          <div className="mb-1 text-xs text-slate-500">说话风格（AI 回答的人设；规则回复不受影响）</div>
+          <div className="mb-1.5 flex flex-wrap gap-1.5">
+            {STYLE_PRESETS.map((p) => (
+              <button
+                key={p.label}
+                type="button"
+                onClick={() => setDraft(p.value)}
+                className={`rounded-full border px-2.5 py-1 text-xs ${draft === p.value ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-slate-200 text-slate-500 hover:bg-slate-50'}`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+          <textarea
+            value={draft}
+            maxLength={120}
+            rows={2}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Escape') onClose(); }}
+            placeholder="自定义人设/语气，留空用默认奶龙"
+            className="w-full resize-none rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm text-slate-800 placeholder:text-slate-300 focus:border-indigo-300 focus:outline-none"
+          />
+        </div>
+      </div>
+      <div className="flex justify-end gap-2 border-t border-slate-100 p-2">
+        <button type="button" onClick={onClose} className="rounded-lg border border-slate-200 px-3 py-1.5 text-sm text-slate-500 hover:bg-slate-50">
+          取消
+        </button>
+        <button
+          type="button"
+          onClick={() => onSaveStyle(draft.trim().slice(0, 120))}
+          className="rounded-lg bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700"
+        >
+          保存
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** 桌宠素材（PET-1/PET-13）：默认 src/assets/nailong.jpg（奶龙），可在设置面板换成任意本地图 */
+function PetSprite({ sleeping, src }: { sleeping: boolean; src: string }) {
   return (
     <div className="relative overflow-hidden rounded-2xl bg-white shadow-md" style={{ width: SIZE }}>
-      <img src={nailongUrl} alt="奶龙桌宠" draggable={false} className="pet-bob block" style={{ width: SIZE }} />
+      <img
+        src={src}
+        alt="桌宠"
+        draggable={false}
+        className="pet-bob block"
+        style={{ width: SIZE, height: SIZE * 0.98, objectFit: 'contain' }}
+      />
       {/* PET-9 睡觉时的 Zzz 浮标 */}
       {sleeping && (
         <span className="pet-zzz absolute right-2 top-1.5 text-sm font-bold text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.6)]">

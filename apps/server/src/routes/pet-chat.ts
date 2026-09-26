@@ -24,11 +24,14 @@ export interface ParsedPetChat {
   message: string;
   history: { role: 'user' | 'assistant'; text: string }[];
   context: PetChatContext;
+  /** 用户自定义的人设/说话风格（可选，默认奶龙） */
+  style?: string;
 }
 
 const MAX_MESSAGE = 300;
 const MAX_HISTORY = 12;
 const MAX_TEXT = 300;
+const MAX_STYLE = 120;
 
 /** 解析并裁剪请求体；不合法返回 null */
 export function parsePetChatBody(body: unknown): ParsedPetChat | null {
@@ -36,6 +39,10 @@ export function parsePetChatBody(body: unknown): ParsedPetChat | null {
   const o = body as Record<string, unknown>;
   const message = typeof o.message === 'string' ? o.message.trim().slice(0, MAX_TEXT) : '';
   if (!message) return null;
+
+  // 用户自定义的桌宠人设/说话风格（可选）；换行压成空格，防提示词注入排版
+  const rawStyle = typeof o.style === 'string' ? o.style.replace(/\s+/g, ' ').trim().slice(0, MAX_STYLE) : '';
+  const style = rawStyle || undefined;
 
   const history: { role: 'user' | 'assistant'; text: string }[] = [];
   if (Array.isArray(o.history)) {
@@ -68,13 +75,17 @@ export function parsePetChatBody(body: unknown): ParsedPetChat | null {
       : undefined,
   };
 
-  return { message, history, context };
+  return { message, history, context, style };
 }
 
 /** 组 system + 历史 + 本条消息；token 控制靠上游裁剪 */
-export function buildPetMessages(message: string, history: ParsedPetChat['history'], context: PetChatContext): OpenAI.Chat.ChatCompletionMessageParam[] {
+export function buildPetMessages(message: string, history: ParsedPetChat['history'], context: PetChatContext, style?: string): OpenAI.Chat.ChatCompletionMessageParam[] {
+  // 人设第一行可由用户自定义（默认 = 奶龙）；安全要求始终保留，自定义只改「形象与语气」
+  const personaLine = style?.trim()
+    ? `你是「AI课代表」网页里的桌宠小助手，形象与说话风格由用户自定义（务必遵守）：${style.trim()}。帮同学盯课程群通知、管日程。`
+    : '你是「AI课代表」网页里的桌宠小助手，形象是一只叫奶龙的黄色小龙，帮同学盯课程群通知、管日程。';
   const persona = [
-    '你是「AI课代表」网页里的桌宠小助手，形象是一只叫奶龙的黄色小龙，帮同学盯课程群通知、管日程。',
+    personaLine,
     '回答要求：',
     '- 全程中文口语，简短活泼，最多两句话、不超过 60 字；不要用 Markdown、列表和表情符号。',
     '- 日程、作业、群相关的问题只能根据「现场数据」回答；数据里没有的就直说不知道，并建议看「今日」或「本周」页面。',
@@ -119,7 +130,7 @@ export async function petChatReply(
   try {
     const res = await llm.chat.completions.create({
       model: cfg.model,
-      messages: buildPetMessages(parsed.message, parsed.history, parsed.context),
+      messages: buildPetMessages(parsed.message, parsed.history, parsed.context, parsed.style),
       temperature: 0.8,
       max_tokens: 200,
     });
