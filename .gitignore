@@ -3,3 +3,6 @@ node_modules/
 .env.local
 dist/
 *.log
+
+# 本地工具与账号数据（含 API Key、WebUI token、QQ 账号配置）
+tools/
