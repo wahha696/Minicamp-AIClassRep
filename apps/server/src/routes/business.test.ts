@@ -489,14 +489,19 @@ describe('GET /api/export.ics', () => {
     expect(text).not.toContain('区间外');
   });
 
-  it('cancelled 的不导出；一条可导出的都没有 → 404', async () => {
+  it('cancelled 的不导出；区间里没有可导出的 → 200 空日历（不是 404）', async () => {
     const app = freshApp();
     const today = shanghaiToday();
     addGroup('g1', '高数(2)班');
     addEvent({ title: '已取消', start_at: shTime(today, '14:00'), status: 'cancelled' });
     addEvent({ title: '没时间的' });
 
-    expect((await app.request('/api/export.ics')).status).toBe(404);
+    const res = await app.request('/api/export.ics');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('text/calendar; charset=utf-8');
+    const text = await res.text();
+    expect(text).toContain('BEGIN:VCALENDAR');
+    expect(text).not.toContain('BEGIN:VEVENT');
   });
 
   it('from/to 不是数字 → 400', async () => {
@@ -527,7 +532,9 @@ describe('GET /api/events/:id/export.ics', () => {
     const app = freshApp();
     addGroup('g1', '高数(2)班');
     const noTime = addEvent({ title: '没时间的' });
-    expect((await app.request(`/api/events/${noTime}/export.ics`)).status).toBe(404);
+    const noTimeRes = await app.request(`/api/events/${noTime}/export.ics`);
+    expect(noTimeRes.status).toBe(404);
+    expect(await noTimeRes.json()).toHaveProperty('error');
     expect((await app.request('/api/events/abc/export.ics')).status).toBe(400);
     expect((await app.request('/api/events/9999/export.ics')).status).toBe(404);
   });

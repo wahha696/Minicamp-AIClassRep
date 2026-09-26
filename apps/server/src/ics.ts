@@ -109,7 +109,8 @@ function vtimezoneLines(): string[] {
     'BEGIN:VTIMEZONE',
     `TZID:${TZID}`,
     'BEGIN:STANDARD',
-    `DTSTART:${formatUtc(Date.UTC(1970, 0, 1, -8, 0, 0))}`,
+    // RFC 5545 §3.6.5：VTIMEZONE 子组件的 DTSTART 必须是本地时间（不带 Z）
+    'DTSTART:19700101T000000',
     `TZOFFSETFROM:${TZ_OFFSET}`,
     `TZOFFSETTO:${TZ_OFFSET}`,
     'TZNAME:CST',
@@ -166,10 +167,10 @@ function writeEvent(event: EventDTO, now: number): string[] {
 }
 
 /**
- * 生成 .ics 文本。没有可导出的事件时返回 null（调用方回 404）。
+ * 生成 .ics 文本。没有可导出的事件时也返回合法的空日历（只含 VTIMEZONE）。
  * `now` 只影响 DTSTAMP，测试里传固定值。
  */
-export function buildIcs(events: EventDTO[], now: number = Date.now()): string | null {
+export function buildIcs(events: EventDTO[], now: number = Date.now()): string {
   const exportable = events
     .filter((e) => e.start_at !== null || e.deadline_at !== null)
     .sort((a, b) => {
@@ -178,8 +179,6 @@ export function buildIcs(events: EventDTO[], now: number = Date.now()): string |
       if (ta === null || tb === null) return ta === tb ? a.id - b.id : ta === null ? 1 : -1;
       return ta === tb ? a.id - b.id : ta - tb;
     });
-  if (exportable.length === 0) return null;
-
   const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', `PRODID:${PRODID}`, ...vtimezoneLines()];
   for (const event of exportable) {
     lines.push(...writeEvent(event, now));

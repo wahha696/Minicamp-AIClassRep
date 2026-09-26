@@ -224,11 +224,9 @@ const ICS_HEADERS = {
   'Content-Disposition': 'attachment; filename="classrep.ics"',
 };
 
-/** 事件 → .ics 响应；一条可导出的都没有时 404 */
+/** 事件 → .ics 响应（区间里没有事件时是合法的空日历，照样 200 下载） */
 function icsResponse(c: Context, events: EventDTO[]): Response {
-  const ics = buildIcs(events);
-  if (ics === null) return c.body('', 404, { 'Content-Type': 'text/plain; charset=utf-8' });
-  return c.body(ics, 200, ICS_HEADERS);
+  return c.body(buildIcs(events), 200, ICS_HEADERS);
 }
 
 // ===== 路由
@@ -255,7 +253,7 @@ export function registerBusinessRoutes(app: Hono): void {
     return c.json(selectEventsInRange(lo, hi));
   });
 
-  // 导出 .ics：from/to 同 /api/events（省略的那侧不设限）；一条可导出的都没有 → 404
+  // 导出 .ics：from/to 同 /api/events（省略的那侧不设限）；区间里没事件 → 200 空日历
   // 注意：这条必须注册在 /api/events/:id 之前
   app.get('/api/export.ics', (c) => {
     const range = parseRange(c.req.query('from'), c.req.query('to'));
@@ -274,6 +272,9 @@ export function registerBusinessRoutes(app: Hono): void {
     if (id === null) return c.json({ error: '事件 id 不合法' }, 400);
     const event = getEventById(id);
     if (event === null) return c.json({ error: '事件不存在' }, 404);
+    if (event.start_at === null && event.deadline_at === null) {
+      return c.json({ error: '这条事件没有时间，不能导出到日历' }, 404);
+    }
     return icsResponse(c, [event]);
   });
 

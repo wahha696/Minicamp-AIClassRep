@@ -279,7 +279,7 @@ describe('DELETE /api/groups/:id/data', () => {
     const today = (await getJson(app, '/api/today')).body as { events: unknown[] };
     expect(today.events).toEqual([]);
     expect((await getJson(app, '/api/events')).body).toEqual([]);
-    expect((await app.request('/api/export.ics')).status).toBe(404);
+    expect(await (await app.request('/api/export.ics')).text()).not.toContain('BEGIN:VEVENT');
   });
 
   it('群不存在 → 404', async () => {

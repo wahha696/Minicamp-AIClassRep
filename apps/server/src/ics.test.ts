@@ -84,13 +84,12 @@ describe('foldLine', () => {
 describe('buildIcs', () => {
   it('有可导出事件时返回完整日历骨架与 VTIMEZONE', () => {
     const ics = buildIcs([ev({ start_at: SHANGHAI_1400 })], NOW);
-    expect(ics).not.toBeNull();
-    const ls = lines(ics!);
+    const ls = lines(ics);
     expect(ls[0]).toBe('BEGIN:VCALENDAR');
     expect(ls).toContain('VERSION:2.0');
     expect(ls).toContain('PRODID:-//ClassRep//CN');
     expect(ls[ls.length - 1]).toBe('END:VCALENDAR');
-    // VTIMEZONE：固定 +0800，STANDARD 从上海 19700101T000000 起（= UTC 19691231T160000Z）
+    // VTIMEZONE：固定 +0800，STANDARD 从 19700101T000000 起（RFC 5545：这里必须是本地时间，不能带 Z）
     const start = ls.indexOf('BEGIN:VTIMEZONE');
     const end = ls.indexOf('END:VTIMEZONE');
     expect(start).toBeGreaterThan(-1);
@@ -98,20 +97,21 @@ describe('buildIcs', () => {
     const tz = ls.slice(start, end + 1);
     expect(tz).toContain('TZID:Asia/Shanghai');
     expect(tz).toContain('BEGIN:STANDARD');
-    expect(tz).toContain('DTSTART:19691231T160000Z');
+    expect(tz).toContain('DTSTART:19700101T000000');
+    expect(tz.some((l) => l.startsWith('DTSTART:') && l.endsWith('Z'))).toBe(false);
     expect(tz).toContain('TZOFFSETFROM:+0800');
     expect(tz).toContain('TZOFFSETTO:+0800');
     expect(tz).toContain('END:STANDARD');
   });
 
   it('行尾是 CRLF', () => {
-    const ics = buildIcs([ev({ start_at: SHANGHAI_1400 })], NOW)!;
+    const ics = buildIcs([ev({ start_at: SHANGHAI_1400 })], NOW);
     expect(ics.endsWith('\r\n')).toBe(true);
     expect(ics.split('\r\n').length).toBeGreaterThan(10);
   });
 
   it('有 start_at：DTSTART 带 TZID，DTEND 缺省为 start_at + 1 小时', () => {
-    const ics = buildIcs([ev({ start_at: SHANGHAI_1400, location: 'A301' })], NOW)!;
+    const ics = buildIcs([ev({ start_at: SHANGHAI_1400, location: 'A301' })], NOW);
     const ls = lines(ics);
     expect(ls).toContain('UID:classrep-1@local');
     expect(ls).toContain('DTSTAMP:20260926T060000Z');
@@ -122,12 +122,12 @@ describe('buildIcs', () => {
   });
 
   it('有 end_at 时用 end_at', () => {
-    const ics = buildIcs([ev({ start_at: SHANGHAI_1400, end_at: SHANGHAI_1500 })], NOW)!;
+    const ics = buildIcs([ev({ start_at: SHANGHAI_1400, end_at: SHANGHAI_1500 })], NOW);
     expect(lines(ics)).toContain('DTEND;TZID=Asia/Shanghai:20260926T150000');
   });
 
   it('只有 deadline_at：DTSTART = DTEND = 截止时刻，标题前加【截止】', () => {
-    const ics = buildIcs([ev({ type: 'assignment', title: '交实验报告', deadline_at: SHANGHAI_1500 })], NOW)!;
+    const ics = buildIcs([ev({ type: 'assignment', title: '交实验报告', deadline_at: SHANGHAI_1500 })], NOW);
     const ls = lines(ics);
     expect(ls).toContain('DTSTART;TZID=Asia/Shanghai:20260926T150000');
     expect(ls).toContain('DTEND;TZID=Asia/Shanghai:20260926T150000');
@@ -135,26 +135,32 @@ describe('buildIcs', () => {
   });
 
   it('两个时间都没有的事件不导出；全都不能导出时返回 null', () => {
-    const ics = buildIcs([ev({ start_at: SHANGHAI_1400 }), ev({ id: 2, title: '没时间的事' })], NOW)!;
+    const ics = buildIcs([ev({ start_at: SHANGHAI_1400 }), ev({ id: 2, title: '没时间的事' })], NOW);
     const ls = lines(ics);
     expect(ls.filter((l) => l === 'BEGIN:VEVENT')).toHaveLength(1);
     expect(ls).toContain('UID:classrep-1@local');
     expect(ls).not.toContain('UID:classrep-2@local');
-    expect(buildIcs([ev({ title: '没时间的事' })], NOW)).toBeNull();
-    expect(buildIcs([], NOW)).toBeNull();
+    // 没有可导出的事件：合法的空日历（有骨架和 VTIMEZONE，没有 VEVENT）
+    for (const empty of [buildIcs([ev({ title: '没时间的事' })], NOW), buildIcs([], NOW)]) {
+      const el = lines(empty);
+      expect(el[0]).toBe('BEGIN:VCALENDAR');
+      expect(el[el.length - 1]).toBe('END:VCALENDAR');
+      expect(el).toContain('BEGIN:VTIMEZONE');
+      expect(el).not.toContain('BEGIN:VEVENT');
+    }
   });
 
   it('DESCRIPTION = description + action_required；都为空则没有 DESCRIPTION 行', () => {
     const withBoth = buildIcs(
       [ev({ start_at: SHANGHAI_1400, description: '带计算器', action_required: '提前复习' })],
       NOW,
-    )!;
+    );
     expect(lines(withBoth)).toContain('DESCRIPTION:带计算器\\n提前复习');
 
-    const onlyAction = buildIcs([ev({ start_at: SHANGHAI_1400, action_required: '带计算器' })], NOW)!;
+    const onlyAction = buildIcs([ev({ start_at: SHANGHAI_1400, action_required: '带计算器' })], NOW);
     expect(lines(onlyAction)).toContain('DESCRIPTION:带计算器');
 
-    const none = buildIcs([ev({ start_at: SHANGHAI_1400 })], NOW)!;
+    const none = buildIcs([ev({ start_at: SHANGHAI_1400 })], NOW);
     expect(lines(none).some((l) => l.startsWith('DESCRIPTION'))).toBe(false);
     expect(lines(none).some((l) => l.startsWith('LOCATION'))).toBe(false);
   });
@@ -170,7 +176,7 @@ describe('buildIcs', () => {
         }),
       ],
       NOW,
-    )!;
+    );
     const ls = lines(ics);
     expect(ls).toContain('SUMMARY:[考试]小测\\, 带计算器\\; 别迟到');
     expect(ls).toContain('LOCATION:A301\\, 三楼');
@@ -187,7 +193,7 @@ describe('buildIcs', () => {
       ['other', '其他'],
     ];
     for (const [type, cn] of types) {
-      const ics = buildIcs([ev({ type, title: 'X', start_at: SHANGHAI_1400 })], NOW)!;
+      const ics = buildIcs([ev({ type, title: 'X', start_at: SHANGHAI_1400 })], NOW);
       expect(lines(ics)).toContain(`SUMMARY:[${cn}]X`);
     }
   });
@@ -200,7 +206,7 @@ describe('buildIcs', () => {
         ev({ id: 2, title: '也早', start_at: SHANGHAI_1400 }),
       ],
       NOW,
-    )!;
+    );
     const uids = lines(ics).filter((l) => l.startsWith('UID:'));
     expect(uids).toEqual(['UID:classrep-1@local', 'UID:classrep-2@local', 'UID:classrep-3@local']);
   });
@@ -212,7 +218,7 @@ describe('buildIcs', () => {
         ev({ id: 2, deadline_at: SHANGHAI_1500, type: 'assignment' }),
       ],
       NOW,
-    )!;
+    );
     const ls = lines(ics);
     expect(ls.filter((l) => l === 'BEGIN:VEVENT')).toHaveLength(2);
     expect(ls.filter((l) => l === 'END:VEVENT')).toHaveLength(2);
@@ -220,7 +226,7 @@ describe('buildIcs', () => {
 
   it('很长的标题会折行，且折行后不破坏 SUMMARY 前缀', () => {
     const longTitle = '通'.repeat(60);
-    const ics = buildIcs([ev({ title: longTitle, start_at: SHANGHAI_1400 })], NOW)!;
+    const ics = buildIcs([ev({ title: longTitle, start_at: SHANGHAI_1400 })], NOW);
     const ls = lines(ics);
     const idx = ls.findIndex((l) => l.startsWith('SUMMARY:'));
     expect(idx).toBeGreaterThan(-1);
