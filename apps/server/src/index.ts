@@ -2,9 +2,9 @@
 // 读 .env → openDb() → 建 Hono app → 局域网只读中间件 → 注册路由 → 静态文件
 // → 监听（8000 起顺延）→ startScheduler() → startNapcat() → 清理任务 → 打包版才自动开浏览器
 import { exec } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { env } from './env.js';
@@ -13,9 +13,10 @@ import { startNapcat, stopNapcat } from './napcat/index.js';
 import { getConnectStatus } from './napcat/state.js';
 import { getPipelineStats, startScheduler } from './pipeline/index.js';
 import { startCleanupJob } from './jobs/cleanup.js';
+import { lanReadOnly } from './lan-guard.js';
 import { registerBusinessRoutes } from './routes/business.js';
 import { registerConnectRoutes } from './routes/connect.js';
-import { WEB_DIST } from './paths.js';
+import { DATA_DIR, WEB_DIST } from './paths.js';
 import type { HealthDTO } from './types.js';
 
 const START_PORT = 8000;
@@ -25,25 +26,12 @@ const STARTED_AT = Date.now();
 // 打包版（前端产物在 ROOT/app/web/dist 下）才自动开浏览器；开发时用 Vite 的 5173
 const isPackaged = WEB_DIST.includes(`${join('app', 'web', 'dist')}`);
 
-/** @hono/node-server 会把 Node 的 req/res 挂在 c.env 上 */
-interface NodeServerEnv {
-  incoming: { socket: { remoteAddress?: string } };
-}
-
+/** @hono/node-server 会把 Node 的 req/res 挂在 c.env 上（lan-guard 里读 remoteAddress） */
 const app = new Hono();
 
-// 局域网只读中间件：非 loopback 且方法不是 GET/HEAD → 403
-const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
-app.use('*', async (c, next) => {
-  const raw = (c.env as NodeServerEnv).incoming.socket.remoteAddress ?? '';
-  const addr = raw.startsWith('::ffff:') ? raw.slice('::ffff:'.length) : raw;
-  const isLocal = LOOPBACK.has(raw) || LOOPBACK.has(addr) || addr === '';
-  const method = c.req.method;
-  if (!isLocal && method !== 'GET' && method !== 'HEAD') {
-    return c.json({ error: '局域网访问只读' }, 403);
-  }
-  await next();
-});
+// 局域网只读中间件：非 loopback 且方法不是 GET/HEAD → 403。
+// 来源 IP 取不到时按「非本机」处理（宁可只读，也不放行写操作）。
+app.use('*', lanReadOnly());
 
 app.get('/health', (c) => {
   let dbState: HealthDTO['db'] = 'ok';
@@ -172,3 +160,29 @@ process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 // Windows 上直接关掉黑窗口发的是 SIGHUP（架构.md §3 第 7 步）
 process.on('SIGHUP', shutdown);
+
+// process.exit() 也会走这里：再兜一次 stopNapcat（可能已经停过了，幂等）
+process.on('exit', () => {
+  try {
+    stopNapcat();
+  } catch {
+    // 退出路径上不再抛
+  }
+});
+
+// ===== 未捕获异常：中文打印 + 追加写日志，进程不退出（演示时不能因为一条坏消息就整个挂掉）
+const LOG_FILE = join(DATA_DIR, 'logs', 'server.log');
+
+function logCrash(kind: string, err: unknown): void {
+  const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
+  console.error(`ClassRep 出现${kind}（已记日志，进程继续运行）：${detail}`);
+  try {
+    mkdirSync(dirname(LOG_FILE), { recursive: true });
+    appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${kind}：${detail}\n`, 'utf8');
+  } catch {
+    // 日志写不进去也不能让进程挂掉
+  }
+}
+
+process.on('uncaughtException', (err) => logCrash('未捕获异常', err));
+process.on('unhandledRejection', (reason) => logCrash('未处理的 Promise 拒绝', reason));
