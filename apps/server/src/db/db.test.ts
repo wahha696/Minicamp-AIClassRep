@@ -160,12 +160,12 @@ describe('db 建表', () => {
     const g = db.prepare('SELECT name, course_name FROM groups WHERE group_id = ?').get('g1') as Record<string, unknown>;
     expect(g).toMatchObject({ name: '高数(2)班', course_name: null });
 
-    // 新表建出来了 + 默认 kv 写入
+    // 新表建出来了 + schema_version 写入（D3）
     for (const t of ['todos', 'level_feedback', 'level_rules', 'courses', 'kv', 'message_seen']) {
       expect(tableNames()).toContain(t);
     }
-    const kv = db.prepare("SELECT value FROM kv WHERE key = 'semester_start'").get() as { value: string };
-    expect(kv.value).toBe('2026-09-07');
+    const kv = db.prepare("SELECT value FROM kv WHERE key = 'schema_version'").get() as { value: string };
+    expect(kv.value).toBe('2');
   });
 
   it('文件库的 journal_mode 是 WAL', () => {

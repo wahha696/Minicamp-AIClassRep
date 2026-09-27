@@ -2,6 +2,6 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { setLlmSettingsDir } from './llm-settings.js';
+import { setLlmSettingsDir } from './ai-settings.js';
 
 setLlmSettingsDir(mkdtempSync(join(tmpdir(), 'classrep-llm-')));

@@ -4,7 +4,7 @@
 import OpenAI from 'openai';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 import { z } from 'zod';
-import { getLlmConfig } from '../llm-settings.js';
+import { getLlmConfig } from '../ai-settings.js';
 import { groupCourseName, occurrences } from '../timetable.js';
 import type { EventType, Level, Message } from '../types.js';
 import { memoryEnabled, preferenceRules } from './preferences.js';

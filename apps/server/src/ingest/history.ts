@@ -3,7 +3,7 @@
 //   第一页不带 message_seq（拉最新 200 条）；之后每页 message_seq = 上一页最早一条的 message_id。
 // 停止条件（任一满足）：本页最早一条早于 now−days / 本页没有新 id / 本页为空或报错 / 已翻 30 页。
 // 只入库 sent_at ≥ now−days 的消息；入库去重同时看 messages 和 message_seen（见 ingest/index.ts）。
-import { db } from '../db/index.js';
+import { db, dbGeneration, onAccountSwitch } from '../db/index.js';
 import { ingestMessages } from './index.js';
 import { callAction, getGroupNameCached, isMentionOther, toMessage } from '../napcat/onebot.js';
 import type { Message } from '../types.js';
@@ -14,6 +14,12 @@ const MAX_PAGES = 30;
 
 type SyncResult = { groups: number; messages: number };
 let inflight: { days: number; promise: Promise<SyncResult> } | null = null;
+
+// 换号（修复计划第一节）：正在跑的同步是旧号的，让它自然结束（doSync 里有换代守卫，不会写进新库）；
+// inflight 标记清掉，新号点「同步历史」重新拉
+onAccountSwitch(() => {
+  inflight = null;
+});
 
 /**
  * 历史补齐。days=往前补多少天（1 / 7 / 30，缺省 7 保持登录自动补齐的行为）。
@@ -36,6 +42,7 @@ export function syncHistory(days = 7): Promise<SyncResult> {
 }
 
 async function doSync(days: number): Promise<SyncResult> {
+  const gen = dbGeneration(); // 换号守卫：同步中途切了账号，后面拉到的历史不往新库里写
   let rows: Array<{ group_id?: unknown }> = [];
   try {
     rows = db
@@ -50,10 +57,12 @@ async function doSync(days: number): Promise<SyncResult> {
   let messages = 0;
 
   for (const row of rows) {
+    if (dbGeneration() !== gen) break; // 换号了：拉来的是旧号的历史，停
     const groupId = String(row?.group_id ?? '');
     if (groupId === '' || groupId.startsWith('demo-')) continue;
     try {
       const msgs = await fetchGroupHistory(groupId, since);
+      if (dbGeneration() !== gen) break;
       const { inserted } = ingestMessages(msgs, 'history');
       groups += 1;
       messages += inserted;

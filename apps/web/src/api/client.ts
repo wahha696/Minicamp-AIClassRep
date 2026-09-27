@@ -3,6 +3,8 @@
 import { ApiError } from './error';
 import { mockApi } from './mock';
 import type {
+  AiSettingsDTO,
+  AiTestResultDTO,
   ConnectStatusDTO,
   CsuImportResultDTO,
   CsuImportStartDTO,
@@ -11,6 +13,7 @@ import type {
   EventStatus,
   GroupDTO,
   HealthDTO,
+  LanSettingsDTO,
   Level,
   LlmProvider,
   LlmSettingsDTO,
@@ -40,13 +43,24 @@ export interface Api {
   undoReplay(name: string): Promise<{ ok: true }>;
   importText(groupName: string, text: string): Promise<{ messages: number }>;
   getConnectStatus(): Promise<ConnectStatusDTO>;
-  restartConnect(): Promise<{ ok: true }>;
-  logoutConnect(): Promise<{ ok: true }>;
+  /** killQQ=true 只给「关闭电脑版 QQ 并继续」用：会结束用户自己开着的 QQ */
+  restartConnect(killQQ?: boolean): Promise<{ ok: true }>;
+  /** erase=true：退出并删除本号在本机的全部数据（不可恢复） */
+  logoutConnect(erase?: boolean): Promise<{ ok: true }>;
   /** days=往前补拉多少天（1/7/30），缺省 7 */
   syncNow(days?: 1 | 7 | 30): Promise<{ groups: number; messages: number }>;
   getHealth(): Promise<HealthDTO>;
   getLlmSettings(): Promise<LlmSettingsDTO>;
   saveLlmSettings(provider: LlmProvider, apiKey: string): Promise<LlmSettingsDTO>;
+  /** AI 配置（修复计划 3.2）：DeepSeek + Jev 状态；jev_key 传 '' 表示清除 */
+  getAiSettings(): Promise<AiSettingsDTO>;
+  saveAiSettings(patch: { deepseek_key?: string; jev_key?: string }): Promise<AiSettingsDTO>;
+  /** 真实连通性校验；target 省略则两个都测 */
+  testAiSettings(target?: 'deepseek' | 'jev'): Promise<AiTestResultDTO>;
+  /** 局域网只读（手机访问）：开关状态、手机链接、换 token */
+  getLanSettings(): Promise<LanSettingsDTO>;
+  setLanEnabled(enabled: boolean): Promise<LanSettingsDTO>;
+  rotateLanToken(): Promise<LanSettingsDTO>;
   getTodos(): Promise<TodosDTO>;
   createTodo(todo: { title: string; note?: string; level?: Level }): Promise<TodoDTO>;
   patchTodo(id: number, patch: { title?: string; note?: string; level?: Level; done?: boolean }): Promise<TodoDTO>;
@@ -75,6 +89,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       method,
       headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(10_000), // B14：后端卡住时 10s 超时，轮询不会永久停摆
     });
   } catch {
     throw new ApiError('无法连接到 ClassRep，请确认启动窗口没有关闭', 0);
@@ -114,12 +129,18 @@ const realApi: Api = {
   undoReplay: (name) => request('POST', '/api/demo/undo', { scenario: name }),
   importText: (groupName, text) => request('POST', '/api/import/text', { groupName, text }),
   getConnectStatus: () => request('GET', '/api/connect/status'),
-  restartConnect: () => request('POST', '/api/connect/restart'),
-  logoutConnect: () => request('POST', '/api/connect/logout'),
+  restartConnect: (killQQ) => request('POST', '/api/connect/restart', killQQ ? { kill_qq: true } : undefined),
+  logoutConnect: (erase) => request('POST', '/api/connect/logout', erase ? { erase: true } : undefined),
   syncNow: (days) => request('POST', '/api/sync', days === undefined ? undefined : { days }),
   getHealth: () => request('GET', '/health'),
   getLlmSettings: () => request('GET', '/api/settings/llm'),
   saveLlmSettings: (provider, apiKey) => request('PUT', '/api/settings/llm', { provider, api_key: apiKey }),
+  getAiSettings: () => request('GET', '/api/settings/ai'),
+  saveAiSettings: (patch) => request('PUT', '/api/settings/ai', patch),
+  testAiSettings: (target) => request('POST', '/api/settings/ai/test', target === undefined ? undefined : { target }),
+  getLanSettings: () => request('GET', '/api/settings/lan'),
+  setLanEnabled: (enabled) => request('PUT', '/api/settings/lan', { enabled }),
+  rotateLanToken: () => request('POST', '/api/settings/lan/rotate'),
   getTodos: () => request('GET', '/api/todos'),
   createTodo: (todo) => request('POST', '/api/todos', todo),
   patchTodo: (id, patch) => request('PATCH', `/api/todos/${id}`, patch),
@@ -159,6 +180,12 @@ export const {
   getHealth,
   getLlmSettings,
   saveLlmSettings,
+  getAiSettings,
+  saveAiSettings,
+  testAiSettings,
+  getLanSettings,
+  setLanEnabled,
+  rotateLanToken,
   getTodos,
   createTodo,
   patchTodo,

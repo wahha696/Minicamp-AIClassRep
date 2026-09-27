@@ -4,7 +4,9 @@
 // 「回收站」：最近 30 天取消的事件、群里改期前的旧安排，逐条恢复（TrashSection）。
 import { useCallback, useState } from 'react';
 import { clearMemory, deleteMemoryRule, getMemory, setMemoryEnabled } from '../api/client';
+import AiSettingsCard from '../components/AiSettingsCard';
 import ConfirmDialog from '../components/ConfirmDialog';
+import LanSection from '../components/LanSection';
 import TimetableSection from '../components/TimetableSection';
 import TrashSection from '../components/TrashSection';
 import { useToast } from '../components/Toast';
@@ -78,6 +80,17 @@ export default function Settings() {
       <div className="mt-6">
         <TimetableSection />
       </div>
+
+      <h2 className="mt-10 text-lg font-semibold text-slate-900">AI 接入</h2>
+      <p className="mt-1 text-sm text-slate-500">
+        DeepSeek 必填，群消息靠它整理成日程；Jev/TypeSafe 可选，填了先用快判过滤消息。
+      </p>
+      <div className="mt-3">
+        <AiSettingsCard />
+      </div>
+
+      <h2 className="mt-10 text-lg font-semibold text-slate-900">手机访问</h2>
+      <LanSection />
 
       <h2 className="mt-10 text-lg font-semibold text-slate-900">待办</h2>
       <section className="mt-3 rounded-xl border border-slate-200 bg-white p-4">

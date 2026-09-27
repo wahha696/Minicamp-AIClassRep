@@ -1,5 +1,5 @@
 // 二次确认弹窗（D6 删除群数据、D7 清空演示数据共用）。
-import { useEffect, type ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 
 interface Props {
   open: boolean;
@@ -16,11 +16,18 @@ interface Props {
 }
 
 export default function ConfirmDialog({ open, title, children, confirmText, cancelText = '取消', footer, danger, focusCancel, busy, onConfirm, onCancel }: Props) {
+  // P3：关掉后焦点还给触发元素（读屏 / 键盘用户不再被丢回页面顶）
+  const restoreRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
     if (!open) return;
+    restoreRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && !busy && onCancel();
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      restoreRef.current?.focus?.();
+      restoreRef.current = null;
+    };
   }, [open, busy, onCancel]);
 
   if (!open) return null;

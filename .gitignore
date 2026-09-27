@@ -7,9 +7,24 @@ dist/
 # 本地工具与账号数据（含 API Key、WebUI token、QQ 账号配置）
 tools/
 
-# 采集端（含账号数据，不通过 git 传）。开头的 / 只忽略仓库根的 napcat/，
-# 不能误伤 apps/server/src/napcat/ 源码目录
-/napcat/
+# 采集端 NapCat 4.18.28（程序随仓库提交，克隆即可用；见 napcat/README.md）。
+# 只忽略账号数据、运行时生成的文件和非 Windows x64 的原生库。
+# 开头的 / 只作用于仓库根的 napcat/，不会误伤 apps/server/src/napcat/ 源码目录
+!/napcat/node_modules/
+!/napcat/node_modules/**/node_modules/
+/napcat/config/
+/napcat/cache/
+/napcat/logs/
+/napcat/plugins/
+/napcat/guild*.db*
+/napcat/*.db
+/napcat/*.db-*
+/napcat/_loader_debug.log
+/napcat/loadNapCat.js
+/napcat/*.bat
+/napcat/native/**/*linux*
+/napcat/native/**/*darwin*
+/napcat/native/**/*arm64*
 
 # 运行时数据（只保留仿真剧本 data/mock/）
 data/*
@@ -18,6 +33,10 @@ data/*
 # 打包产物与私密配置
 release/
 .env.release
+
+# 启动.bat 自动下载的便携版 Node（每台机器各自下载）
+/runtime/
+/runtime.download/
 
 # corepack 下载的 pnpm（本机缓存）与 pnpm 包仓库缓存
 .corepack/

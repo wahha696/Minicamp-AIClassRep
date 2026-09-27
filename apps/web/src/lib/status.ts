@@ -1,6 +1,7 @@
 // 顶部状态灯 / 连接黄条的判定逻辑（纯函数，便于单测）。
 // 文案来自 架构.md §4、§7 和 D-前端.md D1。页面上不许出现 "NapCat"，统一叫「采集端」「QQ 连接」。
 import type { ConnectState, ConnectStatusDTO, HealthDTO } from '../api/types';
+import { accountKey } from './account';
 
 // ===== 状态灯
 
@@ -31,13 +32,16 @@ const LLM_TEXT: Record<HealthDTO['llm'], string> = {
 
 /** health 为 undefined 表示读不到 /health（后端没开或断网） */
 export function lightsFromHealth(health: HealthDTO | undefined): Light[] {
-  const jev: Light = !health || health.jev === 'disabled'
-    ? { key: 'jev', label: '快判', color: 'gray', tip: 'Jev 快判：已关闭' }
-    : health.jev === 'ok'
-      ? { key: 'jev', label: '快判', color: 'green', tip: 'Jev 快判：正常' }
-      : { key: 'jev', label: '快判', color: 'red', tip: health.jev === 'unconfigured'
-          ? 'Jev 快判：未配置 TypeSafe API Key，消息仍由 AI 处理'
-          : 'Jev 快判：最近一次调用失败，消息已交给 AI 处理' };
+  // P3：health 读不到时 Jev 是「未知」，不是「已关闭」
+  const jev: Light = !health
+    ? { key: 'jev', label: '快判', color: 'gray', tip: 'Jev 快判：状态未知' }
+    : health.jev === 'disabled'
+      ? { key: 'jev', label: '快判', color: 'gray', tip: 'Jev 快判：已关闭' }
+      : health.jev === 'ok'
+        ? { key: 'jev', label: '快判', color: 'green', tip: 'Jev 快判：正常' }
+        : { key: 'jev', label: '快判', color: 'red', tip: health.jev === 'unconfigured'
+            ? 'Jev 快判：未配置 TypeSafe API Key，消息仍由 AI 处理'
+            : 'Jev 快判：最近一次调用失败，消息已交给 AI 处理' };
   if (!health) {
     const down = '无法连接到 ClassRep，请确认启动窗口没有关闭';
     return [
@@ -133,15 +137,23 @@ export function writeFlag(key: string, value: string): void {
   }
 }
 
+/** 账号限定的旗标（修复计划第一节 §4）：换号后读写另一套键，互不干扰 */
+export function readAccountFlag(key: string): string | null {
+  return readFlag(accountKey(key));
+}
+export function writeAccountFlag(key: string, value: string): void {
+  writeFlag(accountKey(key), value);
+}
+
 /** D5：首次看到 online 时弹一次「电脑版 QQ 已由 ClassRep 接管」，弹过就记下，不再弹 */
 export const TAKEOVER_NOTICE_KEY = 'takeoverNoticeShown';
 export const TAKEOVER_NOTICE_TEXT = '电脑版 QQ 已由 ClassRep 接管，聊天请用手机 QQ';
 
-/** first_run 时把用户拦到 /connect；D5 里点「先用演示模式看看」会写 localStorage.skipConnect=1 放行 */
+/** first_run 时把用户拦到 /setup 向导（填 Key → 扫码）；向导页自己也允许跳过（演示模式） */
 export function shouldRedirectToConnect(
   status: ConnectStatusDTO | undefined,
   pathname: string,
   skipConnect: boolean,
 ): boolean {
-  return status?.first_run === true && pathname !== '/connect' && !skipConnect;
+  return status?.first_run === true && pathname !== '/setup' && pathname !== '/connect' && !skipConnect;
 }

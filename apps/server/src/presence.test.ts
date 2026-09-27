@@ -57,18 +57,35 @@ describe('PresenceTracker', () => {
 });
 
 describe('registerPresence 路由', () => {
+  const LOOPBACK = { incoming: { socket: { remoteAddress: '127.0.0.1' } } } as never;
+
   it('报到 / 再见 / 没页面后调 onIdle', async () => {
     vi.useFakeTimers();
     const app = new Hono();
     const onIdle = vi.fn();
     const stop = registerPresence(app, onIdle, { byeGraceMs: 1000, startupGraceMs: 60_000, checkEveryMs: 100 });
 
-    expect((await app.request('/api/presence?id=abc')).status).toBe(200);
-    expect((await app.request('/api/presence')).status).toBe(400);
-    await app.request('/api/presence/bye?id=abc', { method: 'POST' });
+    expect((await app.request('/api/presence?id=abc', {}, LOOPBACK)).status).toBe(200);
+    expect((await app.request('/api/presence', {}, LOOPBACK)).status).toBe(400);
+    await app.request('/api/presence/bye?id=abc', { method: 'POST' }, LOOPBACK);
     vi.advanceTimersByTime(500);
     expect(onIdle).not.toHaveBeenCalled();
     vi.advanceTimersByTime(700);
+    expect(onIdle).toHaveBeenCalledTimes(1);
+    stop();
+    vi.useRealTimers();
+  });
+
+  it('D8：局域网来源的报到不算在线，挡不住自动退出', async () => {
+    vi.useFakeTimers();
+    const app = new Hono();
+    const onIdle = vi.fn();
+    const stop = registerPresence(app, onIdle, { byeGraceMs: 1000, startupGraceMs: 800, checkEveryMs: 100 });
+    const LAN = { incoming: { socket: { remoteAddress: '192.168.1.20' } } } as never;
+
+    // 局域网设备不停报到，也不应阻止退出
+    expect((await app.request('/api/presence?id=phone', {}, LAN)).status).toBe(200);
+    vi.advanceTimersByTime(900);
     expect(onIdle).toHaveBeenCalledTimes(1);
     stop();
     vi.useRealTimers();

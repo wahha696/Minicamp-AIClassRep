@@ -3,7 +3,7 @@
 // 局域网写操作已被 lan-guard 统一 403，本接口实际只服务本机页面。
 import type { Hono } from 'hono';
 import OpenAI from 'openai';
-import { getLlmConfig } from '../llm-settings.js';
+import { getLlmConfig } from '../ai-settings.js';
 
 /** 只用到 chat.completions.create，测试时可以塞一个假的（同 extract.ts 的做法） */
 export interface PetLlmClient {
@@ -123,7 +123,10 @@ export async function petChatReply(
   const parsed = parsePetChatBody(body);
   if (!parsed) return { ok: false, status: 400, error: '消息格式不对' };
   const cfg = getLlmConfig();
-  if (!cfg.apiKey && !deps.client) return { ok: false, status: 503, error: '还没有配置 AI Key，先用普通模式聊天吧' };
+  if (!cfg.apiKey && !deps.client) {
+    // P3：原来的「普通模式」入口已删除，指向设置页的 AI 卡片
+    return { ok: false, status: 503, error: '还没有配置 AI Key，去「设置」页填一下吧' };
+  }
   const llm = deps.client ?? getClient(cfg);
   let raw: string;
   try {
@@ -136,6 +139,11 @@ export async function petChatReply(
     raw = res.choices[0]?.message.content?.trim() ?? '';
   } catch (e) {
     console.error(`桌宠对话调用 LLM 失败：${e instanceof Error ? e.message : String(e)}`);
+    // P3：超时（OpenAI SDK 抛 APIConnectionTimeoutError / TimeoutError）给更准的文案
+    const name = e instanceof Error ? e.name : '';
+    if (name.includes('Timeout') || name === 'APIConnectionTimeoutError') {
+      return { ok: false, status: 502, error: 'AI 响应太慢了，稍后再试试' };
+    }
     return { ok: false, status: 502, error: 'AI 没答上来，稍后再试试' };
   }
   if (!raw) return { ok: false, status: 502, error: 'AI 返回了空回答' };

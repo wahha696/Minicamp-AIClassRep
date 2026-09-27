@@ -11,13 +11,19 @@ import WeekGrid from '../components/WeekGrid';
 import { usePolling } from '../hooks/usePolling';
 import { toastError } from '../lib/errors';
 import { parseTimetable, type ParsedTimetable } from '../lib/timetable';
+import { thisMonday } from '../lib/week';
 
 const DAY = 86_400_000;
 const TZ = 8 * 3_600_000;
-// 预览网格的基准周：显示「第 1 周」七天（2026-09-07 起），列头只作占位
-const PREVIEW_MONDAY = Date.parse('2026-09-07T00:00:00+08:00');
+// 预览网格的基准周：只用来铺七列占位（列头是星期几），跟随本周，不写死日期（D2）
+function previewMonday(): number {
+  return thisMonday();
+}
 
-const DEFAULT_SEMESTER_START = '2026-09-07';
+/** D2：没填「第一周周一」时默认本周一（按当前日期推算，不写死学期日期） */
+function defaultSemesterStart(): string {
+  return new Date(thisMonday() + TZ).toISOString().slice(0, 10);
+}
 
 /** 'YYYY-MM-DD' 是不是周一（上海时区） */
 function isMonday(dateStr: string): boolean {
@@ -67,7 +73,7 @@ export default function TimetableSection() {
     try {
       const parsed = await parseFile(file);
       setDraft(parsed);
-      setSemesterStart(parsed.semesterStart || saved?.semester_start || DEFAULT_SEMESTER_START);
+      setSemesterStart(parsed.semesterStart || saved?.semester_start || defaultSemesterStart());
       if (parsed.courses.length === 0) {
         toast('没解析出课程，看看 warnings', 'error');
       }
@@ -147,7 +153,7 @@ export default function TimetableSection() {
     try {
       const parsed = await csuFetchCourses(csuSession, csuCode.trim());
       setDraft(parsed);
-      setSemesterStart(saved?.semester_start || DEFAULT_SEMESTER_START);
+      setSemesterStart(saved?.semester_start || defaultSemesterStart());
       // 账号密码用完即清,不留在界面上
       setCsuPass('');
       setCsuSession('');
@@ -172,7 +178,7 @@ export default function TimetableSection() {
 
   // 预览网格：把解析出的课程全部塞进去（不按周数过滤，便于人工核对）
   const previewDays = Array.from({ length: 7 }, (_, i) => ({
-    from: PREVIEW_MONDAY + i * DAY,
+    from: previewMonday() + i * DAY,
     isToday: false,
   }));
   const previewCourses: CourseDTO[] = draft?.courses ?? [];
@@ -293,7 +299,7 @@ export default function TimetableSection() {
                       setCsuErr('');
                     }}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter') void onCsuFetch();
+                      if (e.key === 'Enter' && !e.nativeEvent.isComposing) void onCsuFetch();
                     }}
                     className="w-24 rounded-lg border border-slate-200 px-2 py-1.5 text-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
                   />

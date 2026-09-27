@@ -1,0 +1,43 @@
+# 发布：push v* 标签（或手动触发）→ 在 Windows 上打 zip → 传到 Release。
+# 产物 release/ClassRep.zip 内含便携版 node、构建好的前后端、NapCat，解压即用。
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write # 上传 Release 附件
+
+jobs:
+  pack:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 版本取自根 package.json 的 packageManager 字段（pnpm@10.34.5）
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 验证（类型检查 + 测试）
+        run: |
+          pnpm typecheck
+          pnpm test
+
+      - name: 打 Windows 发布包
+        run: pnpm pack:win
+
+      - name: 上传 Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/ClassRep.zip

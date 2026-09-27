@@ -16,3 +16,15 @@ export const jevStats: { state: 'ok' | 'error'; called: number; filtered: number
   filtered: 0,
   lastMs: 0, // 最近一次成功调用耗时
 };
+
+/** 换号时清零（修复计划第一节：计数和状态不跨账号携带） */
+export function resetPipelineStats(): void {
+  llmStats.llm = 'ok';
+  llmStats.called = 0;
+  llmStats.failed = 0;
+  llmStats.lastMs = 0;
+  jevStats.state = 'ok';
+  jevStats.called = 0;
+  jevStats.filtered = 0;
+  jevStats.lastMs = 0;
+}

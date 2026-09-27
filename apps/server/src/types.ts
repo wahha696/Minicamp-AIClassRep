@@ -137,7 +137,8 @@ export interface ConnectStatusDTO {
   nickname?: string;    // online 时登录者的 QQ 昵称（get_login_info；取不到就没有）
   since: number;        // 进入当前状态的时间
   message?: string;     // error 时的用户文案（架构.md §7）
-  first_run: boolean;   // 从未登录过（无 uin）且库里没有任何消息/事件 → 前端拦到 /connect
+  first_run: boolean;   // 没有 uin 或 LLM 未配置 → 前端拦到 /setup 向导（修复计划第一节 §5）
+  deepseek_configured: boolean; // DeepSeek Key 是否已配置（网页或 .env）
 }
 
 export interface PipelineStats {

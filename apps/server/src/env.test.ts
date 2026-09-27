@@ -36,6 +36,12 @@ describe('parseEnvFile', () => {
   it('空值解析成空字符串', () => {
     expect(parseEnvFile('LLM_API_KEY=\n')).toEqual({ LLM_API_KEY: '' });
   });
+
+  it('D9：` #` 之后算行内注释；紧贴值的 # 与引号内的 # 保留', () => {
+    expect(
+      parseEnvFile(['A=123 # 这是注释', 'B=123#不是注释', 'C="带 # 号"', "D='也 # 行' # 尾巴"].join('\n')),
+    ).toEqual({ A: '123', B: '123#不是注释', C: '带 # 号', D: '也 # 行' });
+  });
 });
 
 describe('env', () => {
@@ -60,7 +66,7 @@ describe('env', () => {
     expect(typeof env.RAW_MSG_TTL_DAYS).toBe('number');
   });
 
-  it('默认值：DEMO_MODE=true、RAW_MSG_TTL_DAYS=7（不依赖本机 .env / 环境变量）', () => {
+  it('默认值：DEMO_MODE=false（B10，要在 .env 里显式开）、RAW_MSG_TTL_DAYS=7（不依赖本机 .env / 环境变量）', () => {
     expect(buildEnv({})).toEqual({
       LLM_BASE_URL: '',
       LLM_API_KEY: '',
@@ -69,7 +75,7 @@ describe('env', () => {
       TYPESAFE_API_KEY: '',
       JEV_MODEL: 'jev-latest',
       JEV_TIMEOUT_MS: 3_000,
-      DEMO_MODE: true,
+      DEMO_MODE: false,
       RAW_MSG_TTL_DAYS: 7,
     });
   });

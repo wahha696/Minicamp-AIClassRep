@@ -1,7 +1,7 @@
 // 课表（FR-13）：courses 表 + kv.semester_start。
 // weekOf / occurrences / blockOf 给本周网格、提取提示词共用。
 // 时间约定不变：对外一律毫秒时间戳；只有展示/提示词才转 Asia/Shanghai 文本。
-import { db } from './db/index.js';
+import { beginTx, commitTx, db, rollbackTx } from './db/index.js';
 import type { CourseDTO, TimetableDTO } from './types.js';
 
 const DAY_MS = 86400_000;
@@ -43,15 +43,15 @@ export function mondayOf(ts: number): number {
   return start - (weekdayOf(ts) - 1) * DAY_MS;
 }
 
-/** 本学期第一周周一 'YYYY-MM-DD'（kv.semester_start，默认 2026-09-07） */
+/** 本学期第一周周一 'YYYY-MM-DD'（kv.semester_start；D2 默认留空，导入课表时才写） */
 export function semesterStart(): string {
   const row = db.prepare("SELECT value FROM kv WHERE key = 'semester_start'").get() as
     | { value: string }
     | undefined;
-  return row?.value ?? '2026-09-07';
+  return row?.value ?? '';
 }
 
-/** ts 落在第几周（semester_start 所在周 = 1；开学前为 ≤0） */
+/** ts 落在第几周（semester_start 所在周 = 1；开学前为 ≤0）；semester_start 未设置返回 NaN */
 export function weekOf(ts: number): number {
   const start = Date.parse(`${semesterStart()}T00:00:00+08:00`);
   return Math.floor((mondayOf(ts) - start) / (7 * DAY_MS)) + 1;
@@ -98,7 +98,7 @@ export function getTimetable(): TimetableDTO {
 
 /** 事务里整表替换 courses + 写 semester_start（调用方负责 zod 校验） */
 export function saveTimetable(t: TimetableDTO): void {
-  db.exec('BEGIN IMMEDIATE');
+  beginTx();
   try {
     db.prepare('DELETE FROM courses').run();
     const ins = db.prepare(
@@ -110,9 +110,9 @@ export function saveTimetable(t: TimetableDTO): void {
     db.prepare(
       "INSERT INTO kv (key, value) VALUES ('semester_start', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     ).run(t.semester_start);
-    db.exec('COMMIT');
+    commitTx();
   } catch (e) {
-    db.exec('ROLLBACK');
+    rollbackTx();
     throw e;
   }
 }
@@ -145,7 +145,7 @@ export function occurrences(from: number, to: number): CourseOccurrence[] {
   for (let day = shanghaiDayStartTs(from); day < to; day += DAY_MS) {
     const wd = weekdayOf(day);
     const week = weekOf(day);
-    if (week < 1) continue;
+    if (!Number.isFinite(week) || week < 1) continue; // semester_start 未设置 / 开学前
     for (const course of courses) {
       if (course.weekday !== wd || !course.weeks.includes(week)) continue;
       const b = CLASS_BLOCKS[course.block - 1]!;

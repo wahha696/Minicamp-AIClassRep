@@ -7,6 +7,8 @@ import type { Api } from './client';
 import { ApiError } from './error';
 import { isTodo } from '../lib/todo';
 import type {
+  AiSettingsDTO,
+  AiTestResultDTO,
   ConnectState,
   ConnectStatusDTO,
   CourseDTO,
@@ -15,6 +17,7 @@ import type {
   EventStatus,
   GroupDTO,
   HealthDTO,
+  LanSettingsDTO,
   Level,
   LlmSettingsDTO,
   HistoryDTO,
@@ -543,6 +546,52 @@ export const mockApi: Api = {
     return delay({ ...mockLlm });
   },
 
+  getAiSettings() {
+    return delay(aiDto());
+  },
+
+  saveAiSettings(patch) {
+    if (patch.deepseek_key !== undefined) {
+      const key = patch.deepseek_key.trim();
+      if (!key) return fail('DeepSeek API Key 不能为空', 400);
+      if (!/^sk-[A-Za-z0-9_-]{8,}$/.test(key)) return fail('API Key 格式不对，应以 sk- 开头', 400);
+      mockLlm = { provider: 'deepseek', configured: true, key_hint: keyHint(key), source: 'web' };
+    }
+    if (patch.jev_key !== undefined) {
+      const key = patch.jev_key.trim();
+      mockJev =
+        key === ''
+          ? { configured: false, key_hint: '', source: 'none' }
+          : { configured: true, key_hint: keyHint(key), source: 'web' };
+    }
+    return delay(aiDto());
+  },
+
+  testAiSettings(target) {
+    const out: AiTestResultDTO = {};
+    if (target === undefined || target === 'deepseek') {
+      out.deepseek = mockLlm.configured ? { ok: true } : { ok: false, error: '还没填 DeepSeek API Key' };
+    }
+    if (target === undefined || target === 'jev') {
+      out.jev = mockJev.configured ? { ok: true } : { ok: false, error: '还没填 Jev API Key' };
+    }
+    return delay(out);
+  },
+
+  getLanSettings() {
+    return delay(lanDto());
+  },
+
+  setLanEnabled(enabled) {
+    mockLanEnabled = enabled;
+    return delay(lanDto());
+  },
+
+  rotateLanToken() {
+    lanSeq++;
+    return delay(lanDto());
+  },
+
   getTodos() {
     const eventTodos = events.filter(isTodo).map(toDTO);
     const body: TodosDTO = { events: eventTodos, manual: todos.filter((t) => t.done_at === null) };
@@ -713,3 +762,35 @@ function trashItems(): TrashItemDTO[] {
 }
 
 let mockLlm: LlmSettingsDTO = { provider: 'deepseek', configured: false, key_hint: '', source: 'none' };
+let mockJev: { configured: boolean; key_hint: string; source: 'web' | 'env' | 'none' } = {
+  configured: false,
+  key_hint: '',
+  source: 'none',
+};
+let mockLanEnabled = false;
+let lanSeq = 1;
+
+function keyHint(key: string): string {
+  return key.length <= 8 ? '****' : `${key.slice(0, 3)}****${key.slice(-4)}`;
+}
+
+function aiDto(): AiSettingsDTO {
+  return {
+    deepseek: {
+      provider: mockLlm.provider,
+      configured: mockLlm.configured,
+      key_hint: mockLlm.key_hint,
+      source: mockLlm.source,
+    },
+    jev: { ...mockJev, enabled: true },
+  };
+}
+
+function lanDto(): LanSettingsDTO {
+  return {
+    enabled: mockLanEnabled,
+    // 开了之后要重启后端才开始监听局域网（与后端一致）
+    restart_required: mockLanEnabled,
+    urls: mockLanEnabled ? [`http://192.168.1.23:8000/?token=mock-token-${lanSeq}`] : [],
+  };
+}

@@ -2,18 +2,20 @@
 // 读 .env → openDb() → 建 Hono app → 局域网只读中间件 → 注册路由 → 静态文件
 // → 监听（8000 起顺延）→ startScheduler() → startNapcat() → 清理任务 → 打包版才自动开浏览器
 import { exec } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { env } from './env.js';
-import { db, openDb } from './db/index.js';
+import { db, openInitialDb } from './db/index.js';
+import { getUin } from './napcat/manager.js';
 import { startNapcat, stopNapcat } from './napcat/index.js';
 import { getConnectStatus } from './napcat/state.js';
 import { getPipelineStats, startScheduler } from './pipeline/index.js';
 import { startCleanupJob } from './jobs/cleanup.js';
-import { lanReadOnly } from './lan-guard.js';
+import { accessGuard } from './lan-guard.js';
+import { currentLanToken, lanEnabledAtBoot } from './lan-settings.js';
 import { installCrashHandlers } from './crash-log.js';
 import { trustSystemCertificates } from './system-ca.js';
 import { registerBusinessRoutes } from './routes/business.js';
@@ -34,15 +36,15 @@ const START_PORT = 8000;
 const END_PORT = 8010;
 const STARTED_AT = Date.now();
 
-// 打包版（前端产物在 ROOT/app/web/dist 下）才自动开浏览器；开发时用 Vite 的 5173
-const isPackaged = WEB_DIST.includes(`${join('app', 'web', 'dist')}`);
+// 启动.bat（launcher.mjs 设 CLASSREP_OPEN_BROWSER=1）才自动开浏览器；pnpm dev 时用 Vite 的 5173，不开
+const openBrowserOnStart = process.env.CLASSREP_OPEN_BROWSER === '1';
 
 /** @hono/node-server 会把 Node 的 req/res 挂在 c.env 上（lan-guard 里读 remoteAddress） */
 const app = new Hono();
 
 // 局域网只读中间件：非 loopback 且方法不是 GET/HEAD → 403。
 // 来源 IP 取不到时按「非本机」处理（宁可只读，也不放行写操作）。
-app.use('*', lanReadOnly());
+app.use('*', accessGuard({ lanToken: currentLanToken }));
 
 app.get('/health', (c) => {
   let dbState: HealthDTO['db'] = 'ok';
@@ -82,7 +84,10 @@ app.get('/health', (c) => {
 
 registerBusinessRoutes(app);
 registerConnectRoutes(app);
-registerSettingsRoutes(app);
+// 局域网只读开关：启动时读一次决定监听地址；默认只监听本机
+const LISTEN_LAN = lanEnabledAtBoot();
+let listenPort = START_PORT;
+registerSettingsRoutes(app, { listening: LISTEN_LAN, port: () => listenPort });
 registerPetChatRoutes(app);
 registerTodoRoutes(app);
 registerTimetableRoutes(app);
@@ -107,12 +112,18 @@ if (existsSync(WEB_DIST)) {
     if (c.req.method !== 'GET' && c.req.method !== 'HEAD') return next();
     const path = c.req.path;
     if (path.startsWith('/api') || path === '/health') return next();
-    const rel = path === '/' ? 'index.html' : decodeURIComponent(path).replace(/^\/+/, '');
+    let rel: string;
+    try {
+      rel = path === '/' ? 'index.html' : decodeURIComponent(path).replace(/^\/+/, '');
+    } catch {
+      return c.json({ error: '非法路径' }, 400); // 畸形 % 编码
+    }
     const file = join(WEB_DIST, rel);
-    if (rel !== 'index.html' && !file.startsWith(WEB_DIST)) {
+    const r = relative(WEB_DIST, file);
+    if (r.startsWith('..') || isAbsolute(r)) {
       return c.json({ error: '非法路径' }, 400);
     }
-    if (existsSync(file)) {
+    if (existsSync(file) && statSync(file).isFile()) {
       const type = mimeOf(file);
       const body = await readFile(file);
       return c.body(body, 200, { 'Content-Type': type });
@@ -151,7 +162,7 @@ function mimeOf(file: string): string {
 async function listenWithFallback(): Promise<number> {
   for (let port = START_PORT; port <= END_PORT; port++) {
     const ok = await new Promise<boolean>((resolve) => {
-      const server = serve({ fetch: app.fetch, port, hostname: '0.0.0.0' }, () => resolve(true));
+      const server = serve({ fetch: app.fetch, port, hostname: LISTEN_LAN ? '0.0.0.0' : '127.0.0.1' }, () => resolve(true));
       server.on('error', (err: NodeJS.ErrnoException) => {
         if (err.code === 'EADDRINUSE') {
           console.log(`端口 ${port} 被占用，换 ${port + 1} 试试`);
@@ -170,17 +181,20 @@ async function listenWithFallback(): Promise<number> {
 // 放在 openDb() 之前：启动阶段（建库、建目录）出问题也要能记下来。防 EPIPE 死循环 / 日志上限见 crash-log.ts
 installCrashHandlers(join(DATA_DIR, 'logs', 'server.log'));
 
-openDb();
+// 修复计划第一节：记住的 QQ 号 → 直接开它的库（老用户秒进日历）；没记住 → 内存占位库。
+// data/classrep.db 老布局在这里一次性搬进 accounts/<uin>/。
+openInitialDb(getUin());
 
 const port = await listenWithFallback();
-console.log(`ClassRep 已启动：http://localhost:${port}`);
+listenPort = port;
+console.log(`ClassRep 已启动：http://localhost:${port}${LISTEN_LAN ? '（已开启局域网只读访问）' : ''}`);
 
 startScheduler();
-startNapcat();
+await startNapcat();
 startCleanupJob();
 
-if (isPackaged) {
-  // 打包版才自动打开浏览器（架构.md §3）
+if (openBrowserOnStart && process.platform === 'win32') {
+  // 用实际监听的端口（8000 被占会顺延），架构.md §3
   exec(`start "" http://localhost:${port}`);
 }
 

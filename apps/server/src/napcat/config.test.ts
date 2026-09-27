@@ -37,17 +37,18 @@ const ONEBOT11_EXPECTED = {
     httpServers: [], httpSseServers: [], httpClients: [], websocketClients: [], plugins: [],
     websocketServers: [{
       name: 'classrep', enable: true, host: '127.0.0.1', port: 3001,
-      messagePostFormat: 'array', reportSelfMessage: true, token: '',
+      messagePostFormat: 'array', reportSelfMessage: true, token: 'TEST_TOKEN',
       enableForcePushEvent: true, debug: false, heartInterval: 30000,
     }],
   },
   musicSignUrl: '', enableLocalFile2Url: false, parseMultMsg: false,
 };
+const TOKEN = 'TEST_TOKEN';
 
 describe('writeNapcatConfig', () => {
   it('配置目录不存在时创建，并写出三类文件；onebot11 内容与架构.md §4.1 一致', () => {
     const napcatDir = tempNapcatDir();
-    writeNapcatConfig(napcatDir);
+    writeNapcatConfig(napcatDir, TOKEN);
 
     const cfgDir = join(napcatDir, 'config');
     expect(JSON.parse(readFileSync(join(cfgDir, 'onebot11.json'), 'utf8'))).toEqual(ONEBOT11_EXPECTED);
@@ -74,7 +75,7 @@ describe('writeNapcatConfig', () => {
     writeFileSync(join(cfgDir, 'onebot11_20000.json'), '垃圾内容', 'utf8');
     writeFileSync(join(cfgDir, 'onebot11_10000.json.bak'), '备份不能动', 'utf8');
 
-    writeNapcatConfig(napcatDir);
+    writeNapcatConfig(napcatDir, TOKEN);
 
     const expected = JSON.stringify(ONEBOT11_EXPECTED, null, 2);
     expect(readFileSync(join(cfgDir, 'onebot11.json'), 'utf8')).toBe(expected);
@@ -90,7 +91,7 @@ describe('writeNapcatConfig', () => {
     mkdirSync(cfgDir, { recursive: true });
     writeFileSync(join(cfgDir, 'webui.json'), '{"port":6099,"token":"abc","disableWebUI":false}', 'utf8');
 
-    writeNapcatConfig(napcatDir);
+    writeNapcatConfig(napcatDir, TOKEN);
 
     expect(JSON.parse(readFileSync(join(cfgDir, 'webui.json'), 'utf8')))
       .toEqual({ port: 6099, token: 'abc', disableWebUI: true });
@@ -102,7 +103,7 @@ describe('writeNapcatConfig', () => {
     mkdirSync(cfgDir, { recursive: true });
     writeFileSync(join(cfgDir, 'webui.json'), '{{{不是JSON', 'utf8');
 
-    writeNapcatConfig(napcatDir);
+    writeNapcatConfig(napcatDir, TOKEN);
 
     expect(JSON.parse(readFileSync(join(cfgDir, 'webui.json'), 'utf8'))).toEqual({ disableWebUI: true });
   });

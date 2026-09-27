@@ -1,9 +1,10 @@
 // 连接页 /connect（D5，架构.md §4、§7）：按连接状态显示扫码 / 接管 QQ / 异常 / 加载。
 // 状态来自全局 ConnectStatusProvider（每 2s 轮询），这里不再单独轮询。
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getLlmSettings, logoutConnect, qrcodeUrl, restartConnect, saveLlmSettings } from '../api/client';
-import type { ConnectStatusDTO, LlmSettingsDTO } from '../api/types';
+import { logoutConnect, qrcodeUrl, restartConnect } from '../api/client';
+import type { ConnectStatusDTO } from '../api/types';
+import AiSettingsCard from '../components/AiSettingsCard';
 import { qqAvatarUrl } from '../components/Avatar';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useConnectStatus } from '../components/ConnectStatus';
@@ -15,8 +16,8 @@ import {
   SKIP_CONNECT_KEY,
   TAKEOVER_NOTICE_KEY,
   TAKEOVER_NOTICE_TEXT,
-  readFlag,
-  writeFlag,
+  readAccountFlag,
+  writeAccountFlag,
 } from '../lib/status';
 
 export default function Connect() {
@@ -28,20 +29,20 @@ export default function Connect() {
 
   const state = data?.state;
 
-  // online：不再自动跳走（这页还有「AI 接入」要配）；这台电脑第一次看到 online 时弹一次接管提示
+  // online：不再自动跳走（这页还有「AI 接入」要配）；这个号第一次看到 online 时弹一次接管提示
   useEffect(() => {
-    if (state === 'online' && readFlag(TAKEOVER_NOTICE_KEY) !== '1') setNotice(true);
+    if (state === 'online' && readAccountFlag(TAKEOVER_NOTICE_KEY) !== '1') setNotice(true);
   }, [state]);
 
   function closeNotice() {
-    writeFlag(TAKEOVER_NOTICE_KEY, '1');
+    writeAccountFlag(TAKEOVER_NOTICE_KEY, '1');
     setNotice(false);
   }
 
-  async function onRestart() {
+  async function onRestart(killQQ = false) {
     setBusy(true);
     try {
-      await restartConnect();
+      await restartConnect(killQQ);
       await refresh();
     } catch (e) {
       toastError(toast, e);
@@ -51,7 +52,7 @@ export default function Connect() {
   }
 
   function goDemo() {
-    writeFlag(SKIP_CONNECT_KEY, '1');
+    writeAccountFlag(SKIP_CONNECT_KEY, '1');
     navigate('/demo');
   }
 
@@ -73,7 +74,7 @@ export default function Connect() {
       case 'qq_conflict':
         body = (
           <Panel title="ClassRep 需要接管电脑版 QQ，期间请用手机 QQ 聊天">
-            <BigButton onClick={onRestart} busy={busy}>
+            <BigButton onClick={() => void onRestart(true)} busy={busy}>
               关闭电脑版 QQ 并继续
             </BigButton>
             <p className="mt-3 text-xs text-slate-400">关闭前请确认电脑版 QQ 里没有正在发送的消息</p>
@@ -133,7 +134,7 @@ export default function Connect() {
     <div className={`mx-auto py-6 ${showAccount ? 'max-w-3xl md:flex md:items-start md:gap-8' : 'max-w-md'}`}>
     {showAccount && data && <AccountCard status={data} onLoggedOut={refresh} />}
     <section className="mx-auto w-full max-w-md space-y-8 text-center md:order-first">
-      <div>
+      <div aria-live="polite">
         <h2 className="mb-3 text-left text-sm font-semibold text-slate-500">QQ 连接</h2>
         {body}
         {state !== 'online' && (
@@ -149,7 +150,7 @@ export default function Connect() {
 
       <div>
         <h2 className="mb-3 text-left text-sm font-semibold text-slate-500">AI 接入</h2>
-        <AiSettings />
+        <AiSettingsCard />
       </div>
 
       {notice && (
@@ -182,15 +183,17 @@ function AccountCard({ status, onLoggedOut }: { status: ConnectStatusDTO; onLogg
   const online = status.state === 'online';
   const [imgFailed, setImgFailed] = useState(false);
   const [confirm, setConfirm] = useState(false);
+  const [erase, setErase] = useState(false);
   const [busy, setBusy] = useState(false);
 
   async function onLogout() {
     setBusy(true);
     try {
-      await logoutConnect();
+      await logoutConnect(erase);
       await onLoggedOut();
       setConfirm(false);
-      toast('已退出登录，请用要登录的 QQ 扫码');
+      setErase(false);
+      toast(erase ? '已退出并删除本号数据' : '已退出登录，请用要登录的 QQ 扫码');
     } catch (e) {
       toastError(toast, e);
     } finally {
@@ -229,6 +232,7 @@ function AccountCard({ status, onLoggedOut }: { status: ConnectStatusDTO; onLogg
         {status.nickname ? `${uin} · ` : ''}
         {online ? '已连接' : '未连接'}
       </div>
+      <p className="mt-1 text-xs text-slate-300">头像由 QQ 服务器提供，加载时会带上你的 QQ 号</p>
       <button
         type="button"
         onClick={() => setConfirm(true)}
@@ -240,124 +244,27 @@ function AccountCard({ status, onLoggedOut }: { status: ConnectStatusDTO; onLogg
       <ConfirmDialog
         open={confirm}
         title="退出当前 QQ？"
-        confirmText="退出登录"
+        confirmText={erase ? '退出并删除数据' : '退出登录'}
         danger
         busy={busy}
         onConfirm={() => void onLogout()}
-        onCancel={() => setConfirm(false)}
+        onCancel={() => {
+          setConfirm(false);
+          setErase(false);
+        }}
       >
-        退出后回到扫码页，可以换另一个 QQ 号登录。已整理的群和日程会保留。
+        <p>退出后回到扫码页，可以换另一个 QQ 号登录。已整理的群和日程会保留，换回来原样恢复。</p>
+        <label className="mt-3 flex items-start gap-2 text-left text-sm text-rose-600">
+          <input
+            type="checkbox"
+            checked={erase}
+            onChange={(e) => setErase(e.target.checked)}
+            className="mt-0.5"
+          />
+          同时删除这个号在本机的全部数据（群、日程、待办，不可恢复）
+        </label>
       </ConfirmDialog>
     </aside>
-  );
-}
-
-/** AI 接入：目前只有 DeepSeek。key 存在本机 data/llm.json，页面上只显示打码后的提示 */
-function AiSettings() {
-  const toast = useToast();
-  const [info, setInfo] = useState<LlmSettingsDTO | null>(null);
-  const [key, setKey] = useState('');
-  const [editing, setEditing] = useState(false);
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    getLlmSettings()
-      .then((s) => {
-        setInfo(s);
-        setEditing(!s.configured);
-      })
-      .catch(() => setEditing(true));
-  }, []);
-
-  async function onSave(ev: FormEvent) {
-    ev.preventDefault();
-    if (!key.trim()) {
-      toast('请先填写 API Key', 'error');
-      return;
-    }
-    setSaving(true);
-    try {
-      const s = await saveLlmSettings('deepseek', key.trim());
-      setInfo(s);
-      setKey('');
-      setEditing(false);
-      toast('AI 已接入，新消息会自动整理成日程');
-    } catch (e) {
-      toastError(toast, e);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="rounded-2xl border border-slate-200 bg-white px-6 py-6 text-left shadow-sm">
-      <label className="block text-sm font-medium text-slate-700" htmlFor="ai-provider">
-        服务商
-      </label>
-      <select
-        id="ai-provider"
-        value="deepseek"
-        disabled
-        className="mt-1 w-full rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-sm text-slate-700"
-      >
-        <option value="deepseek">DeepSeek</option>
-      </select>
-
-      {info?.configured && !editing ? (
-        <div className="mt-4 flex items-center justify-between gap-3 rounded-lg bg-emerald-50 px-3 py-2.5 text-sm">
-          <span className="text-emerald-700">
-            已接入 · <span className="font-mono">{info.key_hint}</span>
-            {info.source === 'env' && <span className="ml-1 text-emerald-600/70">（来自 .env）</span>}
-          </span>
-          <button type="button" onClick={() => setEditing(true)} className="shrink-0 font-medium text-slate-600 hover:underline">
-            更换
-          </button>
-        </div>
-      ) : (
-        <form onSubmit={(e) => void onSave(e)} className="mt-4">
-          <label className="block text-sm font-medium text-slate-700" htmlFor="ai-key">
-            API Key
-          </label>
-          <input
-            id="ai-key"
-            type="password"
-            autoComplete="off"
-            value={key}
-            onChange={(e) => setKey(e.target.value)}
-            placeholder="sk-..."
-            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm outline-none focus:border-slate-500"
-          />
-          <p className="mt-1.5 text-xs text-slate-400">
-            在{' '}
-            <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noreferrer" className="underline">
-              DeepSeek 开放平台
-            </a>{' '}
-            创建。只保存在这台电脑上。
-          </p>
-          <div className="mt-4 flex justify-end gap-2">
-            {info?.configured && (
-              <button
-                type="button"
-                onClick={() => {
-                  setEditing(false);
-                  setKey('');
-                }}
-                className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50"
-              >
-                取消
-              </button>
-            )}
-            <button
-              type="submit"
-              disabled={saving}
-              className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-60"
-            >
-              {saving ? '保存中…' : '保存'}
-            </button>
-          </div>
-        </form>
-      )}
-    </div>
   );
 }
 
@@ -384,7 +291,7 @@ function QrCode() {
         {failed && <span className="text-sm text-slate-400">二维码生成中…</span>}
       </div>
       <p className="mt-5 text-lg font-medium text-slate-800">用手机 QQ 扫码登录（仅首次需要）</p>
-      <p className="mt-1 text-sm text-slate-400">扫码后会自动跳转</p>
+      <p className="mt-1 text-sm text-slate-400">扫码后在手机上确认登录</p>
     </div>
   );
 }

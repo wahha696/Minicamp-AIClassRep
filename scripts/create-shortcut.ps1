@@ -1,12 +1,11 @@
-﻿# 在桌面创建「ClassRep 启动」快捷方式：双击 = 后台启动 / 重启（不弹黑框，网页全关掉后自动退出）
-# 想看日志就用 scripts 目录下的 dev-start.bat（前台模式）
+﻿# 在桌面创建「AI 课代表」快捷方式：双击 = 启动.bat（生产构建；关窗口即退出）
+# 想边开发边看日志就用 scripts\dev-start.bat（前台 tsx）
 # 用法：pnpm shortcut ，或右键本文件 → 使用 PowerShell 运行
 $root = Split-Path -Parent $PSScriptRoot
 $desktop = [Environment]::GetFolderPath('Desktop')
-$lnk = Join-Path $desktop 'ClassRep 启动.lnk'
+$lnk = Join-Path $desktop 'AI 课代表.lnk'
 $s = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
-$s.TargetPath = "$env:WINDIR\System32\wscript.exe"
-$s.Arguments = '"' + (Join-Path $root 'scripts\start-hidden.vbs') + '"'
+$s.TargetPath = Join-Path $root '启动.bat'
 $s.WorkingDirectory = $root
 $s.IconLocation = "$env:WINDIR\System32\shell32.dll,137"
 $s.Save()

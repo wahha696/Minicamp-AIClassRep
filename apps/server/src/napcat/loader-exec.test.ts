@@ -16,7 +16,7 @@ describe('生成的 loadNapCat.js 语法与行为(临时)', () => {
       const stub = 'console.log("ARGV_SEEN=" + JSON.stringify(process.argv.slice(1)))';
       src = src.replace(/await import\("file:[^"]+"\)/, stub);
       expect(src).not.toContain('import.meta');
-      expect(src).toContain('const w = async (s) =>'); // 诊断函数必须是 async(上一版因此语法崩掉)
+      expect(src).not.toContain('_loader_debug'); // 调试日志已去掉（修复计划 D5）
 
       const cjs = join(napcatDir, 'probe.cjs');
       const esm = join(napcatDir, 'probe.mjs');
@@ -31,9 +31,7 @@ describe('生成的 loadNapCat.js 语法与行为(临时)', () => {
         expect(r.status, `${tag} 应能解析并执行`).toBe(0);
         expect(r.stdout).toContain('-q');
       }
-      const dbg = readFileSync(join(napcatDir, '_loader_debug.log'), 'utf8');
-      console.log('[debug]\n' + dbg);
-      expect(dbg).toContain('argv_after=');
+
     } finally {
       rmSync(napcatDir, { recursive: true, force: true });
     }

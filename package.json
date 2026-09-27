@@ -2,13 +2,18 @@
   "name": "classrep",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@10.34.5",
+  "engines": {
+    "node": ">=22.15"
+  },
   "scripts": {
     "dev": "pnpm -r --parallel dev",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
     "pack:win": "node scripts/pack.mjs",
-    "start": "node scripts/dev.mjs",
+    "start": "node scripts/launcher.mjs",
+    "dev:start": "node scripts/dev.mjs",
     "shortcut": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/create-shortcut.ps1"
   },
   "devDependencies": {

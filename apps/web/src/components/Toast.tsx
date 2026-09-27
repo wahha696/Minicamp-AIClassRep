@@ -1,5 +1,6 @@
 // 极简 toast：页面里 `const toast = useToast(); toast('已注入 3 条消息')`。
 // 同时最多显示 2 条：新消息出现在底部，超出时最早的一条向上飘走并淡出；每条 3s 后同样飘走。
+// P3：错误用 role="alert" 立即读屏；悬停/聚焦时暂停倒计时（「撤销」按钮来得及点）。
 import { createContext, useCallback, useContext, useRef, useState, type ReactNode } from 'react';
 
 type Tone = 'info' | 'error';
@@ -30,6 +31,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<Item[]>([]);
   const listRef = useRef<Item[]>([]); // 当前列表的同步副本，先算好再 setItems
   const nextId = useRef(1);
+  /** 每条消息的自动消失计时器；悬停/聚焦暂停时记下剩余毫秒 */
+  const timers = useRef(new Map<number, { expireAt: number; remaining: number; timer: ReturnType<typeof setTimeout> }>());
 
   const update = useCallback((fn: (list: Item[]) => Item[]) => {
     listRef.current = fn(listRef.current);
@@ -42,8 +45,37 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       if (ids.length === 0) return;
       update((list) => list.map((x) => (ids.includes(x.id) ? { ...x, leaving: true } : x)));
       setTimeout(() => update((list) => list.filter((x) => !ids.includes(x.id))), LEAVE_MS);
+      for (const id of ids) {
+        const t = timers.current.get(id);
+        if (t) clearTimeout(t.timer);
+        timers.current.delete(id);
+      }
     },
     [update],
+  );
+
+  /** 排一个自动消失计时；P3：悬停/聚焦暂停、离开后继续 */
+  const schedule = useCallback(
+    (id: number, ms: number) => {
+      const timer = setTimeout(() => dismiss([id]), ms);
+      timers.current.set(id, { expireAt: Date.now() + ms, remaining: ms, timer });
+    },
+    [dismiss],
+  );
+  const pause = useCallback((id: number) => {
+    const t = timers.current.get(id);
+    if (!t) return;
+    clearTimeout(t.timer);
+    t.remaining = Math.max(0, t.expireAt - Date.now());
+  }, []);
+  const resume = useCallback(
+    (id: number) => {
+      const t = timers.current.get(id);
+      if (!t) return;
+      t.expireAt = Date.now() + t.remaining;
+      t.timer = setTimeout(() => dismiss([id]), Math.max(300, t.remaining));
+    },
+    [dismiss],
   );
 
   const show = useCallback(
@@ -56,9 +88,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       ]);
       const alive = listRef.current.filter((x) => !x.leaving);
       dismiss(alive.slice(0, Math.max(0, alive.length - MAX_VISIBLE)).map((x) => x.id));
-      setTimeout(() => dismiss([id]), action ? ACTION_DURATION : DURATION);
+      schedule(id, action ? ACTION_DURATION : DURATION);
     },
-    [update, dismiss],
+    [update, dismiss, schedule],
   );
 
   return (
@@ -69,7 +101,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         {items.map((t) => (
           <div
             key={t.id}
-            role="status"
+            role={t.tone === 'error' ? 'alert' : 'status'} // P3：错误立即读屏
             className={
               t.leaving
                 ? 'animate-[toast-leave_.3s_ease-in_forwards] overflow-hidden'
@@ -77,15 +109,19 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             }
           >
             <div
-              className={`flex items-center gap-3 rounded-lg px-4 py-2 text-sm text-white shadow-lg ${
+              className={`pointer-events-auto flex items-center gap-3 rounded-lg px-4 py-2 text-sm text-white shadow-lg ${
                 t.tone === 'error' ? 'bg-rose-600' : 'bg-slate-800'
               }`}
+              onMouseEnter={() => pause(t.id)}
+              onMouseLeave={() => resume(t.id)}
+              onFocus={() => pause(t.id)}
+              onBlur={() => resume(t.id)}
             >
               {t.text}
               {t.action && (
                 <button
                   type="button"
-                  className="pointer-events-auto -mr-1 rounded px-1.5 py-0.5 font-medium text-sky-300 hover:bg-white/10"
+                  className="-mr-1 rounded px-1.5 py-0.5 font-medium text-sky-300 hover:bg-white/10"
                   onClick={() => {
                     t.action!.onClick();
                     dismiss([t.id]);

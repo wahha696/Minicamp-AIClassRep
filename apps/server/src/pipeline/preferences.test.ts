@@ -2,7 +2,7 @@
 // OpenAI 客户端整个 mock 掉；key 用 saveLlmSettings 写进测试临时目录。
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db, openDb } from '../db/index.js';
-import { saveLlmSettings } from '../llm-settings.js';
+import { saveLlmSettings } from '../ai-settings.js';
 import { llmStats } from './stats.js';
 
 const { createMock } = vi.hoisted(() => ({ createMock: vi.fn() }));

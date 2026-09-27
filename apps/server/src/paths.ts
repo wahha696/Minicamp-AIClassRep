@@ -12,8 +12,8 @@ function findRoot(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  // 兜底：假设入口在 <根>/apps/server/src 或 <根>/app/server
-  return resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+  // D10：找不到 启动.bat 不再猜布局（上跳 3 级对打包布局 app/server/dist 是错的），直接报错退出
+  throw new Error(`找不到「启动.bat」：请从项目根目录启动（当前文件：${fileURLToPath(import.meta.url)}）`);
 }
 
 export const ROOT: string = findRoot();

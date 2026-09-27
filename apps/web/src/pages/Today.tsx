@@ -1,6 +1,6 @@
 // 今日页 /（D2，FR-7.1 + FR-15）：顶部大字摘要 + 待办框（窄屏在事件列表上方，宽屏右栏）
 // + 事件卡片（按时间 / 按紧急两种排序，可切换；同一节次块折叠成最急的一张），每 10s 刷新。
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { exportIcsUrl, getEvents, getToday, getTodos } from '../api/client';
 import EventCard from '../components/EventCard';
@@ -26,11 +26,24 @@ function loadSort(): SortMode {
 export default function Today() {
   const { data, error, loading, refresh } = usePolling(getToday, 10_000);
   const todos = usePolling(getTodos, 10_000);
-  // 接下来 3 天（明天 0 点起）：周末 / 周日也能一眼看到下周初的事
+  // 接下来 3 天（明天 0 点起）：周末 / 周日也能一眼看到下周初的事。
+  // 日期区间在 fn 里现算（B16），跨过午夜后下一次轮询自动换到新的一天
   const upcoming = usePolling(
     useCallback(() => getEvents(shanghaiDayRange(1).from, shanghaiDayRange(UPCOMING_DAYS).to), []),
     30_000,
   );
+  // 页面重新可见（电脑睡了一晚回来）时立刻补拉，不等下一轮定时器
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        void refresh();
+        void todos.refresh();
+        void upcoming.refresh();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [refresh, todos.refresh, upcoming.refresh]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [sort, setSort] = useState<SortMode>(loadSort);
 

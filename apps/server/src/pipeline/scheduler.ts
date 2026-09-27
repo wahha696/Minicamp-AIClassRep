@@ -8,12 +8,12 @@
 //   · 待处理的全是噪声或 Jev「确定不是」：立刻收尾（不调 LLM，只是置已处理）；
 //   · 其余（Jev 拿不准）：等 UNCERTAIN_WAIT_MS 攒一攒上下文再交给 LLM。
 // Jev 分数在攒批期间就提前打好（triage），处理批次时直接复用，不再多等一次 Jev。
-import { db } from '../db/index.js';
+import { db, dbGeneration, onAccountSwitch } from '../db/index.js';
 import type { Message } from '../types.js';
 import { type ExtractStatus, type ExtractedEvent, extractEvents } from './extract.js';
 import { isNoise } from './filter.js';
 import { JEV_DROP_BELOW, JEV_URGENT_AT, jevAvailable, scoreWithJev } from './jev.js';
-import { jevStats } from './stats.js';
+import { jevStats, resetPipelineStats } from './stats.js';
 import { applyEvents, listActiveEvents } from './reconcile.js';
 
 const TICK_MS = 1_000;
@@ -55,7 +55,9 @@ const filterStage: Stage = (b) => {
   const noise = b.messages.filter((m) => isNoise(m.text));
   b.candidates = b.messages.filter((m) => !isNoise(m.text));
   if (noise.length) {
-    db.prepare('UPDATE messages SET filtered_out = 1 WHERE message_id IN (SELECT value FROM json_each(?))').run(
+    // messages 主键是 (group_id, message_id)（schema v2）：更新必须带上群
+    db.prepare('UPDATE messages SET filtered_out = 1 WHERE group_id = ? AND message_id IN (SELECT value FROM json_each(?))').run(
+      b.groupId,
       ids(noise),
     );
   }
@@ -74,8 +76,8 @@ const jevStage: Stage = async (b) => {
   const dropped = b.candidates.filter((m) => (jevScores.get(m.message_id) ?? 1) < JEV_DROP_BELOW);
   if (dropped.length) {
     const { changes } = db.prepare(
-      'UPDATE messages SET filtered_out = 1 WHERE filtered_out = 0 AND message_id IN (SELECT value FROM json_each(?))',
-    ).run(ids(dropped));
+      'UPDATE messages SET filtered_out = 1 WHERE group_id = ? AND filtered_out = 0 AND message_id IN (SELECT value FROM json_each(?))',
+    ).run(b.groupId, ids(dropped));
     jevStats.filtered += Number(changes);
     const gone = new Set(dropped.map((m) => m.message_id));
     b.candidates = b.candidates.filter((m) => !gone.has(m.message_id));
@@ -158,6 +160,7 @@ const toMessage = (g: PendingGroup) => ({ created_at: _, ...m }: Row): Message =
 
 /** 处理某群最早的一批未处理消息，返回置为已处理的条数 */
 async function processBatch(g: PendingGroup): Promise<number> {
+  const gen = dbGeneration(); // 换号守卫：攒批期间切了账号，下面的读属于旧号，绝不能写进新号库
   const rows = pendingRows(g.group_id);
   if (rows.length === 0) return 0;
 
@@ -172,7 +175,10 @@ async function processBatch(g: PendingGroup): Promise<number> {
     timing: { jevMs: 0, llmMs: 0 },
   };
   try {
-    for (const stage of stages) await stage(b);
+    for (const stage of stages) {
+      await stage(b);
+      if (dbGeneration() !== gen) return 0; // 中途换号：这批按放弃处理
+    }
   } catch (e) {
     if (!b.llmFailed) console.warn(`[pipeline] 群 ${g.group_id} 这批处理出错，消息仍置为已处理：`, e);
   }
@@ -182,8 +188,8 @@ async function processBatch(g: PendingGroup): Promise<number> {
     return 0;
   }
   const { changes } = db
-    .prepare('UPDATE messages SET processed = 1 WHERE message_id IN (SELECT value FROM json_each(?))')
-    .run(ids(b.messages));
+    .prepare('UPDATE messages SET processed = 1 WHERE group_id = ? AND message_id IN (SELECT value FROM json_each(?))')
+    .run(b.groupId, ids(b.messages));
   for (const m of b.messages) jevScores.delete(m.message_id);
   if (b.candidates.length) {
     // 延迟排查用：从最早一条入库到处理完，各段各花了多久
@@ -206,6 +212,7 @@ async function triage(g: PendingGroup): Promise<void> {
   if (now - (lastTriage.get(g.group_id) ?? 0) < TRIAGE_MIN_INTERVAL_MS) return;
   lastTriage.set(g.group_id, now);
   const rows = pendingRows(g.group_id).map(toMessage(g));
+  if (rows.length === 0) return; // B5：空批次不能碰 rows[0]
   const candidates = rows.filter((m) => !isNoise(m.text));
   const firstNew = candidates.findIndex((m) => !jevScores.has(m.message_id));
   if (firstNew < 0) return;
@@ -330,6 +337,15 @@ export function resetLlmRetry(): void {
   jevScores.clear();
   lastTriage.clear();
 }
+
+// 换号（修复计划第一节）：Jev 分数、分诊时间、重试等待、统计计数都是旧号的，清掉；
+// 在飞的批次由 processBatch 里的 dbGeneration 守卫拦下，不会写进新号库。
+onAccountSwitch(() => {
+  llmRetryAt = 0;
+  jevScores.clear();
+  lastTriage.clear();
+  resetPipelineStats();
+});
 
 export function startScheduler(): void {
   timer ??= setInterval(() => void tick(), TICK_MS);

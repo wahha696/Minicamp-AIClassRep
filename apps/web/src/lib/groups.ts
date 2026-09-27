@@ -1,4 +1,5 @@
 import type { GroupDTO } from '../api/types';
+import { accountKey } from './account';
 
 /** 统一成可比较的形式：全角→半角、小写、去掉空格和常见标点 */
 function normalize(s: string): string {
@@ -104,11 +105,11 @@ export interface GroupPreset {
   ids: string[]; // 监听中的群号
 }
 
-const PRESETS_KEY = 'classrep.groupPresets';
+const PRESETS_KEY = 'classrep.groupPresets'; // 实际键经 accountKey 加 uin 后缀（修复计划第一节 §4）
 
 export function loadPresets(): GroupPreset[] {
   try {
-    const raw: unknown = JSON.parse(localStorage.getItem(PRESETS_KEY) ?? '[]');
+    const raw: unknown = JSON.parse(localStorage.getItem(accountKey(PRESETS_KEY)) ?? '[]');
     if (!Array.isArray(raw)) return [];
     return raw.filter(
       (p): p is GroupPreset =>
@@ -121,7 +122,7 @@ export function loadPresets(): GroupPreset[] {
 
 export function savePresets(presets: GroupPreset[]): void {
   try {
-    localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
+    localStorage.setItem(accountKey(PRESETS_KEY), JSON.stringify(presets));
   } catch {
     // 存不了（隐私模式等）就算了，本次页面里仍然可用
   }

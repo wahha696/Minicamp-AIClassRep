@@ -4,10 +4,29 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROOT } from './paths.js';
 
+/** D9：值里 ` #` 之后的内容是行内注释，截掉；引号内的 # 保留 */
+function stripComment(raw: string): string {
+  let quote = '';
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i]!;
+    if (quote !== '') {
+      if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === '#' && i > 0 && /\s/.test(raw[i - 1]!)) return raw.slice(0, i);
+  }
+  return raw;
+}
+
 /**
  * 解析 .env 文本 → 键值对。
  * 规则：空行与 `#` 开头忽略；按第一个 `=` 切分；键值两端空白去掉；
- * 值两端配对的引号去掉；没有 `=`、键为空、或引号不配对的行按原样/忽略处理。
+ * 值两端配对的引号去掉；值中 ` #` 之后是行内注释（引号内的 # 不算）；
+ * 没有 `=`、键为空、或引号不配对的行按原样/忽略处理。
  */
 export function parseEnvFile(raw: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -18,7 +37,7 @@ export function parseEnvFile(raw: string): Record<string, string> {
     if (eq <= 0) continue;
     const key = text.slice(0, eq).trim();
     if (key === '') continue;
-    let value = text.slice(eq + 1).trim();
+    let value = stripComment(text.slice(eq + 1)).trim();
     if (
       value.length >= 2 &&
       ((value.startsWith('"') && value.endsWith('"')) ||
@@ -70,7 +89,8 @@ export function buildEnv(src: Record<string, string | undefined>) {
     TYPESAFE_API_KEY: src.TYPESAFE_API_KEY ?? '',
     JEV_MODEL: src.JEV_MODEL?.trim() || 'jev-latest',
     JEV_TIMEOUT_MS: positiveNum(src.JEV_TIMEOUT_MS, 3_000),
-    DEMO_MODE: (src.DEMO_MODE ?? 'true').trim() === 'true',
+    // B10：演示模式默认关闭（演示数据会进真实群列表），开发者要用在 .env 里显式开
+    DEMO_MODE: (src.DEMO_MODE ?? 'false').trim() === 'true',
     RAW_MSG_TTL_DAYS: positiveNum(src.RAW_MSG_TTL_DAYS, 7),
   };
 }

@@ -4,11 +4,11 @@ import { deriveConnectStatus, type ConnectInputs } from './state.js';
 
 function base(over: Partial<ConnectInputs> = {}): ConnectInputs {
   return {
-    manager: { qqExe: 'D:\\QQ.exe', pid: 4321, conflictAtBoot: false, spawnFailed: false, crashLoop: false, recentExits: 0 },
+    manager: { qqExe: 'D:\\QQ.exe', pid: 4321, conflictAtBoot: false, spawnFailed: false, crashLoop: false, recentExits: 0, napcatMissing: false },
     onebot: { wsConnected: false, everOnline: false, selfId: null, kicked: false },
     qrcodeExists: false,
     uin: undefined,
-    dbEmpty: true,
+    deepseekConfigured: true,
     isWindows: true,
     ...over,
   };
@@ -25,7 +25,7 @@ describe('deriveConnectStatus（架构.md §4，自上而下先命中为准）',
 
   it('qq_conflict 优先于其他：即使 crashLoop 也在它之后判定不到（未 spawn 时 qq_conflict 先命中）', () => {
     const r = deriveConnectStatus(base({
-      manager: { qqExe: null, pid: null, conflictAtBoot: true, spawnFailed: false, crashLoop: false, recentExits: 0 },
+      manager: { qqExe: null, pid: null, conflictAtBoot: true, spawnFailed: false, crashLoop: false, recentExits: 0, napcatMissing: false },
     }));
     expect(r.state).toBe('qq_conflict');
   });
@@ -59,7 +59,6 @@ describe('deriveConnectStatus（架构.md §4，自上而下先命中为准）',
     const r = deriveConnectStatus(base({
       onebot: { wsConnected: true, everOnline: true, selfId: '10001', kicked: false },
       uin: '10001',
-      dbEmpty: false,
     }));
     expect(r.state).toBe('online');
     expect(r.uin).toBe('10001');
@@ -75,7 +74,6 @@ describe('deriveConnectStatus（架构.md §4，自上而下先命中为准）',
       onebot: { wsConnected: false, everOnline: true, selfId: null, kicked: false },
       qrcodeExists: false,
       uin: '10001',
-      dbEmpty: false,
     }));
     expect(r.state).toBe('reconnecting');
   });
@@ -91,14 +89,14 @@ describe('deriveConnectStatus（架构.md §4，自上而下先命中为准）',
     expect(r.message).toBe('当前系统不支持采集端（开发模式，可用演示回放）');
   });
 
-  it('first_run：无 uin 且库为空；登录过或库里有数据则 false', () => {
-    expect(deriveConnectStatus(base()).first_run).toBe(true);
-    expect(deriveConnectStatus(base({ uin: '10001' })).first_run).toBe(false);
-    expect(deriveConnectStatus(base({ dbEmpty: false })).first_run).toBe(false);
+  it('first_run：没有 uin 或 LLM 未配置（修复计划第一节 §5）', () => {
+    expect(deriveConnectStatus(base()).first_run).toBe(true); // 无 uin
+    expect(deriveConnectStatus(base({ uin: '10001' })).first_run).toBe(false); // 登录过且配了 key
+    expect(deriveConnectStatus(base({ uin: '10001', deepseekConfigured: false })).first_run).toBe(true); // 登录过但没配 key
   });
 
   it('error 状态的 uin 仍然返回（登录过的用户在任何状态下都能直接看日历）', () => {
-    const r = deriveConnectStatus(base({ uin: '10001', dbEmpty: false }));
+    const r = deriveConnectStatus(base({ uin: '10001' }));
     expect(r.uin).toBe('10001');
   });
 });

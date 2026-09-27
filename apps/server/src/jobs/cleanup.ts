@@ -1,10 +1,10 @@
 // 清理任务（FR-10.3 + FR-16）：
-// 1. sent_at 早于 RAW_MSG_TTL_DAYS 且已处理的原始消息 → 先把 (message_id, sent_at) 写进
+// 1. sent_at 早于 RAW_MSG_TTL_DAYS 且已处理的原始消息 → 先把 (group_id, message_id, sent_at) 写进
 //    message_seen 再删——message_seen 是「处理过」的证据，30 天刷新再拉到时不重复整理；
 // 2. 超过 45 天仍未处理的消息强制删除（同样先写 message_seen）；
 // 3. message_seen 里 sent_at 早于 40 天的行删掉（表不能无限长）。
 // event_sources 里存的是快照，不受影响。
-import { db } from '../db/index.js';
+import { beginTx, commitTx, db, rollbackTx } from '../db/index.js';
 import { env } from '../env.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -20,29 +20,30 @@ export function cleanupOnce(now: number = Date.now()): number {
   const seenCutoff = now - SEEN_KEEP_DAYS * DAY_MS;
 
   let removed = 0;
-  db.exec('BEGIN IMMEDIATE');
+  beginTx();
   try {
     // 过期且已处理，或超过 45 天还没处理（可能一直没轮到）：都先记 message_seen 再删
     const stale = db
       .prepare(
-        'SELECT message_id, sent_at FROM messages WHERE (sent_at < ? AND processed = 1) OR sent_at < ?',
+        'SELECT group_id, message_id, sent_at FROM messages WHERE (sent_at < ? AND processed = 1) OR sent_at < ?',
       )
-      .all(cutoff, hardCutoff) as unknown as { message_id: string; sent_at: number }[];
+      .all(cutoff, hardCutoff) as unknown as { group_id: string; message_id: string; sent_at: number }[];
     if (stale.length) {
       const markSeen = db.prepare(
-        'INSERT OR IGNORE INTO message_seen (message_id, sent_at) VALUES (?, ?)',
+        'INSERT OR IGNORE INTO message_seen (group_id, message_id, sent_at) VALUES (?, ?, ?)',
       );
-      const del = db.prepare('DELETE FROM messages WHERE message_id = ?');
+      // messages 主键是 (group_id, message_id)（schema v2）：删除要带上群，免得误删别群同 id 的消息
+      const del = db.prepare('DELETE FROM messages WHERE group_id = ? AND message_id = ?');
       for (const m of stale) {
-        markSeen.run(m.message_id, m.sent_at);
-        del.run(m.message_id);
+        markSeen.run(m.group_id, m.message_id, m.sent_at);
+        del.run(m.group_id, m.message_id);
       }
       removed = stale.length;
     }
     db.prepare('DELETE FROM message_seen WHERE sent_at < ?').run(seenCutoff);
-    db.exec('COMMIT');
+    commitTx();
   } catch (e) {
-    db.exec('ROLLBACK');
+    rollbackTx();
     throw e;
   }
 

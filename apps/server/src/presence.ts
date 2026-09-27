@@ -2,6 +2,7 @@
 // 每个打开的网页定时 GET /api/presence?id=xxx 报到；关页面时 sendBeacon POST /api/presence/bye?id=xxx。
 // 没有任何页面在线一段时间后调 onIdle()（index.ts 里就是正常退出流程：停采集端、关库）。
 import type { Hono } from 'hono';
+import { isLocalAddress, remoteAddressOf } from './lan-guard.js';
 
 export interface PresenceOptions {
   /** 最后一个页面说再见后，再等这么久没人回来就退出（给刷新页面留时间） */
@@ -70,14 +71,15 @@ export function registerPresence(app: Hono, onIdle: () => void, options: Presenc
   app.get('/api/presence', (c) => {
     const id = c.req.query('id') ?? '';
     if (!ID_RE.test(id)) return c.json({ error: '缺少页面 id' }, 400);
-    tracker.ping(id);
+    // D8：只统计 loopback 来源——局域网只读页面一直 ping 会挡住 AUTO_EXIT
+    if (isLocalAddress(remoteAddressOf(c))) tracker.ping(id);
     return c.json({ ok: true });
   });
 
   // sendBeacon 只能发 POST；局域网来的会被只读中间件 403，手机页面就靠超时下线
   app.post('/api/presence/bye', (c) => {
     const id = c.req.query('id') ?? '';
-    if (ID_RE.test(id)) tracker.bye(id);
+    if (ID_RE.test(id) && isLocalAddress(remoteAddressOf(c))) tracker.bye(id);
     return c.json({ ok: true });
   });
 

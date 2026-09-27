@@ -28,19 +28,23 @@ export function registerConnectRoutes(app: Hono): void {
 
   // POST /api/connect/restart：结束本进程树 + 结束所有 QQ.exe → 重新 spawn → 复位 WS 的 kicked 状态
   // （「关闭电脑版 QQ 并继续」「重新连接」「重启采集端」共用，架构.md §5）
+  // body 可选 { kill_qq: true }：只有「关闭电脑版 QQ 并继续」按钮传，才会结束用户自己的 QQ（修复计划 S4）
   app.post('/api/connect/restart', async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { kill_qq?: unknown } | null;
     try {
-      await restartNapcat();
+      await restartNapcat({ killUserQQ: body?.kill_qq === true });
       return c.json({ ok: true });
     } catch (err) {
       return c.json({ error: `重启采集端失败：${err instanceof Error ? err.message : String(err)}` }, 500);
     }
   });
 
-  // POST /api/connect/logout：退出当前 QQ（忘掉 QQ 号 + 重启采集端）→ 回到扫码，可换号登录；数据保留
+  // POST /api/connect/logout：退出当前 QQ（忘掉 QQ 号 + 重启采集端）→ 回到扫码，可换号登录。
+  // 数据按号分库存着，换回来原样恢复；body 可选 { erase: true } = 「退出并删除本号数据」（不可恢复）
   app.post('/api/connect/logout', async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { erase?: unknown } | null;
     try {
-      await logoutNapcat();
+      await logoutNapcat({ erase: body?.erase === true });
       return c.json({ ok: true });
     } catch (err) {
       return c.json({ error: `退出登录失败：${err instanceof Error ? err.message : String(err)}` }, 500);

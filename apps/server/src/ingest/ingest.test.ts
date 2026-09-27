@@ -100,6 +100,7 @@ describe('ingestMessages', () => {
 
   it('入库字段落对：sender_name / text / sent_at / source，processed 与 filtered_out 默认 0', () => {
     freshDb();
+    addGroup('g1', '高数(2)班', 1); // 历史补齐只拉启用的群（D6：新发现的群默认关闭）
     const sentAt = 1790000000000;
     ingestMessages([msg('m1', 'g1', '明天下午两点小测', '高数(2)班', '张老师', sentAt)], 'history');
     const row = db
@@ -127,6 +128,11 @@ describe('ingestMessages', () => {
 
   it('已是某个事件来源的消息不再入库（老版本清理删了原文、没留 message_seen）', () => {
     freshDb();
+    addGroup('g1', '高数(2)班', 1);
+    // event_sources 关联的 events 行也要有（去重靠 join 拿群号）
+    db.prepare(
+      "INSERT INTO events (id, group_id, type, title, confidence, created_at, updated_at) VALUES (1, 'g1', 'assignment', '交作业', 0.9, ?, ?)",
+    ).run(Date.now(), Date.now());
     db.prepare(
       'INSERT INTO event_sources (event_id, message_id, sender_name, text, sent_at) VALUES (1, ?, ?, ?, ?)',
     ).run('old-1', '张老师', '周五交作业', Date.now() - 20 * 86_400_000);
@@ -143,10 +149,25 @@ describe('ingestMessages', () => {
     expect(ingestMessages([], 'onebot')).toEqual({ inserted: 0 });
     expect(countMessages()).toBe(0);
   });
+
+  it('D6：QQ 来源（onebot/history）新发现的群默认关闭，demo/import 默认开启', () => {
+    freshDb();
+    expect(ingestMessages([msg('m1', 'g-new', '下周三交作业', '离散数学')], 'onebot')).toEqual({
+      inserted: 0, // 默认关闭的群消息直接丢，等用户在群管理里打开
+    });
+    const row = db.prepare('SELECT name, enabled, adapter FROM groups WHERE group_id = ?').get('g-new') as {
+      name: string;
+      enabled: number;
+      adapter: string;
+    };
+    expect(row.name).toBe('离散数学');
+    expect(row.enabled).toBe(0);
+    expect(row.adapter).toBe('onebot');
+  });
 });
 
 describe('upsertGroup', () => {
-  it('新群登记为 enabled=1', () => {
+  it('D6：onebot 新群登记为 enabled=0（要监听的群由用户在群管理里勾选）', () => {
     freshDb();
     upsertGroup('g1', '高数(2)班', 'onebot');
     const row = db.prepare('SELECT name, enabled, adapter FROM groups WHERE group_id = ?').get('g1') as {
@@ -154,7 +175,7 @@ describe('upsertGroup', () => {
       enabled: number;
       adapter: string;
     };
-    expect(row).toEqual({ name: '高数(2)班', enabled: 1, adapter: 'onebot' });
+    expect(row).toEqual({ name: '高数(2)班', enabled: 0, adapter: 'onebot' });
   });
 
   it('已存在的群只改名，不动 enabled（用户关掉的群不能被重新打开）', () => {

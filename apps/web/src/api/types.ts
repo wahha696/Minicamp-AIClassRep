@@ -139,7 +139,7 @@ export interface ConnectStatusDTO {
   nickname?: string;    // online 时登录者的 QQ 昵称（get_login_info；取不到就没有）
   since: number;        // 进入当前状态的时间
   message?: string;     // error 时的用户文案（架构.md §7）
-  first_run: boolean;   // 从未登录过（无 uin）且库里没有任何消息/事件 → 前端拦到 /connect
+  first_run: boolean;   // 没有 uin 或 DeepSeek 未配置 → 前端拦到 /setup 向导（修复计划第一节 §5）
 }
 
 export interface PipelineStats {
@@ -179,6 +179,35 @@ export interface LlmSettingsDTO {
   configured: boolean;
   key_hint: string;                 // 例如 sk-****367f；没配为 ''
   source: 'web' | 'env' | 'none';   // web=网页保存的；env=.env 里的
+}
+
+// ===== /api/settings/ai（修复计划 3.2）：DeepSeek 必填 + Jev/TypeSafe 可选 =====
+
+export interface AiKeyStatusDTO {
+  configured: boolean;
+  key_hint: string;
+  source: 'web' | 'env' | 'none';
+}
+
+export interface AiSettingsDTO {
+  deepseek: AiKeyStatusDTO & { provider: LlmProvider };
+  jev: AiKeyStatusDTO & { enabled: boolean }; // enabled = 后端 ENABLE_JEV 总开关
+}
+
+/** POST /api/settings/ai/test 的返回：target 省略时两个都测 */
+export interface AiTestResultDTO {
+  deepseek?: { ok: boolean; error?: string };
+  jev?: { ok: boolean; error?: string };
+}
+
+// ===== /api/settings/lan：局域网只读开关（设置页「手机访问」卡片） =====
+
+export interface LanSettingsDTO {
+  enabled: boolean;
+  /** 开关状态和实际监听不一致 = 重启后端才生效 */
+  restart_required: boolean;
+  /** 手机扫码/复制打开的完整链接（带 token） */
+  urls: string[];
 }
 
 // ===== 中南教务系统(csujwc)直连导入(课表页) =====

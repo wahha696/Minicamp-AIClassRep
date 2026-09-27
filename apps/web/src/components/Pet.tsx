@@ -61,7 +61,12 @@ interface ChatMsg {
   id: number;
   role: 'bot' | 'user';
   text: string;
+  /** false = 不发给 LLM 当上下文（P3：占位「…」、报错话术、演示提示夹进去会带偏回答） */
+  toLlm?: boolean;
 }
+
+/** 上海时间的「时」（P3：睡觉/问候统一走上海时间，不跟浏览器时区跑） */
+const shHour = (ts: number) => new Date(ts + 8 * 3_600_000).getUTCHours();
 
 /** 聊天面板的快捷问题（PET-15：全部交给大模型回答，不再有规则动作项） */
 const QUICK_QUESTIONS: readonly string[] = ['今天有什么事', '接下来做什么', '最近截止', '你是谁呀'];
@@ -217,7 +222,7 @@ export default function Pet() {
   const mountedAtRef = useRef(Date.now());
   const prevConnRef = useRef<ConnectState | undefined>(undefined);
 
-  const hour = new Date(nowTick).getHours();
+  const hour = shHour(nowTick);
   const sleeping = hour >= 23 || hour < 6; // PET-9
   const sleepingRef = useRef(sleeping); sleepingRef.current = sleeping;
 
@@ -239,14 +244,14 @@ export default function Pet() {
   }
 
   // ===== 对话（PET-7） =====
-  function pushMsg(role: ChatMsg['role'], text: string): number {
+  function pushMsg(role: ChatMsg['role'], text: string, toLlm = true): number {
     const id = ++msgSeq.current;
-    setMsgs((ms) => [...ms, { id, role, text }]); // updater 保持纯净，StrictMode 下也安全
+    setMsgs((ms) => [...ms, { id, role, text, toLlm }]); // updater 保持纯净，StrictMode 下也安全
     return id;
   }
-  /** 把占位的「…」替换成真正的回答 */
-  function replaceMsg(id: number, text: string) {
-    setMsgs((ms) => ms.map((m) => (m.id === id ? { ...m, text } : m)));
+  /** 把占位的「…」替换成真正的回答；回退话术（toLlm=false）不进下次的上下文 */
+  function replaceMsg(id: number, text: string, toLlm = true) {
+    setMsgs((ms) => ms.map((m) => (m.id === id ? { ...m, text, toLlm } : m)));
   }
   /** 立即站定：走到一半的散步直接停在目标点（PET-14：对话/面板打开时不许再动） */
   function stopMoving() {
@@ -264,7 +269,7 @@ export default function Pet() {
     setChatOpen(true);
     if (msgsRef.current.length === 0) {
       const t = todayRef.current;
-      pushMsg('bot', `${petGreeting(new Date().getHours())}！我是课代表小助手${t ? `，${t.summary}` : ''}。点下面的问题，或直接打字问我~`);
+      pushMsg('bot', `${petGreeting(shHour(Date.now()))}！我是课代表小助手${t ? `，${t.summary}` : ''}。点下面的问题，或直接打字问我~`);
     }
   }
   function send(raw: string) {
@@ -280,14 +285,14 @@ export default function Pet() {
     };
     if (!llmAvailable()) {
       // PET-15：演示/mock 模式没有后端 LLM，规则引擎已删——如实说明，不假装会答
-      pushMsg('bot', '（演示模式连不上我的大脑：启动后端并在「设置」页配好 AI Key，我就能真正聊起来~）');
+      pushMsg('bot', '（演示模式连不上我的大脑：启动后端并在「设置」页配好 AI Key，我就能真正聊起来~）', false);
       return;
     }
     // PET-15：每句话直接问 DeepSeek（后端代理）；现场数据随消息带上，LLM 据此回答
-    const id = pushMsg('bot', '…');
-    void askPetLlm(text, msgsRef.current, ctx, petStyle)
+    const id = pushMsg('bot', '…', false); // 占位与报错话术不进上下文
+    void askPetLlm(text, msgsRef.current.filter((m) => m.toLlm !== false), ctx, petStyle)
       .then((reply) => replaceMsg(id, reply))
-      .catch((err: unknown) => replaceMsg(id, llmFallbackText(err)));
+      .catch((err: unknown) => replaceMsg(id, llmFallbackText(err), false));
   }
   const sayRefStable = useRef(saySomething); sayRefStable.current = saySomething;
 
@@ -359,7 +364,7 @@ export default function Pet() {
   useEffect(() => {
     if (!data || greetedRef.current) return;
     greetedRef.current = true;
-    speak(`${petGreeting(new Date().getHours())}！${data.summary}`, 6500);
+    speak(`${petGreeting(shHour(Date.now()))}！${data.summary}`, 6500);
   }, [data, speak]);
 
   // 30s 心跳（临期提醒的节拍，也顺带让「睡觉」状态随时间翻转，并做一次避让检查）
@@ -589,9 +594,18 @@ export default function Pet() {
         style={{ width: SIZE * 0.62, transform: 'translateX(-50%)' }}
       />
 
-      {/* 本体：位移全走 transform（PET-6）；全页坐标见 PET-10 */}
+      {/* 本体：位移全走 transform（PET-6）；全页坐标见 PET-10。键盘：回车/空格开对话（P3） */}
       <div
-        className={`pointer-events-auto absolute bottom-1 left-0 flex touch-none select-none items-end ${
+        role="button"
+        tabIndex={0}
+        aria-label="桌宠：回车打开对话，右键出菜单"
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            openChat();
+          }
+        }}
+        className={`pointer-events-auto absolute bottom-1 left-0 flex touch-none select-none items-end outline-none focus-visible:ring-2 focus-visible:ring-indigo-300 rounded-2xl ${
           phase === 'drag' ? 'cursor-grabbing' : 'cursor-grab'
         }`}
         onPointerDown={onBodyPointerDown}

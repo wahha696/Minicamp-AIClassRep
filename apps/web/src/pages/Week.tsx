@@ -112,6 +112,18 @@ export default function Week() {
     }
   }, [monday, refresh, fetchWeek]);
 
+  // B16：跨过午夜时如果正在看「包含今天」的那一周，自动跟到新的一周（每分钟看一眼）
+  useEffect(() => {
+    const t = setInterval(() => {
+      setMonday((m) => {
+        const { from, to } = weekRange(m);
+        const now = Date.now();
+        return from <= now && now < to ? thisMonday() : m;
+      });
+    }, 60_000);
+    return () => clearInterval(t);
+  }, []);
+
   const data = cacheRef.current.get(monday);
   const loading = firstLoading || data === undefined;
   const days = useMemo(() => groupByDay(data ?? [], monday), [data, monday]);

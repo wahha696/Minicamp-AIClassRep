@@ -1,7 +1,6 @@
 // 流水线对外的三个函数（00-总约定.md §6）。实现在 scheduler.ts / extract.ts。
 import { db } from '../db/index.js';
-import { getLlmConfig } from '../llm-settings.js';
-import { env } from '../env.js';
+import { getJevConfig, getLlmConfig } from '../ai-settings.js';
 import type { PipelineStats } from '../types.js';
 import { jevStats, llmStats } from './stats.js';
 
@@ -20,6 +19,6 @@ export function getPipelineStats(): PipelineStats {
     jev_called_count: jevStats.called,
     llm_called_count: llmStats.called,
     llm: getLlmConfig().apiKey ? llmStats.llm : 'unconfigured',
-    jev: !env.ENABLE_JEV ? 'disabled' : !env.TYPESAFE_API_KEY ? 'unconfigured' : jevStats.state,
+    jev: !getJevConfig().enabled ? 'disabled' : !getJevConfig().apiKey ? 'unconfigured' : jevStats.state,
   };
 }

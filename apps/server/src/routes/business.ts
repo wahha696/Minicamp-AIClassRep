@@ -1,7 +1,7 @@
 // 业务路由：今日 / 事件查询 / 事件详情 / 改状态 / 导出 .ics / 群管理 / 演示。主人是 B。
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
-import { db } from '../db/index.js';
+import { beginTx, commitTx, db, rollbackTx } from '../db/index.js';
 import { env } from '../env.js';
 import { buildIcs } from '../ics.js';
 import { buildDemoMessages, listScenarios, parseImportedText, scenarioGroupId } from '../ingest/demo.js';
@@ -418,7 +418,7 @@ export function registerBusinessRoutes(app: Hono): void {
     const now = Date.now();
     const data = parsed.data;
     // 改状态、改等级、写 history / feedback 放一个事务里，中途出错不留半截
-    db.exec('BEGIN IMMEDIATE');
+    beginTx();
     try {
       if (data.status !== undefined) {
         db.prepare('UPDATE events SET status = ?, updated_at = ? WHERE id = ?').run(
@@ -438,9 +438,9 @@ export function registerBusinessRoutes(app: Hono): void {
       if (data.level !== undefined) {
         applyManualLevel(row, data.level, now);
       }
-      db.exec('COMMIT');
+      commitTx();
     } catch (err) {
-      db.exec('ROLLBACK');
+      rollbackTx();
       throw err;
     }
 
@@ -489,12 +489,17 @@ export function registerBusinessRoutes(app: Hono): void {
     return c.json(group);
   });
 
-  // 删除该群的全部数据（群本身保留）：history → sources → events → messages
+  // 删除该群的全部数据（群本身保留）：history → sources → events → messages。
+  // B3：删 messages 前先把 id 写进 message_seen——否则下次历史补齐会把刚删掉的消息再拉回来；
+  // 同时清掉这个群的 level_feedback 孤儿记录（群都没了，偏好记录留着没意义）
   app.delete('/api/groups/:id/data', (c) => {
     const group_id = c.req.param('id');
     const exists = db.prepare('SELECT 1 AS ok FROM groups WHERE group_id = ?').get(group_id);
     if (exists === undefined) return c.json({ error: '群不存在' }, 404);
 
+    const markSeen = db.prepare(
+      'INSERT OR IGNORE INTO message_seen (group_id, message_id, sent_at) SELECT group_id, message_id, sent_at FROM messages WHERE group_id = ?',
+    );
     const delHistory = db.prepare(
       'DELETE FROM event_history WHERE event_id IN (SELECT id FROM events WHERE group_id = ?)',
     );
@@ -503,16 +508,21 @@ export function registerBusinessRoutes(app: Hono): void {
     );
     const delEvents = db.prepare('DELETE FROM events WHERE group_id = ?');
     const delMessages = db.prepare('DELETE FROM messages WHERE group_id = ?');
+    const delFeedback = db.prepare(
+      'DELETE FROM level_feedback WHERE group_name = (SELECT name FROM groups WHERE group_id = ?)',
+    );
 
-    db.exec('BEGIN IMMEDIATE');
+    beginTx();
     try {
+      markSeen.run(group_id);
       delHistory.run(group_id);
       delSources.run(group_id);
       delEvents.run(group_id);
       delMessages.run(group_id);
-      db.exec('COMMIT');
+      delFeedback.run(group_id);
+      commitTx();
     } catch (err) {
-      db.exec('ROLLBACK');
+      rollbackTx();
       throw err;
     }
     return c.json({ ok: true });
@@ -527,8 +537,9 @@ export function registerBusinessRoutes(app: Hono): void {
     return c.json(listScenarios().map((s) => ({ ...s, active: exists.get(s.group_id) !== undefined })));
   });
 
-  // 回放剧本：注入后立即跑一次流水线
+  // 回放剧本：注入后立即跑一次流水线（B10：和 reset 一样受 DEMO_MODE 限制）
   app.post('/api/demo/replay', async (c) => {
+    if (!env.DEMO_MODE) return c.json({ error: '演示模式已关闭' }, 403);
     let raw: unknown;
     try {
       raw = await c.req.json();
@@ -594,7 +605,7 @@ export function registerBusinessRoutes(app: Hono): void {
   });
 }
 
-/** 在一个事务里删掉若干群及其消息、事件、来源、变更记录 */
+/** 在一个事务里删掉若干群及其消息、事件、来源、变更记录（演示用：不写 message_seen，重放要能再入库） */
 function deleteGroupsData(groupIds: string[]): void {
   const delHistory = db.prepare(
     'DELETE FROM event_history WHERE event_id IN (SELECT id FROM events WHERE group_id = ?)',
@@ -606,7 +617,7 @@ function deleteGroupsData(groupIds: string[]): void {
   const delMessages = db.prepare('DELETE FROM messages WHERE group_id = ?');
   const delGroup = db.prepare('DELETE FROM groups WHERE group_id = ?');
 
-  db.exec('BEGIN IMMEDIATE');
+  beginTx();
   try {
     for (const id of groupIds) {
       delHistory.run(id);
@@ -615,9 +626,9 @@ function deleteGroupsData(groupIds: string[]): void {
       delMessages.run(id);
       delGroup.run(id);
     }
-    db.exec('COMMIT');
+    commitTx();
   } catch (err) {
-    db.exec('ROLLBACK');
+    rollbackTx();
     throw err;
   }
 }

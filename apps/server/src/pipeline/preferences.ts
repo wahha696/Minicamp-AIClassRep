@@ -1,8 +1,8 @@
 import OpenAI from 'openai';
 import { z } from 'zod';
 
-import { db } from '../db/index.js';
-import { getLlmConfig } from '../llm-settings.js';
+import { beginTx, commitTx, db, rollbackTx } from '../db/index.js';
+import { getLlmConfig } from '../ai-settings.js';
 import type { Level } from '../types.js';
 import type { LlmClient } from './extract.js';
 
@@ -58,9 +58,10 @@ let clientKey = '';
 
 function getClient(): LlmClient {
   const cfg = getLlmConfig();
-  const key = `${cfg.baseURL}\n${cfg.model}`;
+  // B6：key 必须包含 apiKey/version，网页上换 key 后不能继续用旧客户端；baseURL 为空不能传给 SDK
+  const key = `${cfg.version}\n${cfg.baseURL}\n${cfg.model}\n${cfg.apiKey}`;
   if (!client || clientKey !== key) {
-    client = new OpenAI({ baseURL: cfg.baseURL, apiKey: cfg.apiKey, timeout: 30_000 });
+    client = new OpenAI({ baseURL: cfg.baseURL || undefined, apiKey: cfg.apiKey, timeout: 30_000 });
     clientKey = key;
   }
   return client;
@@ -149,7 +150,7 @@ export async function summarize(): Promise<void> {
   const ins = db.prepare(
     'INSERT INTO level_rules (text, level, feedback_ids, created_at) VALUES (?, ?, ?, ?)',
   );
-  db.exec('BEGIN');
+  beginTx();
   try {
     del.run();
     for (const r of rules) {
@@ -157,9 +158,9 @@ export async function summarize(): Promise<void> {
       const ids = r.feedback_ids.filter((id) => validIds.has(id));
       ins.run(r.text, r.level, JSON.stringify(ids), now);
     }
-    db.exec('COMMIT');
+    commitTx();
   } catch (e) {
-    db.exec('ROLLBACK');
+    rollbackTx();
     throw e;
   }
 }

@@ -2,7 +2,7 @@
 // 这里只给分数，怎么用分数（丢弃 / 立刻处理 / 攒批）由 scheduler.ts 决定。
 // 失败时返回 null，由流水线把候选原样交给 LLM；失败后歇 JEV_BACKOFF_MS，免得每批都白等一次超时。
 import { z } from 'zod';
-import { env } from '../env.js';
+import { getJevConfig } from '../ai-settings.js';
 import type { Message } from '../types.js';
 import { jevStats } from './stats.js';
 
@@ -22,9 +22,10 @@ const responseSchema = z.object({ answers: z.record(z.string(), answerSchema) })
 
 let backoffUntil = 0;
 
-/** 配置了且不在失败退避期内 */
+/** 配置了且不在失败退避期内（修复计划 3.2：读运行时配置，网页上改 key 立即生效） */
 export function jevAvailable(now = Date.now()): boolean {
-  return env.ENABLE_JEV && !!env.TYPESAFE_API_KEY && now >= backoffUntil;
+  const cfg = getJevConfig();
+  return cfg.enabled && cfg.apiKey !== '' && now >= backoffUntil;
 }
 
 /** 测试用：清掉失败退避 */
@@ -39,6 +40,7 @@ export async function scoreWithJev(
   groupName: string,
 ): Promise<number[] | null> {
   if (!jevAvailable() || candidates.length === 0) return null;
+  const cfg = getJevConfig();
 
   const questions = Object.fromEntries(candidates.map((_, i) => [
     `message_${i}`,
@@ -58,11 +60,11 @@ export async function scoreWithJev(
     const res = await fetch(ENDPOINT, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${env.TYPESAFE_API_KEY}`,
+        Authorization: `Bearer ${cfg.apiKey}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: env.JEV_MODEL,
+        model: cfg.model,
         state: {
           group_name: groupName,
           previous_messages: context.map(({ sender_name, text }) => ({ sender_name, text })),
@@ -70,7 +72,7 @@ export async function scoreWithJev(
         },
         questions,
       }),
-      signal: AbortSignal.timeout(env.JEV_TIMEOUT_MS),
+      signal: AbortSignal.timeout(cfg.timeoutMs),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const result = responseSchema.parse(await res.json());

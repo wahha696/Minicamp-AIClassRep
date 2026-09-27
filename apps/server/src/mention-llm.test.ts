@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Hono } from 'hono';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { getLlmConfig, maskKey, setLlmSettingsDir } from './llm-settings.js';
+import { getLlmConfig, maskKey, setLlmSettingsDir } from './ai-settings.js';
 import { mentionOf } from './napcat/onebot.js';
 import { registerSettingsRoutes } from './routes/settings.js';
 import { DATA_DIR } from './paths.js';

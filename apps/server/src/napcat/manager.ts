@@ -2,7 +2,7 @@
 // 主人是 A（分工 A3）。依据：架构.md §3 第 3~7 步、§4 状态机；NapCat接口规格.md §1。
 // 崩溃计数、spawn 参数等与 A1 实测跑通的 scripts/probe-napcat.mjs 保持一致。
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DATA_DIR, NAPCAT_DIR } from '../paths.js';
 import { findQQExe, QRCODE_PATH } from './paths.js';
@@ -51,6 +51,8 @@ export interface ManagerFacts {
   crashLoop: boolean;
   /** 当前 60s 滑动窗口内的意外退出次数 */
   recentExits: number;
+  /** napcat/ 缺少必需文件（克隆不完整等）→ state error「采集组件缺失」，不写配置不 spawn */
+  napcatMissing: boolean;
 }
 
 const facts: ManagerFacts = {
@@ -60,13 +62,32 @@ const facts: ManagerFacts = {
   spawnFailed: false,
   crashLoop: false,
   recentExits: 0,
+  napcatMissing: false,
 };
+
+/** 采集端必需的文件（修复计划 3.1）：缺任一个就不能 spawn */
+export const NAPCAT_REQUIRED = ['NapCatWinBootMain.exe', 'NapCatWinBootHook.dll', 'napcat.mjs', 'qqnt.json'];
+
+export function napcatInstalled(dir: string = NAPCAT_DIR): boolean {
+  return NAPCAT_REQUIRED.every((f) => existsSync(join(dir, f)));
+}
 
 let child: ChildProcess | null = null;
 let respawnTimer: NodeJS.Timeout | null = null;
 let exitTimes: number[] = [];
 /** 主动 kill 过的进程退出不算崩溃（stopNapcat / killTree / bot_offline 都算主动） */
 let killedByUs = true;
+
+const LOG_CAP_BYTES = 10 * 1024 * 1024;
+
+/** 每次 spawn 前检查一次：超过 10MB 就清空（排错只需要最近的日志） */
+function capLog(path: string): void {
+  try {
+    if (existsSync(path) && statSync(path).size > LOG_CAP_BYTES) writeFileSync(path, '');
+  } catch {
+    // 忽略
+  }
+}
 
 /** 保留 windowMs 内的时间戳（纯函数，导出便于测试） */
 export function pruneRecent(stamps: number[], now: number, windowMs: number): number[] {
@@ -107,7 +128,7 @@ export function isQQRunning(): boolean {
   try {
     const ps = spawnSync('powershell', ['-NoProfile', '-Command',
       `if (Get-Process -Name QQ -ErrorAction SilentlyContinue | Where-Object { $_.Threads.Count -gt 0 }) { 'QQ_LIVE' }`],
-      { encoding: 'utf8' });
+      { encoding: 'utf8', timeout: 8_000, windowsHide: true });
     if (ps.error === undefined && ps.status === 0) {
       return (ps.stdout ?? '').includes('QQ_LIVE');
     }
@@ -147,6 +168,14 @@ export function killTree(): void {
  */
 export function spawnNapcat(uin?: string): void {
   if (!IS_WINDOWS) return;
+  // 还有旧进程就先结束，绝不留两个 NapCat 抢 3001 和 QQ 单实例锁
+  if (child !== null) killTree();
+  if (!napcatInstalled()) {
+    facts.napcatMissing = true;
+    facts.pid = null;
+    return;
+  }
+  facts.napcatMissing = false;
   try {
     rmSync(QRCODE_PATH, { force: true });
   } catch {
@@ -154,6 +183,7 @@ export function spawnNapcat(uin?: string): void {
   }
   const qqExe = findQQExe();
   if (qqExe === null) {
+    facts.qqExe = null;
     facts.pid = null;
     return; // state → error「需要先安装 QQ 电脑版」
   }
@@ -187,6 +217,8 @@ export function spawnNapcat(uin?: string): void {
   facts.spawnFailed = false;
   facts.pid = c.pid ?? null;
 
+  // 修复计划 D4：napcat.log 超过上限就截断重写，不再无限增长
+  capLog(logPath);
   c.stdout?.on('data', (d: Buffer) => {
     try { appendFileSync(logPath, d); } catch { /* 排错日志写不进就算了 */ }
   });
@@ -212,10 +244,14 @@ export function spawnNapcat(uin?: string): void {
     respawnTimer = setTimeout(() => spawnNapcat(getUin() ?? undefined), 1000);
   });
   // spawn 本身失败（ENOENT 等）→ state → error（不会误触发自动重启）
-  c.on('error', () => {
+  c.on('error', (err) => {
     if (child !== c) return;
+    // 修复计划 B2：不清 child 的话之后 killTree 拿不到 pid 就跳过，child 永远挂着旧对象
+    child = null;
+    killedByUs = true;
     facts.spawnFailed = true;
     facts.pid = null;
+    try { appendFileSync(logPath, `[manager] 进程错误：${String(err)}\n`); } catch { /* 忽略 */ }
   });
 }
 
@@ -223,24 +259,51 @@ export function spawnNapcat(uin?: string): void {
  * 用户点「关闭电脑版 QQ 并继续 / 重新连接 / 重启采集端」（架构.md §5 POST /api/connect/restart）：
  * killTree → 等 1.5s 让进程树退干净 → taskkill /F /IM QQ.exe（忽略失败）→ 清零崩溃计数 → spawn。
  */
-export async function restart(): Promise<void> {
-  if (!IS_WINDOWS) return;
-  killTree();
-  await new Promise((r) => setTimeout(r, 1500));
-  try {
-    spawnSync('taskkill', ['/F', '/IM', 'QQ.exe'], { stdio: 'ignore' });
-  } catch {
-    // 忽略失败（QQ 可能本来就没开）
-  }
-  exitTimes = [];
-  facts.crashLoop = false;
-  facts.conflictAtBoot = false;
-  spawnNapcat(getUin() ?? undefined);
+let restarting: Promise<void> | null = null;
+
+/**
+ * 修复计划 B1：并发的 restart / logout 复用同一个进行中的 Promise，
+ * 否则两边都会 spawn，第一个 NapCat/QQ 变成孤儿，之后谁也杀不掉。
+ *
+ * 修复计划 S4：只有启动时撞上用户自己开着的电脑版 QQ（conflictAtBoot），
+ * 且用户在页面上点了「关闭电脑版 QQ 并继续」（killUserQQ=true）才 taskkill QQ.exe；
+ * 普通的「重新连接 / 重启采集端 / 退出登录」只结束我们自己拉起的进程树。
+ */
+export function restart(opts: { killUserQQ?: boolean } = {}): Promise<void> {
+  if (!IS_WINDOWS) return Promise.resolve();
+  if (restarting) return restarting;
+  restarting = (async () => {
+    try {
+      const killUserQQ = opts.killUserQQ === true && facts.conflictAtBoot;
+      killTree();
+      await new Promise((r) => setTimeout(r, 1500));
+      if (killUserQQ) {
+        try {
+          spawnSync('taskkill', ['/F', '/IM', 'QQ.exe'], { stdio: 'ignore', timeout: 10_000 });
+        } catch {
+          // 忽略失败（QQ 可能本来就没开）
+        }
+      }
+      exitTimes = [];
+      facts.crashLoop = false;
+      facts.spawnFailed = false;
+      facts.recentExits = 0;
+      facts.conflictAtBoot = false;
+      spawnNapcat(getUin() ?? undefined);
+    } finally {
+      restarting = null;
+    }
+  })();
+  return restarting;
 }
 
 /** startNapcat 的进程侧入口（架构.md §3 第 3~4 步）：QQ 定位 → 冲突检测 → spawn */
 export function startManager(): void {
   if (!IS_WINDOWS) return;
+  if (!napcatInstalled()) {
+    facts.napcatMissing = true;
+    return;
+  }
   const qqExe = findQQExe();
   if (qqExe === null) {
     facts.qqExe = null;

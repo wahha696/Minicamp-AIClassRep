@@ -65,6 +65,7 @@ export default function TodoBox({ data, loading, onChanged, onOpenEvent }: Props
   const toast = useToast();
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState('');
+  const [addingBusy, setAddingBusy] = useState(false); // B17：连按回车不重复创建
   const [busyId, setBusyId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState('');
@@ -134,11 +135,13 @@ export default function TodoBox({ data, loading, onChanged, onOpenEvent }: Props
   }
 
   async function addManual() {
+    if (addingBusy) return; // B17：提交进行中不再创建第二条
     const title = draft.trim();
     if (!title) {
       setAdding(false);
       return;
     }
+    setAddingBusy(true);
     try {
       await createTodo({ title });
       setDraft('');
@@ -147,6 +150,8 @@ export default function TodoBox({ data, loading, onChanged, onOpenEvent }: Props
       toast(`已添加待办「${title}」`);
     } catch (e) {
       toastError(toast, e);
+    } finally {
+      setAddingBusy(false);
     }
   }
 
@@ -189,7 +194,8 @@ export default function TodoBox({ data, loading, onChanged, onOpenEvent }: Props
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter') void addManual();
+              // B17：中文输入法选词的回车（isComposing）不提交
+              if (e.key === 'Enter' && !e.nativeEvent.isComposing) void addManual();
               if (e.key === 'Escape') setAdding(false);
             }}
             onBlur={() => draft.trim() === '' && setAdding(false)}
@@ -228,7 +234,7 @@ export default function TodoBox({ data, loading, onChanged, onOpenEvent }: Props
                     value={editDraft}
                     onChange={(e) => setEditDraft(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter') void saveEdit(row);
+                      if (e.key === 'Enter' && !e.nativeEvent.isComposing) void saveEdit(row);
                       if (e.key === 'Escape') setEditingId(null);
                     }}
                     onBlur={() => void saveEdit(row)}

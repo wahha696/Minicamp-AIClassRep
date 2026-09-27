@@ -206,7 +206,8 @@ function Body({
           {meta.label}
         </span>
         <span className={`rounded px-1.5 py-0.5 text-xs ${STATUS_STYLE[detail.status]}`}>{STATUS_TEXT[detail.status]}</span>
-        {detail.history.length > 0 && (
+        {/* B15：只有群通知触发的改动（带来源消息）才亮「已更新」；自己调级/改状态不算 */}
+        {detail.history.some((h) => h.source_message_id !== null) && (
           <span className="rounded bg-sky-50 px-1.5 py-0.5 text-xs text-sky-700">已按最新通知更新</span>
         )}
       </div>
