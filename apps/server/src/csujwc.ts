@@ -14,6 +14,7 @@ import type { CheerioAPI } from 'cheerio';
 import type { Element } from 'domhandler';
 import iconv from 'iconv-lite';
 import type { CourseDTO } from './types.js';
+import { parseTimetableHtml } from './timetable-html.js';
 
 const BASE = 'http://csujwc.its.csu.edu.cn';
 const TIMEOUT_MS = 15_000;
@@ -241,9 +242,14 @@ export async function csuBeginImport(account: string, password: string): Promise
     const needRes = await session.get(
       `${CAS_BASE}/authserver/checkNeedCaptcha.htl?username=${encodeURIComponent(account)}`,
     );
-    captchaRequired = /"isNeed"\s*:\s*true/.test(Session.decode(needRes));
+    if (needRes.status !== 200) throw new Error('captcha status');
+    const need: unknown = JSON.parse(Session.decode(needRes));
+    if (!need || typeof need !== 'object' || !('isNeed' in need) || typeof need.isNeed !== 'boolean') {
+      throw new Error('captcha response');
+    }
+    captchaRequired = need.isNeed;
   } catch {
-    captchaRequired = false; // 拿不到判断结果就先当不需要,失败后让用户点「换一张」
+    throw new CsuError('无法确认统一身份认证的验证码要求,请重新点击「下一步」;本次未提交登录');
   }
 
   let captcha = '';
@@ -292,6 +298,9 @@ export async function csuFetchCourses(
   if (!st) throw new CsuError('登录会话不存在或已超时,请重新获取验证码');
   pending.delete(sessionId); // 一次性:验证码是一次性的,成败都不复用
   try {
+    if (Date.now() - st.createdAt > SESSION_TTL) {
+      throw new CsuError('登录会话已超时,请重新点击「下一步」');
+    }
     if (st.captchaRequired && !captcha) {
       throw new CsuError('本次登录需要验证码,请先获取验证码并输入图片里的字符');
     }
@@ -303,18 +312,18 @@ export async function csuFetchCourses(
       dllt: 'generalLogin',
       lt: '',
       execution: st.execution,
-      responseJson: '',
+      captcha: st.captchaRequired ? captcha : '',
     };
-    if (st.captchaRequired) fields.captcha = captcha;
 
     // 成功:302 带 ticket 回 /sso.jsp → 教务网建立会话;失败:CAS 返回 200 登录页
-    const casBack = await st.session.post(`${CAS_BASE}/authserver/login`, fields, st.loginPageUrl);
+    const casBack = await st.session.post(st.loginPageUrl, fields, st.loginPageUrl);
     const backHtml = Session.decode(casBack);
-    if (casBack.status >= 500 || /"status":\s*5\d\d/.test(backHtml.slice(0, 200))) {
-      // CAS 服务器内部错误:短时间多次尝试常见于被限流,不要再自动重试(会加剧)
-      console.warn(`[csujwc] CAS 登录 POST 返回 ${casBack.status},不重试(避免加剧限流)`);
+    const serverError = (status: number, html: string): boolean =>
+      status >= 500 || (!/<html/i.test(html.slice(0, 400)) && /"status":\s*5\d\d/.test(html));
+    if (new URL(casBack.finalUrl).origin === CAS_BASE && serverError(casBack.status, backHtml)) {
+      console.warn(`[csujwc] CAS 响应异常:HTTP ${casBack.status},未自动重试`);
       throw new CsuError(
-        '统一身份认证服务器暂时异常(500),很可能是短时间内登录尝试过多被限流。请等 5-10 分钟后重试一次;若浏览器登录教务系统也异常,请等账号解除限制',
+        `统一身份认证接口返回服务器错误(HTTP ${casBack.status}),尚未完成教务回跳。无法据此判断是否限流,请将 [csujwc] 日志反馈给开发者`,
       );
     }
     if (/id="pwdEncryptSalt"|name="passwordText"/.test(backHtml)) {
@@ -330,16 +339,17 @@ export async function csuFetchCourses(
     // 桥接偶发 500 时轻量自愈:重走 /sso.jsp(CAS 已有会话,直接换新 ticket)。
     let landUrl = casBack.finalUrl;
     let landHtml = backHtml;
-    const errJson = (): boolean =>
-      !/<html/i.test(landHtml.slice(0, 400)) && /"status":\s*5\d\d/.test(landHtml);
-    if (errJson()) {
+    let landStatus = casBack.status;
+    const landingFailed = (): boolean => serverError(landStatus, landHtml);
+    if (landingFailed()) {
       // 回跳页直接 500:换新 ticket 再试一次(CAS 会话还在,直接静默重定向)
       console.warn('[csujwc] ticket 回跳 500,重走 /sso.jsp 换新 ticket(1/1)');
       const again = await st.session.get(`${BASE}/sso.jsp`);
       landUrl = again.finalUrl;
       landHtml = Session.decode(again);
+      landStatus = again.status;
     }
-    if (!errJson() && /id=["']frmloginZndx["']/.test(landHtml)) {
+    if (!landingFailed() && /id=["']frmloginZndx["']/.test(landHtml)) {
       // 自动提交页:页面 JS(submitZNDX)提交 frmloginZndx 到 /Logon.do。
       // 页面注入值优先(实测可行),取不到再照抄静态页 JS 的 'null' 占位。
       const action =
@@ -364,19 +374,19 @@ export async function csuFetchCourses(
       );
       landUrl = logonBack.finalUrl;
       landHtml = Session.decode(logonBack);
+      landStatus = logonBack.status;
       console.log(
         `[csujwc] SSO 补登录 HTTP ${logonBack.status},落点 ${new URL(landUrl).host},页面 ${landHtml.length}B,注入值:${useInjected ? '用页面值' : '用占位'}`,
       );
-    } else if (!errJson()) {
+    } else if (!landingFailed()) {
       // 没有自动提交页:可能直接落在主框架(部分部署免补登录)
       console.log(
         `[csujwc] ticket 回跳无自动提交页,直接在落点找课表:落点 ${new URL(landUrl).host},长度 ${landHtml.length}`,
       );
     }
-    if (errJson()) {
-      dumpPage('csu-cas-back.html', landHtml);
+    if (landingFailed()) {
       throw new CsuError(
-        '教务网 SSO 桥接持续内部错误(500,已自动重试一次)。请过几分钟再试;若持续出现请把黑窗口里 [csujwc] 开头的日志发给开发者',
+        `登录回跳或教务补登录发生服务器错误(HTTP ${landStatus})。请把黑窗口里 [csujwc] 开头的日志发给开发者`,
       );
     }
 
@@ -411,7 +421,8 @@ export async function csuFetchCourses(
     // 兜底:裸路径(部分部署支持)
     candidates.push(`${new URL(landUrl).origin}/jsxsd/xskb/xskb_list.do`, `${BASE}/jsxsd/xskb/xskb_list.do`);
 
-    let html: string | null = null;
+    let parsedResult: { courses: CourseDTO[]; warnings: string[] } | null = null;
+    let foundTable = false;
     for (const url of [...new Set(candidates)]) {
       if (tried.has(url)) continue;
       tried.add(url);
@@ -419,22 +430,30 @@ export async function csuFetchCourses(
         const res = await st.session.get(url);
         const h = Session.decode(res);
         if (!isLoginPage(h) && /id=["']kbtable["']/.test(h)) {
-          html = h;
-          break;
+          foundTable = true;
+          const parsed = parseKbtable(h);
+          const courses = toCourseDTOs(parsed.raw, parsed.warnings);
+          console.log(`[csujwc] 课表解析:有效排课 ${courses.length} 项,提示 ${parsed.warnings.length} 条`);
+          if (courses.length) {
+            parsedResult = { courses, warnings: parsed.warnings };
+            break;
+          }
         }
       } catch {
         // 单个候选失败不影响其余
       }
     }
-    if (!html) {
+    if (!parsedResult && foundTable) {
+      throw new CsuError('已进入教务课表页面,但未识别到有效课程。可能是页面布局不兼容或当前学期没有排课;本次未导入,不会覆盖已有课表');
+    }
+    if (!parsedResult) {
       const title = dumpPage('csu-kb-dump.html', landHtml);
       console.warn(`[csujwc] 没找到课表链接:落点 ${new URL(landUrl).host},标题"${title}",候选 ${tried.size} 个`);
       throw new CsuError(
         `没在教务系统页面里找到课表入口(页面标题:「${title || '未知'}」)。页面已保存到 data/logs/csu-kb-dump.html,请把此提示反馈给开发者`,
       );
     }
-    const parsed = parseKbtable(html);
-    return { courses: toCourseDTOs(parsed.raw, parsed.warnings), warnings: parsed.warnings };
+    return parsedResult;
   } catch (e) {
     if (e instanceof CsuError) throw e;
     throw new CsuError('教务系统导入失败,请稍后重试;若持续失败请改用「文件导入」');
@@ -458,9 +477,9 @@ export interface RawCourse {
 /** "第1,2节" / "第1-2节" / "第3节" → [起,止];不匹配返回 null */
 export function parseSectionLabel(text: string): [number, number] | null {
   const t = text.replace(/\s+/g, '');
-  const pair = t.match(/第?(\d+)[,，、\-–—~至]+(\d+)节?/);
+  const pair = t.match(/^(?:上午|下午|晚上)?第?(\d{1,2})[,，、－\-–—~至](\d{1,2})节?$/);
   if (pair) return [Number(pair[1]), Number(pair[2])];
-  const single = t.match(/第(\d+)节/);
+  const single = t.match(/^(?:上午|下午|晚上)?第(\d{1,2})节$/);
   if (single) return [Number(single[1]), Number(single[1])];
   return null;
 }
@@ -579,6 +598,16 @@ function processCell(
 export function parseKbtable(html: string): { raw: RawCourse[]; warnings: string[] } {
   if (isLoginPage(html)) {
     throw new CsuError('教务系统把页面重定向回了登录:请重新导入(会话超时)');
+  }
+  const structured = parseTimetableHtml(html);
+  if (structured) {
+    return {
+      raw: structured.courses.map(c => ({
+        name: c.name, teacher: c.teacher, location: c.location, dayOfWeek: c.weekday,
+        startSection: c.block * 2 - 1, endSection: c.block * 2, weeks: c.weeks,
+      })),
+      warnings: structured.warnings,
+    };
   }
   const $ = cheerio.load(html);
   const kb = $('#kbtable');
