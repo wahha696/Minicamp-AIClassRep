@@ -20,6 +20,8 @@ export const ROOT: string = findRoot();
 export const DATA_DIR: string = join(ROOT, 'data');
 export const NAPCAT_DIR: string = join(ROOT, 'napcat');
 export const MOCK_DIR: string = join(DATA_DIR, 'mock');
+/** 按账号分库（问题 1）：每个 QQ 号一个库目录，换号互不可见、删目录即删账号 */
+export const ACCOUNTS_DIR: string = join(DATA_DIR, 'accounts');
 
 /** WEB_DIST 取 ROOT/app/web/dist（压缩包）或 ROOT/apps/web/dist（开发）中存在的那个 */
 function findWebDist(): string {

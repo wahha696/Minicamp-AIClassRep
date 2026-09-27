@@ -149,6 +149,9 @@ export function writeAccountFlag(key: string, value: string): void {
 export const TAKEOVER_NOTICE_KEY = 'takeoverNoticeShown';
 export const TAKEOVER_NOTICE_TEXT = '电脑版 QQ 已由 ClassRep 接管，聊天请用手机 QQ';
 
+/** 旧版单库迁移提示：用户点「知道了」后不再显示 */
+export const LEGACY_DATA_KEY = 'legacyDataNoticeShown';
+
 /** first_run 时把用户拦到 /setup 向导（填 Key → 扫码）；向导页自己也允许跳过（演示模式） */
 export function shouldRedirectToConnect(
   status: ConnectStatusDTO | undefined,

@@ -1,12 +1,20 @@
 // OneBot WS 客户端（架构.md §2/§3 第 5~6 步；NapCat接口规格.md §5/§6/§7）。主人是 A（分工 A4）。
-// 唯一接入：ws://127.0.0.1:3001，事件推送与 action 调用走同一条连接（按 echo 匹配回包）。
+// 默认接入 ws://127.0.0.1:3001（本机注入 NapCat）；Docker 部署时用 ONEBOT_WS_URL 指向外部
+// NapCat 容器（如 ws://napcat:3001），此时不启动本机 QQ 注入（manager 的 Windows 专用逻辑不跑）。
+// 事件推送与 action 调用走同一条连接（按 echo 匹配回包）。
 // 铁律：任何解析/处理异常都 catch，绝不让连接断掉。
 import { randomUUID } from 'node:crypto';
 import { connect as netConnect } from 'node:net';
-import { currentAccount, onAccountSwitch, switchAccount } from '../db/index.js';
+import { isAccountSwitching, switchAccount } from '../accounts.js';
+import { onAccountSwitch } from '../db/index.js';
 import { ingestMessages, upsertGroup } from '../ingest/index.js';
 import { getUin, killTree, setUin } from './manager.js';
 import type { Message } from '../types.js';
+
+const DEFAULT_WS = 'ws://127.0.0.1:3001';
+const EXTERNAL_WS_URL = process.env.ONEBOT_WS_URL ?? '';
+/** 外部 OneBot 模式（Docker 部署）：连接目标是环境变量指定的远端，而不是本机注入的 QQ */
+export const EXTERNAL_ONEBOT = EXTERNAL_WS_URL !== '' && EXTERNAL_WS_URL !== DEFAULT_WS;
 
 /** writeNapcatConfig 生成的 token 与端口（修复计划 S3/B8）；token 空串 = 不带（测试 / 旧配置） */
 let wsToken = '';
@@ -16,6 +24,7 @@ export function setOnebotEndpoint(token: string, port: number): void {
   wsPort = port;
 }
 function wsUrl(): string {
+  if (EXTERNAL_ONEBOT) return EXTERNAL_WS_URL; // Docker：连外部 NapCat，token 由部署方管
   const base = `ws://127.0.0.1:${wsPort}`;
   return wsToken ? `${base}/?access_token=${encodeURIComponent(wsToken)}` : base;
 }
@@ -194,12 +203,10 @@ export function handleOnebotMessage(text: string): void {
     selfId = uin;
     everOnline = true;
     backoffMs = BACKOFF_START_MS;
-    // 换号（修复计划第一节）：self_id 与当前库不是同一个号 → 先切库再处理后续消息，
-    // 实时消息在 lifecycle 之后才到，不会串进旧号库
-    if (currentAccount() !== uin) switchAccount(uin);
     try { setUin(uin); } catch { /* settings 写失败不致命 */ }
-    // 异步刷群名 + 历史补齐（FR-2：每次进入 online 自动跑一次），失败不影响连接
-    void afterOnline();
+    // 按账号分库（修复计划第一节 + 四问题修复 #1）：登录成功的账号 = 数据归属，先切到它的库
+    // 再开始收消息。切库（静默流水线）完成前，新到的群消息先攒进缓冲，切完按序入库。
+    void onLifecycleOnline(uin);
     return;
   }
 
@@ -215,8 +222,44 @@ export function handleOnebotMessage(text: string): void {
   if ((obj.post_type === 'message' || obj.post_type === 'message_sent') && obj.message_type === 'group') {
     if (mentionOf(obj.message, currentSelfId()) === 'other') return;
     const m = toMessage(obj);
-    if (m !== null) ingestMessages([m], 'onebot');
+    if (m === null) return;
+    if (isAccountSwitching()) {
+      // 正在切账号库：先攒着，切完按序入库（onLifecycleOnline 里 flush）
+      if (switchBuffer.length >= SWITCH_BUFFER_MAX) {
+        switchBuffer.shift();
+        switchBufferDropped++;
+      }
+      switchBuffer.push(m);
+      return;
+    }
+    ingestMessages([m], 'onebot');
   }
+}
+
+/** 切库期间攒下的消息上限：满了丢最旧的（登录刚完成的窗口期极短，历史补齐会兜回来） */
+const SWITCH_BUFFER_MAX = 500;
+let switchBufferDropped = 0;
+const switchBuffer: Message[] = [];
+
+/** lifecycle 后：切到该账号的库 → 攒下的消息按序入库 → 刷群名 + 历史补齐（FR-2）。 */
+async function onLifecycleOnline(uin: string): Promise<void> {
+  try {
+    await switchAccount(uin);
+  } catch (e) {
+    // 切库失败（磁盘满等）不能挡住收消息：沿用当前库，缓冲的消息丢掉（历史补齐会兜回来）
+    console.warn('[onebot] 切换账号库失败，沿用当前库：', e);
+    switchBuffer.length = 0;
+    void afterOnline();
+    return;
+  }
+  if (switchBufferDropped > 0) {
+    console.warn(`[onebot] 切库期间缓冲溢出，丢弃了 ${switchBufferDropped} 条早期消息（历史补齐会补回）`);
+    switchBufferDropped = 0;
+  }
+  const buffered = switchBuffer.splice(0);
+  if (buffered.length) ingestMessages(buffered, 'onebot');
+  // 刷群名 + 历史补齐（FR-2：每次进入 online 自动跑一次），失败不影响连接
+  void afterOnline();
 }
 
 // ===== @ 规则 =====

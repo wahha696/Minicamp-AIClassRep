@@ -140,6 +140,30 @@ export interface ConnectStatusDTO {
   since: number;        // 进入当前状态的时间
   message?: string;     // error 时的用户文案（架构.md §7）
   first_run: boolean;   // 没有 uin 或 DeepSeek 未配置 → 前端拦到 /setup 向导（修复计划第一节 §5）
+  deepseek_configured?: boolean; // DeepSeek Key 是否已配置（网页或 .env）
+  reason?: 'no_qq' | 'no_napcat'; // error 细分：缺 QQ 电脑版 / 缺采集端运行包（给一键下载）
+  legacy_data?: boolean; // 检测到旧版单库数据被迁到 data/accounts/legacy（提示一次）
+}
+
+/** GET/POST /api/setup/*：采集端组件一键下载（问题 3） */
+export interface SetupProgressDTO {
+  status: 'idle' | 'downloading' | 'verifying' | 'extracting' | 'done' | 'error';
+  percent: number;   // 下载中 0~99，完成 100，未开始/不可用 -1
+  message: string;
+  installed: boolean; // napcat/NapCatWinBootMain.exe 是否已就绪
+}
+
+/** GET /api/accounts：本机账号库列表（问题 1 延伸：账号数据管理） */
+export interface AccountDTO {
+  uin: string;
+  current: boolean;
+  size_bytes: number;
+  updated_at: number;
+}
+
+export interface AccountsDTO {
+  accounts: AccountDTO[];
+  legacy_data: boolean;
 }
 
 export interface PipelineStats {

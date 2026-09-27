@@ -100,3 +100,22 @@ describe('deriveConnectStatus（架构.md §4，自上而下先命中为准）',
     expect(r.uin).toBe('10001');
   });
 });
+
+describe('缺 NapCat 运行包（四问题修复 #3：区分「缺 QQ」与「缺运行包」）', () => {
+  it('QQ 在但 napcat/NapCatWinBootMain.exe 缺失 → error + no_napcat + 带动作的文案', () => {
+    const r = deriveConnectStatus(base({ napcatInstalled: false }));
+    expect(r.state).toBe('error');
+    expect(r.reason).toBe('no_napcat');
+    expect(r.message).toContain('一键下载 NapCat 组件');
+  });
+
+  it('没装 QQ 优先于缺运行包（先装 QQ 才谈得上下载组件）', () => {
+    const r = deriveConnectStatus(base({ napcatInstalled: false, manager: { ...base().manager, qqExe: null } }));
+    expect(r.state).toBe('error');
+    expect(r.reason).toBe('no_qq');
+  });
+
+  it('napcatInstalled 缺省 = true（老调用方不受影响）', () => {
+    expect(deriveConnectStatus(base()).reason).toBeUndefined();
+  });
+});

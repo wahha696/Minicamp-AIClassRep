@@ -1,21 +1,23 @@
 #!/usr/bin/env node
-// ClassRep Windows 打包（pnpm pack:win 调用；修复计划第二/三节）。
+// ClassRep Windows 打包（pnpm pack:win 调用；修复计划第二/三节 + 分工 A8）。
 // 产物：release/ClassRep/（目录）+ release/ClassRep.zip：
-//   ClassRep/启动.bat                 ← 仓库根（powershell 调 scripts\bootstrap.ps1）
-//   ClassRep/scripts/                 ← bootstrap.ps1 + launcher.mjs + versions.json
-//   ClassRep/runtime/node.exe         ← versions.json 里固定的版本（缓存到 release/cache/）
+//   ClassRep/启动.bat                 ← 仓库根（免安装包布局：直接跑 runtime\node.exe + app\）
+//   ClassRep/runtime/node.exe         ← lib/fetch-node.mjs 下载 win-x64 LTS（缓存到 release/cache/）
 //   ClassRep/napcat/                  ← 仓库根 napcat/，排除规则同 .gitignore（账号数据、非 win32-x64 原生库）
 //   ClassRep/app/server/dist/index.js ← pnpm -r build 的 esbuild 产物
 //   ClassRep/app/web/dist/            ← pnpm -r build 的 vite 产物
+//   ClassRep/app/update.mjs           ← scripts/update.mjs（下次启动应用自更新包）
+//   ClassRep/app/version.json         ← { version, repo }：后端检查更新 / update.mjs 用
 //   ClassRep/data/mock/               ← 仿真剧本（data/mock 本来就进 git）
-// 不打 .env.release：API Key 由用户首次启动时在向导页填（修复计划 3.2）。
+// 不打 .env.release：API Key 由用户首次启动时在向导页填（修复计划 3.2），密钥绝不进发布包。
 // 真机验收：没装过 Node 的 Windows 电脑、解压到含中文+空格路径、双击 启动.bat 走完修复计划的目标体验。
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execSync } from 'node:child_process';
 import {
   cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ensureNodeExe } from './lib/fetch-node.mjs';
 
 const REPO = dirname(dirname(fileURLToPath(import.meta.url))); // 仓库根
 const releaseDir = join(REPO, 'release');
@@ -38,10 +40,9 @@ function dirSize(p) {
 // ---------- 0. 前置检查 ----------
 if (process.platform !== 'win32') fail('只能在 Windows 上打包（产物是 .bat + QQ 注入）');
 for (const f of ['NapCatWinBootMain.exe', 'NapCatWinBootHook.dll', 'napcat.mjs']) {
-  if (!existsSync(join(REPO, 'napcat', f))) fail(`仓库根 napcat/ 缺 ${f}。napcat 运行包应随仓库提交，请重新克隆完整仓库。`);
-}
-for (const f of ['bootstrap.ps1', 'launcher.mjs', 'versions.json']) {
-  if (!existsSync(join(REPO, 'scripts', f))) fail(`缺 scripts/${f}`);
+  if (!existsSync(join(REPO, 'napcat', f))) {
+    fail(`仓库根 napcat/ 缺 ${f}。napcat 运行包随发布包分发；克隆版用户可用「一键下载 NapCat 组件」补齐。`);
+  }
 }
 
 // ---------- 1. 构建（pnpm -r build = esbuild 单文件 + vite build） ----------
@@ -53,39 +54,20 @@ if (!existsSync(join(REPO, 'apps', 'web', 'dist', 'index.html'))) fail('缺 apps
 
 // ---------- 2. 清空并搭骨架 ----------
 rmSync(outDir, { recursive: true, force: true });
-for (const d of ['runtime', 'scripts', join('app', 'server', 'dist'), join('app', 'web'), join('data', 'mock')]) {
+for (const d of ['runtime', join('app', 'server', 'dist'), join('app', 'web'), join('data', 'mock')]) {
   mkdirSync(join(outDir, d), { recursive: true });
 }
 mkdirSync(cacheDir, { recursive: true });
 
-// ---------- 3. 启动.bat + scripts/（新布局：bat → bootstrap.ps1 → launcher.mjs → app/server/dist） ----------
+// ---------- 3. 启动.bat ----------
 cpSync(join(REPO, '启动.bat'), join(outDir, '启动.bat'));
-for (const f of ['bootstrap.ps1', 'launcher.mjs', 'versions.json']) {
-  cpSync(join(REPO, 'scripts', f), join(outDir, 'scripts', f));
-}
 
-// ---------- 4. runtime/node.exe（版本固定在 scripts/versions.json，与 bootstrap 下载的一致） ----------
-const versions = JSON.parse(readFileSync(join(REPO, 'scripts', 'versions.json'), 'utf8'));
-const nodeVer = versions.node.version; // 形如 v24.17.0
-const cacheExe = join(cacheDir, `node-${nodeVer}-win-x64.exe`);
-if (existsSync(cacheExe) && statSync(cacheExe).size > 50 * 1024 * 1024) {
-  log(`命中缓存 release/cache/node-${nodeVer}-win-x64.exe`);
-} else {
-  log(`下载 ${nodeVer} win-x64 node.exe（~80MB，只下这一次）…`);
-  let done = false;
-  for (const base of versions.node.mirrors) {
-    const exeRes = await fetch(`${base}/${nodeVer}/win-x64/node.exe`).catch(() => null);
-    if (exeRes?.ok) {
-      writeFileSync(cacheExe, Buffer.from(await exeRes.arrayBuffer()));
-      done = true;
-      break;
-    }
-    log(`  ${base} 失败，换下一个镜像…`);
-  }
-  if (!done) fail('下载 node.exe 失败（两个镜像都不通）');
-}
-cpSync(cacheExe, join(outDir, 'runtime', 'node.exe'));
-log(`runtime/node.exe = ${nodeVer}`);
+// ---------- 4. runtime/node.exe（lib/fetch-node.mjs：查最新 LTS + 缓存，与 bootstrap 共用） ----------
+const { version } = await ensureNodeExe(join(outDir, 'runtime', 'node.exe'), {
+  cacheDir,
+  log: (m) => log(m),
+});
+log(`runtime/node.exe = ${version}`);
 
 // ---------- 5. napcat/（排除规则与 .gitignore 一致：账号数据、运行时生成文件、非 win32-x64 原生库） ----------
 const napcatSrc = join(REPO, 'napcat');
@@ -123,6 +105,27 @@ const mockSrc = join(REPO, 'data', 'mock');
 if (existsSync(mockSrc)) {
   cpSync(mockSrc, join(outDir, 'data', 'mock'), { recursive: true });
 }
+
+// ---------- 6.5 自更新器 + 版本信息（update.mjs 每次启动前由 启动.bat 调用） ----------
+cpSync(join(REPO, 'scripts', 'update.mjs'), join(outDir, 'app', 'update.mjs'));
+const pkg = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8'));
+let repo = 'wahha696/Minicamp-AIClassRep';
+try {
+  const url = execSync('git remote get-url origin', { cwd: REPO, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
+    .toString().trim()
+    .replace(/\.git$/, '');
+  if (/github\.com[:/].+/.test(url)) {
+    repo = url.replace(/^.*github\.com[:/]/, '').replace(/\.git$/, '');
+  }
+} catch {
+  // 没有 git 信息就用默认仓库
+}
+writeFileSync(
+  join(outDir, 'app', 'version.json'),
+  `${JSON.stringify({ version: pkg.version ?? '0.0.0', repo, packed_at: new Date().toISOString() }, null, 2)}\n`,
+  'utf8',
+);
+log(`app/version.json = v${pkg.version ?? '0.0.0'}（${repo}）`);
 
 // ---------- 7. 压缩 release/ClassRep.zip ----------
 const zipPath = join(releaseDir, 'ClassRep.zip');

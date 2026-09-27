@@ -1,5 +1,6 @@
 // 修复计划第一节验收：lifecycle 换号 —— self_id 变了就切到对应账号库，同号重发是空操作。
 // 换号后到的新消息进新库（D6：新群默认禁用，先登记不存消息）。
+// 切库是异步的（先静默流水线再换库文件），测试里用 vi.waitFor 等它完成。
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,7 +18,8 @@ vi.mock('./manager.js', async (importOriginal) => {
   };
 });
 
-import { currentAccount, db, dbGeneration, setDataDir, switchAccount } from '../db/index.js';
+import { currentAccount, setAccountsDirForTest, switchAccount } from '../accounts.js';
+import { db, dbGeneration } from '../db/index.js';
 import { handleOnebotMessage } from './onebot.js';
 
 const dirs: string[] = [];
@@ -25,6 +27,11 @@ function tempDir(): string {
   const d = mkdtempSync(join(tmpdir(), 'classrep-ob-'));
   dirs.push(d);
   return d;
+}
+/** 每个用例一套独立账号目录 + 兜底库路径（互不污染） */
+function useTempAccounts(): void {
+  const d = tempDir();
+  setAccountsDirForTest(join(d, 'accounts'), join(d, 'fallback.db'));
 }
 afterAll(() => {
   try {
@@ -56,23 +63,26 @@ const groupMsg = (mid: string, gid = '9001') =>
 const count = (t: string) => (db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n;
 
 describe('lifecycle 换号（修复计划第一节 §4）', () => {
-  it('self_id 与当前库不同 → 切到该号的库；再发同号 lifecycle 是空操作', () => {
-    setDataDir(tempDir());
-    switchAccount('111');
+  it('self_id 与当前库不同 → 切到该号的库；再发同号 lifecycle 是空操作', async () => {
+    useTempAccounts();
+    await switchAccount('11111');
 
-    handleOnebotMessage(lifecycle('222'));
-    expect(currentAccount()).toBe('222'); // 换号 → 切库
+    handleOnebotMessage(lifecycle('22222'));
+    await vi.waitFor(() => expect(currentAccount()).toBe('22222')); // 换号 → 异步切库完成
 
     const gen = dbGeneration();
-    handleOnebotMessage(lifecycle('222'));
-    expect(currentAccount()).toBe('222');
-    expect(dbGeneration()).toBe(gen); // 同号不重建连接
+    handleOnebotMessage(lifecycle('22222'));
+    // 同号是 no-op（accounts.ts 提前返回），等一下确认 generation 没变
+    await new Promise((r) => setTimeout(r, 50));
+    expect(currentAccount()).toBe('22222');
+    expect(dbGeneration()).toBe(gen);
   });
 
-  it('换号后到的群消息进新号的库，旧号数据不受影响', () => {
-    setDataDir(tempDir());
-    switchAccount('111');
-    handleOnebotMessage(lifecycle('222')); // 换到 222
+  it('换号后到的群消息进新号的库，旧号数据不受影响', async () => {
+    useTempAccounts();
+    await switchAccount('11111');
+    handleOnebotMessage(lifecycle('22222')); // 换到 22222
+    await vi.waitFor(() => expect(currentAccount()).toBe('22222'));
 
     // D6：新发现的群默认禁用——消息不入库，但群登记在新号的库里
     handleOnebotMessage(groupMsg('1'));
@@ -83,7 +93,7 @@ describe('lifecycle 换号（修复计划第一节 §4）', () => {
     };
     expect(g).toEqual({ enabled: 0, adapter: 'onebot' });
 
-    switchAccount('111'); // 切回旧号：看不到 222 刚登记的群
+    await switchAccount('11111'); // 切回旧号：看不到 22222 刚登记的群
     expect(count('groups')).toBe(0);
   });
 });

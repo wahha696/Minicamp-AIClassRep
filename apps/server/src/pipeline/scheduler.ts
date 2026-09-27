@@ -355,3 +355,19 @@ export function stopScheduler(): void {
   clearInterval(timer);
   timer = undefined;
 }
+
+/**
+ * 切库前静默（accounts.switchAccount 用）：停掉调度定时器（不再交出新批次），
+ * 等所有在途批次（含在途 LLM 提取）跑完，避免半截批次在换库后写错库。
+ * 返回调度器之前是否在跑，切换完成后调用方据此决定要不要 startScheduler()。
+ */
+export async function quiesceScheduler(): Promise<boolean> {
+  const wasRunning = timer !== undefined;
+  stopScheduler();
+  try {
+    await Promise.all(inflight.values());
+  } catch {
+    // launch() 已把批次异常吞成 0，这里兜一层
+  }
+  return wasRunning;
+}

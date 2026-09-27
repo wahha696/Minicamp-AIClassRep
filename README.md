@@ -33,39 +33,76 @@ AI 课代表在本机接管电脑版 QQ，实时读取你开启监听的群，�
 
 ## 🚀 快速开始（用户）
 
-两条路，选一条：
+两种安装方式，选一种：
 
-| 方式 | 适合 |
-|---|---|
-| **下载发布包** | 大多数人：[Releases](../../releases) 下载 `ClassRep.zip` → 解压到任意目录（路径可以有中文和空格） |
-| **git clone** | 会用 git 的人：克隆本仓库即可，首次启动会自动准备运行环境（下载便携版 Node、装依赖、构建，要联网耐心等） |
+### 方式一：免安装包（推荐普通用户）
 
-然后是一样的：
+1. 从 [Releases](https://github.com/wahha696/Minicamp-AIClassRep/releases) 下载 `ClassRep.zip`，解压到任意目录（路径可以有中文和空格）
+2. 双击 `启动.bat`
+3. 浏览器自动打开**向导页**：填 DeepSeek API Key（AI 整理日程必填）和 Jev/TypeSafe API Key（可选，没有就留空）
+4. 用手机 QQ 扫页面上的二维码登录，新发现的群默认不监听，到「群管理」里挑要看的群打开
 
-1. 双击 `启动.bat`
-2. 浏览器自动打开**向导页**：填 DeepSeek API Key（必填）和 Jev/TypeSafe API Key（可选，没有就留空）
-3. 用手机 QQ 扫页面上的二维码登录，新发现的群默认不监听，到「群管理」里挑要看的群打开
+首次启动会自动下载缺的组件（Node 运行时约 80MB、NapCat 采集端约 30MB，都只下载一次；也可以在连接页点「一键下载 NapCat 组件」）。有新版本时后端会自动下载，下次双击 `启动.bat` 时自动应用，数据不受影响。
+
+### 方式二：克隆仓库（会用 git/命令行的同学）
+
+```bash
+git clone https://github.com/wahha696/Minicamp-AIClassRep.git
+cd ClassRep
+```
+
+Windows 双击 `启动.bat` 即可：它会自动准备便携版 Node（没有就下载到 `runtime\`）→ 用 corepack 装 pnpm 和依赖 → 缺 NapCat 运行包时自动下载 → 增量构建前端 → 启动并打开浏览器。命令行等价物：`pnpm start`（= `node scripts/bootstrap.mjs`，幂等，重复跑就是重启）。之后和方式一一样走向导页 → 扫码。
 
 **日常使用**：双击 `启动.bat`，自动快速登录，不用再扫码。
 **退出**：关掉 `启动.bat` 的黑窗口。
-**换号**：在「连接」页退出登录 → 扫另一个号 → 只看到新号的数据；换回旧号，旧数据原样回来（每个 QQ 号一份独立数据库，存在 `data/accounts/<QQ号>/`）。
+**换号**：连接页「退出登录」→ 扫另一个号 → 只看到新号的数据；换回旧号，旧数据原样回来。**每个 QQ 号一个独立数据库**（`data/accounts/<QQ号>/`），换号登录互不可见；升级前旧数据会自动迁移，账号数据也可以在连接页「本机账号数据」里删除。
 
 > 需要 **Windows 10 1803+**，电脑已安装 **QQ 电脑版（QQ NT ≥ 9.9.33）**。运行期间电脑版 QQ 由 ClassRep 占用，聊天请用手机 QQ。
 > 如果启动时电脑版 QQ 正开着，页面上会提示「关闭电脑版 QQ 并继续」，点一下即可。
 > 不需要装 Node、pnpm、Git、数据库，不弹 UAC。API Key 在网页向导里填，不碰 `.env`。
 
+### Linux / NAS：Docker Compose（采集端跑在别的机器）
+
+Windows 之外可以用 Docker 跑后端，QQ/NapCat 放在单独容器或另一台 Windows 电脑上：
+
+```bash
+cd deploy
+docker compose up -d --build   # 打开 http://localhost:8000 ；NapCat WebUI 在 :6099 扫码
+```
+
+通过 `ONEBOT_WS_URL` 环境变量把后端指向外部 NapCat 的 OneBot WebSocket（默认 `ws://napcat:3001`），详见 `deploy/`。
+
+---
+
+## 🧰 故障排查
+
+| 现象 | 处理 |
+|---|---|
+| 双击 `启动.bat` 闪退 / 黑窗口报「Node 下载失败」 | 看窗口里的提示：`setx NODE_MIRROR "https://npmmirror.com/mirrors/node"` 后重试，或手动下载 node.exe 放到 `runtime
+ode.exe` |
+| 连接页提示「采集端组件缺失」 | 点页面上的「一键下载 NapCat 组件」（自动下载官方 Release 并校验 SHA-256）；或手动把 NapCat.Shell 解压进 `napcat/` |
+| 提示「需要先安装 QQ 电脑版」 | 安装 QQ NT ≥ 9.9.33；免安装包不内置 QQ，也不会帮你装 |
+| 登录后一直「连接中断，重连中」 | 查 `data/logs/napcat.log`；QQ 版本过旧会被 NapCat 拒绝，更新 QQ |
+| 端口被占用 | 自动从 8000 顺延到 8010；全被占会报错，关掉占端口的程序 |
+| 升级后提示「检测到旧版本数据」 | 旧单库被迁到 `data/accounts/legacy/`，改名为对应 QQ 号文件夹即可找回 |
+| AI 不整理日程 | 向导页 / 连接页「AI 接入」卡填 DeepSeek Key（只存本机 `data/llm.json`），或 `.env` 里配 `LLM_API_KEY` |
+| 网页打不开 | 看 `data/logs/server.log` 与 `background.log`；`http://localhost:8000/health` 看健康状态 |
+
+日志都在 `data/logs/`（`server.log`、`background.log`、`napcat.log`、`fetch-napcat-progress.json`）。健康检查：`http://localhost:8000/health`。
+
 ---
 
 ## 🛠 本地开发
 
-**环境**：Windows 10/11 · Node.js ≥ 22.13（自带 `node:sqlite`）· pnpm · QQ NT
+**环境**：Windows 10/11 · Node.js ≥ 22.13（自带 `node:sqlite`）· pnpm（没有也行，`pnpm start` 会用 corepack 自动装）· QQ NT
 
 ```bash
 pnpm install
 cp .env.example .env        # 填上 LLM_API_KEY / TYPESAFE_API_KEY（.env 不要提交！）
-# 把 NapCat.Shell 运行包放到仓库根的 napcat/ 目录（已 gitignore）
+# 缺 NapCat 运行包时：node scripts/fetch-napcat.mjs 自动下载（版本钉在 napcat.version.json）
 
-pnpm start                  # 一键启动/重启：拉最新 main → 结束旧后端 → 打包前端 → 启动并打开浏览器
+pnpm start                  # 克隆即用链路：装依赖 → 补 NapCat → 增量构建前端 → 启动并打开浏览器（幂等）
+pnpm dev:start              # 开发启动：先 git pull 更新 main → 结束旧后端 → 增量构建 → 启动
 pnpm shortcut               # 生成桌面快捷方式（后台模式，网页全关后自动退出）
 ```
 
@@ -78,6 +115,8 @@ pnpm shortcut               # 生成桌面快捷方式（后台模式，网页�
 | `pnpm test` | 全仓测试（Vitest） |
 | `pnpm build` | 构建前后端 |
 | `pnpm pack:win` | 打 Windows 发布包 → `release/ClassRep.zip` |
+| `node scripts/bootstrap.mjs` | 五步自检启动（= 双击 启动.bat；`--background` 后台模式） |
+| `node scripts/dev.mjs` | 开发链路启动（含 git 拉最新 main；桌面快捷方式走这个） |
 
 `.env` 主要配置（见 `.env.example`）：
 
@@ -87,8 +126,8 @@ pnpm shortcut               # 生成桌面快捷方式（后台模式，网页�
 | `ENABLE_JEV` / `TYPESAFE_API_KEY` / `JEV_MODEL` | Jev 快判层；请求失败会自动回退到 LLM |
 | `DEMO_MODE` | `true` 时允许演示控制台重置数据 |
 | `RAW_MSG_TTL_DAYS` | 原始消息保留天数，默认 7 |
-
-排错日志在 `data/logs/`（`server.log`、`background.log`、`napcat.log`），健康检查：`http://localhost:8000/health`。
+| `ONEBOT_WS_URL` | OneBot WebSocket 地址；Docker/远程 NapCat 部署时设置（默认 `ws://127.0.0.1:3001`） |
+| `NAPCAT_MIRROR` / `NODE_MIRROR` | 组件下载镜像（GitHub / nodejs.org 被墙时） |
 
 ---
 
@@ -96,14 +135,14 @@ pnpm shortcut               # 生成桌面快捷方式（后台模式，网页�
 
 ```
 用户电脑（全部本机，普通用户权限）
-┌──────────────────────────────────────────────────────────────┐
-│ 启动.bat ─▶ node app/server/dist/index.js                     │
-│   ├─ HTTP :8000（被占用自动顺延）  网页 + /api                  │
-│   ├─ NapCatManager   写配置 / 冲突检测 / 拉起 / 监控 / 重启      │
-│   ├─ OneBotClient    WS → ws://127.0.0.1:3001                 │
-│   ├─ pipeline        规则过滤 → Jev 快判 → LLM 提取 → Reconcile │
-│   └─ SQLite          data/accounts/<QQ号>/classrep.db（按号分库）│
-└──────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│ 启动.bat（自适应：免安装包直跑 / 克隆版自检安装）                       │
+│   ├─ HTTP :8000（被占用自动顺延）  网页 + /api                        │
+│   ├─ NapCatManager   写配置 / 冲突检测 / 拉起 / 监控 / 重启            │
+│   ├─ OneBotClient    WS → ws://127.0.0.1:3001（Docker 可指远程）      │
+│   ├─ pipeline        规则过滤 → Jev 快判 → LLM 提取 → Reconcile       │
+│   └─ SQLite          按账号分库 data/accounts/<QQ号>/classrep.db      │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
 **技术栈**：TypeScript · Hono（后端）· React + Vite + Tailwind（前端）· node:sqlite · Zod · OpenAI SDK · NapCat（OneBot 11）· Vitest
@@ -113,8 +152,10 @@ apps/
   server/    后端：采集、AI 流水线、业务 API、课表/教务导入
   web/       前端：今日 / 本周 / 群管理 / 设置 / 连接 / 演示控制台
 shared/      前后端共享类型
-scripts/     一键启动、打包、快捷方式
+scripts/     启动链路（bootstrap/dev + lib/*）、打包、自更新、NapCat 下载
+deploy/      Docker Compose 部署模板（Linux/NAS，外接 NapCat）
 docs/        分工文档与拓展计划
+.github/     CI（typecheck + test + build + 全新克隆冒烟）与 Release 流水线
 ```
 
 详细设计见 [`架构.md`](./架构.md)（最高准则：能实现的前提下，用户操作最少）、需求见 [`需求文档.md`](./需求文档.md)、NapCat 接口证据见 [`NapCat接口规格.md`](./NapCat接口规格.md)。
@@ -139,4 +180,5 @@ docs/        分工文档与拓展计划
 
 - 只支持 **QQ 电脑版** 场景；本项目为单用户本机 Demo，无注册登录、无云端后端。
 - 请勿提交 `.env`、`data/` 下的任何数据或 API Key。
-- NapCat 为第三方开源项目，本仓库不包含其运行包及任何账号数据。
+- NapCat 为第三方开源项目，本仓库不包含其运行包及任何账号数据；组件下载走官方 GitHub Release（版本与 SHA-256 钉在 `napcat.version.json`）。
+- 自更新只覆盖程序文件（`app/`、`runtime/`、`napcat/`、`启动.bat`），`data/`（账号数据库、API Key、配置）永不覆盖。

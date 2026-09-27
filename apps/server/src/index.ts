@@ -8,8 +8,8 @@ import { isAbsolute, join, relative } from 'node:path';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { env } from './env.js';
-import { db, openInitialDb } from './db/index.js';
-import { getUin } from './napcat/manager.js';
+import { db } from './db/index.js';
+import { initAccounts } from './accounts.js';
 import { startNapcat, stopNapcat } from './napcat/index.js';
 import { getConnectStatus } from './napcat/state.js';
 import { getPipelineStats, startScheduler } from './pipeline/index.js';
@@ -22,11 +22,13 @@ import { registerBusinessRoutes } from './routes/business.js';
 import { registerConnectRoutes } from './routes/connect.js';
 import { registerMemoryRoutes } from './routes/memory.js';
 import { registerPetChatRoutes } from './routes/pet-chat.js';
+import { registerSetupRoutes } from './routes/setup.js';
 import { registerSettingsRoutes } from './routes/settings.js';
 import { registerTimetableRoutes } from './routes/timetable.js';
 import { registerTodoRoutes } from './routes/todos.js';
 import { registerTrashRoutes } from './routes/trash.js';
 import { registerPresence } from './presence.js';
+import { startUpdateChecker } from './update-check.js';
 import { DATA_DIR, WEB_DIST } from './paths.js';
 import type { HealthDTO } from './types.js';
 
@@ -87,6 +89,7 @@ registerConnectRoutes(app);
 // 局域网只读开关：启动时读一次决定监听地址；默认只监听本机
 const LISTEN_LAN = lanEnabledAtBoot();
 let listenPort = START_PORT;
+registerSetupRoutes(app);
 registerSettingsRoutes(app, { listening: LISTEN_LAN, port: () => listenPort });
 registerPetChatRoutes(app);
 registerTodoRoutes(app);
@@ -181,9 +184,8 @@ async function listenWithFallback(): Promise<number> {
 // 放在 openDb() 之前：启动阶段（建库、建目录）出问题也要能记下来。防 EPIPE 死循环 / 日志上限见 crash-log.ts
 installCrashHandlers(join(DATA_DIR, 'logs', 'server.log'));
 
-// 修复计划第一节：记住的 QQ 号 → 直接开它的库（老用户秒进日历）；没记住 → 内存占位库。
-// data/classrep.db 老布局在这里一次性搬进 accounts/<uin>/。
-openInitialDb(getUin());
+// 按账号分库（修复计划第一节 + 四问题修复 #1）：迁移旧单库 → 挂记住的账号库（无 uin 则开兜底库）
+await initAccounts();
 
 const port = await listenWithFallback();
 listenPort = port;
@@ -196,6 +198,8 @@ startCleanupJob();
 if (openBrowserOnStart && process.platform === 'win32') {
   // 用实际监听的端口（8000 被占会顺延），架构.md §3
   exec(`start "" http://localhost:${port}`);
+  // 打包版后台检查新版本：下载到 data/update/pending.json，下次启动由 启动.bat + app/update.mjs 应用
+  startUpdateChecker();
 }
 
 let stopping = false;

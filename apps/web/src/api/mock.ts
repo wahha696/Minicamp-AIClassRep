@@ -7,6 +7,7 @@ import type { Api } from './client';
 import { ApiError } from './error';
 import { isTodo } from '../lib/todo';
 import type {
+  AccountsDTO,
   AiSettingsDTO,
   AiTestResultDTO,
   ConnectState,
@@ -23,6 +24,7 @@ import type {
   HistoryDTO,
   MemoryDTO,
   ScenarioDTO,
+  SetupProgressDTO,
   SourceMessageDTO,
   TimetableDTO,
   TodayDTO,
@@ -510,6 +512,33 @@ export const mockApi: Api = {
     return delay({ ok: true as const });
   },
 
+  startFetchNapcat() {
+    mockNapcatInstalled = true;
+    return delay({ ok: true as const });
+  },
+
+  getFetchNapcatProgress() {
+    const installed = napcatInstalled();
+    return delay<SetupProgressDTO>({
+      status: installed ? 'done' : 'idle',
+      percent: installed ? 100 : -1,
+      message: '',
+      installed,
+    });
+  },
+
+  listAccounts() {
+    return delay<AccountsDTO>({
+      accounts: [{ uin: '10001', current: connectState() === 'online', size_bytes: 1024 * 512, updated_at: bootAt }],
+      legacy_data: false,
+    });
+  },
+
+  deleteAccountData(uin) {
+    if (!/^\d{5,12}$/.test(uin)) return fail('账号格式不合法', 400);
+    return delay({ ok: true as const });
+  },
+
   syncNow(days = 7) {
     if (connectState() !== 'online') return fail('QQ 未连接', 409);
     // 天数越大补回的消息越多（mock 按比例给个数）
@@ -793,4 +822,16 @@ function lanDto(): LanSettingsDTO {
     restart_required: mockLanEnabled,
     urls: mockLanEnabled ? [`http://192.168.1.23:8000/?token=mock-token-${lanSeq}`] : [],
   };
+}
+
+/** mock 里采集端组件默认已就绪（localStorage.mockNapcatMissing=1 可模拟缺失，调一键下载按钮）。
+ *  惰性读取：api.test.ts 在 node 环境跑，import 时没有 localStorage */
+let mockNapcatInstalled: boolean | null = null;
+function napcatInstalled(): boolean {
+  if (mockNapcatInstalled !== null) return mockNapcatInstalled;
+  try {
+    return localStorage.getItem('mockNapcatMissing') !== '1';
+  } catch {
+    return true;
+  }
 }

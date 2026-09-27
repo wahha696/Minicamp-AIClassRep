@@ -139,6 +139,8 @@ export interface ConnectStatusDTO {
   message?: string;     // error 时的用户文案（架构.md §7）
   first_run: boolean;   // 没有 uin 或 LLM 未配置 → 前端拦到 /setup 向导（修复计划第一节 §5）
   deepseek_configured: boolean; // DeepSeek Key 是否已配置（网页或 .env）
+  reason?: 'no_qq' | 'no_napcat'; // error 细分：没装 QQ / 缺采集端运行包（前端据此给一键下载）
+  legacy_data?: boolean; // 检测到旧版单库数据被迁到 data/accounts/legacy（前端提示一次）
 }
 
 export interface PipelineStats {

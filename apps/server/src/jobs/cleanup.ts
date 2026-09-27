@@ -12,6 +12,15 @@ const HOUR_MS = 60 * 60 * 1000;
 const HARD_KEEP_DAYS = 45; // 未处理消息的强删线
 const SEEN_KEEP_DAYS = 40; // message_seen 保留天数
 
+/** 切库期间暂停（accounts.switchAccount 会先 pause 再 resume，免得清理打到换库中的连接） */
+let paused = false;
+export function pauseCleanup(): void {
+  paused = true;
+}
+export function resumeCleanup(): void {
+  paused = false;
+}
+
 /** 清理一次，返回删掉的原始消息数。`now` 可注入，方便测试。 */
 export function cleanupOnce(now: number = Date.now()): number {
   const ttlDays = env.RAW_MSG_TTL_DAYS;
@@ -61,6 +70,7 @@ export function startCleanupJob(): void {
     console.error(`清理任务首次执行失败：${err instanceof Error ? err.message : String(err)}`);
   }
   const timer = setInterval(() => {
+    if (paused) return; // 正在切账号库，这轮跳过
     try {
       cleanupOnce();
     } catch (err) {
