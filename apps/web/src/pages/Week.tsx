@@ -9,7 +9,7 @@ import EventDrawer from '../components/EventDrawer';
 import SlotStack from '../components/SlotStack';
 import WeekGrid from '../components/WeekGrid';
 import { usePolling } from '../hooks/usePolling';
-import { isUpdated, typeMeta } from '../lib/eventMeta';
+import { isUpdated, levelStyle, typeMeta } from '../lib/eventMeta';
 import { hhmm, weekdayDate } from '../lib/time';
 import { weekOf } from '../lib/timetable';
 import { groupByDay, thisMonday, weekRange, type WeekItem } from '../lib/week';
@@ -39,6 +39,7 @@ function saveMode(m: Mode) {
 function Item({ item, onClick }: { item: WeekItem; onClick: () => void }) {
   const { event, at, isDeadline } = item;
   const meta = typeMeta(event.type);
+  const lv = levelStyle(event.type, event.level); // 等级决定色条深浅
   const done = event.status === 'done';
 
   return (
@@ -50,7 +51,7 @@ function Item({ item, onClick }: { item: WeekItem; onClick: () => void }) {
         isDeadline ? 'border-red-200 bg-red-50 hover:border-red-300' : 'border-slate-200 bg-white hover:border-slate-300'
       } ${done ? 'opacity-50' : ''}`}
     >
-      <span className="w-1 shrink-0" style={{ backgroundColor: meta.color }} aria-hidden />
+      <span className={`w-1 shrink-0 ${lv.bar}`} aria-hidden />
       <div className="min-w-0 flex-1 px-2 py-1.5">
         <div className="flex flex-wrap items-center gap-1 text-xs">
           {isDeadline ? (
@@ -142,8 +143,11 @@ export default function Week() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-slate-900 sm:text-3xl">
-            {weekN !== null ? `第 ${weekN} 周` : '本周'}
-            <span className="ml-2 text-base font-normal text-slate-500">{rangeText}</span>
+            {/* 有课表：第 N 周 / 开学前；没课表：本周，翻到别的周只显示日期范围 */}
+            {weekN !== null ? (weekN >= 1 ? `第 ${weekN} 周` : '开学前') : isThisWeek ? '本周' : rangeText}
+            {(weekN !== null || isThisWeek) && (
+              <span className="ml-2 text-base font-normal text-slate-500">{rangeText}</span>
+            )}
           </h1>
           <p className="mt-1 text-sm text-slate-500">
             {loading ? '正在读取本周日程…' : `这一周共 ${total} 件事`}

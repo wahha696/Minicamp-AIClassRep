@@ -3,7 +3,7 @@
 // 「+」展开输入行回车添加手动待办；群待办点标题开 EventDrawer，手动待办点标题就地编辑。
 import { useState } from 'react';
 import { createTodo, patchEvent, patchTodo } from '../api/client';
-import type { Level, TodosDTO } from '../api/types';
+import type { EventStatus, Level, TodosDTO } from '../api/types';
 import { toastError } from '../lib/errors';
 import { LEVEL_LABEL, levelStyle } from '../lib/eventMeta';
 import { useToast } from './Toast';
@@ -24,6 +24,7 @@ type Row = {
   note: string;
   level: Level;
   type: string; // event 行的真实类型，决定徽标色相；手动待办固定 'other'
+  status: EventStatus; // event 行勾选前的状态，撤销时恢复（待确认的不能撤销成进行中）；手动待办固定 'active'
   created_at: number;
 };
 
@@ -36,6 +37,7 @@ function toRows(data: TodosDTO): Row[] {
       note: e.group_name,
       level: e.level,
       type: e.type as string,
+      status: e.status,
       created_at: e.created_at,
     })),
     ...data.manual.map((t) => ({
@@ -45,6 +47,7 @@ function toRows(data: TodosDTO): Row[] {
       note: t.note,
       level: t.level,
       type: 'other',
+      status: 'active' as const,
       created_at: t.created_at,
     })),
   ];
@@ -74,7 +77,7 @@ export default function TodoBox({ data, loading, onChanged, onOpenEvent }: Props
         onClick: () => {
           void (async () => {
             try {
-              if (row.kind === 'event') await patchEvent(row.id, { status: 'active' });
+              if (row.kind === 'event') await patchEvent(row.id, { status: row.status });
               else await patchTodo(row.id, { done: false });
               onChanged();
             } catch (e) {

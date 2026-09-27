@@ -374,6 +374,7 @@ export const mockApi: Api = {
         const from = e.level;
         e.level = patch.level;
         e.level_locked = true;
+        memory.feedback_count++; // 与后端一致：每次手动设级记一条调级记录
         // 与后端一致：手动调级不升 version，只追加一条 history
         e.history = [
           ...e.history,
@@ -570,7 +571,7 @@ export const mockApi: Api = {
     const before = memory.rules.length;
     memory.rules = memory.rules.filter((r) => r.id !== id);
     if (memory.rules.length === before) return fail('规则不存在', 404);
-    memory.feedback_count = Math.max(0, memory.feedback_count - 1);
+    // 与后端一致：删规则只把对应记录标成 ignored，feedback_count 统计全部记录，不变
     const body: MemoryDTO = { enabled: memory.enabled, rules: [...memory.rules], feedback_count: memory.feedback_count };
     return delay(body);
   },

@@ -115,6 +115,22 @@ export function bannerFor(status: ConnectStatusDTO | undefined, pathname: string
 
 export const SKIP_CONNECT_KEY = 'skipConnect';
 
+/** localStorage 读写（隐私模式 / 禁用站点数据时会抛错）：读失败当没有，写失败静默忽略 */
+export function readFlag(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+export function writeFlag(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // 存不下就只在本次生效
+  }
+}
+
 /** D5：首次看到 online 时弹一次「电脑版 QQ 已由 ClassRep 接管」，弹过就记下，不再弹 */
 export const TAKEOVER_NOTICE_KEY = 'takeoverNoticeShown';
 export const TAKEOVER_NOTICE_TEXT = '电脑版 QQ 已由 ClassRep 接管，聊天请用手机 QQ';

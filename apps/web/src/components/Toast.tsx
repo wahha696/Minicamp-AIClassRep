@@ -17,6 +17,7 @@ interface Item {
 
 const MAX_VISIBLE = 2;
 const DURATION = 3000;
+const ACTION_DURATION = 6000; // 带「撤销」等按钮的多留一会儿，来得及点
 const LEAVE_MS = 300; // 与 index.css 的 toast-leave 动画时长一致
 
 const ToastContext = createContext<(text: string, tone?: Tone, action?: Action) => void>(() => {});
@@ -55,7 +56,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       ]);
       const alive = listRef.current.filter((x) => !x.leaving);
       dismiss(alive.slice(0, Math.max(0, alive.length - MAX_VISIBLE)).map((x) => x.id));
-      setTimeout(() => dismiss([id]), DURATION);
+      setTimeout(() => dismiss([id]), action ? ACTION_DURATION : DURATION);
     },
     [update, dismiss],
   );

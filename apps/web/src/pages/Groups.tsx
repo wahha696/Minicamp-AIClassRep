@@ -301,6 +301,10 @@ export default function Groups() {
                           {courseNames.map((n) => (
                             <option key={n} value={n}>{n}</option>
                           ))}
+                          {/* 重新导入课表后旧课名没了：照实显示，别让下拉框假装成「自动」 */}
+                          {g.course_name && !courseNames.includes(g.course_name) && (
+                            <option value={g.course_name}>{g.course_name}（课表中已不存在）</option>
+                          )}
                         </select>
                       )}
 

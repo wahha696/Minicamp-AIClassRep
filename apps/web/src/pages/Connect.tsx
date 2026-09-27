@@ -15,6 +15,8 @@ import {
   SKIP_CONNECT_KEY,
   TAKEOVER_NOTICE_KEY,
   TAKEOVER_NOTICE_TEXT,
+  readFlag,
+  writeFlag,
 } from '../lib/status';
 
 export default function Connect() {
@@ -28,11 +30,11 @@ export default function Connect() {
 
   // online：不再自动跳走（这页还有「AI 接入」要配）；这台电脑第一次看到 online 时弹一次接管提示
   useEffect(() => {
-    if (state === 'online' && localStorage.getItem(TAKEOVER_NOTICE_KEY) !== '1') setNotice(true);
+    if (state === 'online' && readFlag(TAKEOVER_NOTICE_KEY) !== '1') setNotice(true);
   }, [state]);
 
   function closeNotice() {
-    localStorage.setItem(TAKEOVER_NOTICE_KEY, '1');
+    writeFlag(TAKEOVER_NOTICE_KEY, '1');
     setNotice(false);
   }
 
@@ -49,7 +51,7 @@ export default function Connect() {
   }
 
   function goDemo() {
-    localStorage.setItem(SKIP_CONNECT_KEY, '1');
+    writeFlag(SKIP_CONNECT_KEY, '1');
     navigate('/demo');
   }
 

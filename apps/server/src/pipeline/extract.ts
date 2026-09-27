@@ -250,16 +250,17 @@ function fmtCourse(start: number, end: number, name: string, location: string): 
 }
 
 /**
- * 课表段：本批最早一条消息所在周的周一 → 下一周的周日（适配历史补齐的旧消息）。
- * 本批跨度超过 3 周时只列该群对应课程（绑定了 course_name 的话），避免提示词过长。
- * 未导入课表时返回 ''。
+ * 课表段：本批最早一条消息所在周的周一 → 最晚一条消息所在周的下一周周日（适配历史补齐的旧消息，
+ * 每条消息的「下节课」都查得到）。本批跨度超过 3 周时只列该群对应课程（绑定了 course_name 的话），
+ * 避免提示词过长。未导入课表时返回 ''。
  */
 function timetableSection(input: ExtractInput): string {
   try {
-    const first = input.candidates[0]?.sent_at ?? input.now;
-    const last = input.candidates[input.candidates.length - 1]?.sent_at ?? first;
+    const times = input.candidates.map((m) => m.sent_at);
+    const first = times.length ? Math.min(...times) : input.now;
+    const last = times.length ? Math.max(...times) : first;
     const monday = mondayOfTs(first);
-    let occ = occurrences(monday, monday + 2 * WEEK_MS);
+    let occ = occurrences(monday, mondayOfTs(last) + 2 * WEEK_MS);
     const courseName = groupCourseName(input.groupId);
     if (last - first > 3 * WEEK_MS && courseName) {
       occ = occ.filter((o) => o.course.name === courseName);

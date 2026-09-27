@@ -60,8 +60,8 @@ export default function TimetableSection() {
       if (parsed.courses.length === 0) {
         toast('没解析出课程，看看 warnings', 'error');
       }
-    } catch (e) {
-      toastError(toast, e);
+    } catch {
+      // 本地解析失败（不是接口错误），只给一条友好提示，不再叠一条原始报错
       toast('读不出来这个文件，确认是教务系统导出的课表 xls/xlsx', 'error');
     } finally {
       setParsing(false);

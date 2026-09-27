@@ -179,17 +179,21 @@ function applyManualLevel(row: EventRow, level: number | null, now: number): voi
     db.prepare('UPDATE events SET level_locked = 0, updated_at = ? WHERE id = ?').run(now, row.id);
     return;
   }
-  // 已锁定时 AI 原级取上一条 feedback 的 ai_level（没记过就退回当前 level）
-  const aiLevel =
-    row.level_locked !== 0
-      ? ((
-          db
-            .prepare(
-              'SELECT ai_level FROM level_feedback WHERE event_id = ? ORDER BY id DESC LIMIT 1',
-            )
-            .get(row.id) as { ai_level: number } | undefined
-        )?.ai_level ?? row.level)
-      : row.level;
+  // AI 原级：取上一条 feedback 的 ai_level——除非那之后 AI 又按群消息改过等级（交还 AI 后才可能），
+  // 那时当前 level 就是 AI 给的。没记过 feedback 时当前 level 就是 AI 原级。
+  const lastFeedback = db
+    .prepare('SELECT ai_level, created_at FROM level_feedback WHERE event_id = ? ORDER BY id DESC LIMIT 1')
+    .get(row.id) as { ai_level: number; created_at: number } | undefined;
+  const aiChangedSince =
+    lastFeedback !== undefined &&
+    db
+      .prepare(
+        `SELECT 1 AS ok FROM event_history
+         WHERE event_id = ? AND source_message_id IS NOT NULL AND changed_at >= ?
+           AND json_extract(changed_fields, '$.level') IS NOT NULL LIMIT 1`,
+      )
+      .get(row.id, lastFeedback.created_at) !== undefined;
+  const aiLevel = lastFeedback !== undefined && !aiChangedSince ? lastFeedback.ai_level : row.level;
 
   if (level !== row.level) {
     // 手动调级不升 version：version>1 表示「按群里新通知改过」，卡片据此显示「已按最新通知更新」。
@@ -413,15 +417,23 @@ export function registerBusinessRoutes(app: Hono): void {
 
     const now = Date.now();
     const data = parsed.data;
-    if (data.status !== undefined) {
-      db.prepare('UPDATE events SET status = ?, updated_at = ? WHERE id = ?').run(
-        data.status,
-        now,
-        id,
-      );
-    }
-    if (data.level !== undefined) {
-      applyManualLevel(row, data.level, now);
+    // 改状态、改等级、写 history / feedback 放一个事务里，中途出错不留半截
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      if (data.status !== undefined) {
+        db.prepare('UPDATE events SET status = ?, updated_at = ? WHERE id = ?').run(
+          data.status,
+          now,
+          id,
+        );
+      }
+      if (data.level !== undefined) {
+        applyManualLevel(row, data.level, now);
+      }
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
     }
 
     const detail = getEventDetail(id);

@@ -156,7 +156,8 @@ export default function Settings() {
               </ul>
             )}
 
-            {data.rules.length > 0 && (
+            {/* 没总结出规则时也可能攒了调级记录，同样允许清空 */}
+            {(data.rules.length > 0 || data.feedback_count > 0) && (
               <div className="border-t border-slate-100 px-4 py-3">
                 <button
                   type="button"

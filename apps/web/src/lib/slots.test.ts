@@ -60,6 +60,15 @@ describe('groupBySlot', () => {
     expect(groupBySlot([later, earlier])[0]!.rep).toBe(earlier);
   });
 
+  it('已完成的事件不当代表：同格还有没做完的，就让没做完的露在外面', () => {
+    const doneUrgent = { ...ev({ id: 1, level: 4, start_at: sh('2026-09-23', '08:10') }), status: 'done' as const };
+    const todo = { ...ev({ id: 2, level: 1, start_at: sh('2026-09-23', '09:00') }), status: 'active' as const };
+    expect(groupBySlot([doneUrgent, todo])[0]!.rep).toBe(todo);
+    // 全都完成了，照常按 level 选
+    const doneLow = { ...todo, status: 'done' as const };
+    expect(groupBySlot([doneUrgent, doneLow])[0]!.rep).toBe(doneUrgent);
+  });
+
   it('组的位置 = 代表在原列表里的位置（按紧急排序时组跟着最急那条走）', () => {
     // 紧急排序：urgent(块1) 在最前，morn(块1) 在最后 → 组应出现在最前
     const urgent = ev({ level: 4, start_at: sh('2026-09-23', '09:30') });

@@ -294,6 +294,19 @@ describe('提示词附加段', () => {
     expect(bound).toContain('本群对应课程：概率论与数理统计A（用户指定）');
   });
 
+  it('课表段覆盖到本批最晚一条消息的下一周（跨几周的补齐批次）', () => {
+    openDb(':memory:');
+    saveTimetable({
+      semester_start: '2026-09-07',
+      courses: [
+        { name: '大学物理', teacher: '', location: 'A101', weekday: 3, block: 1, weeks: [1, 2, 3, 4, 5, 6, 7, 8] },
+      ],
+    });
+    // 最早一条 21 天前（第 0/1 周附近），最晚一条 10 分钟前（第 3 周）；第 4 周的课也要列出来
+    const p = buildUserPrompt(input([msg('m1', '下节课交报告', 21 * 24 * 60), msg('m2', '下节课小测')]));
+    expect(p).toContain('9/30 周三'); // 第 4 周周三
+  });
+
   it('没导入课表 → 没有课表段', () => {
     openDb(':memory:');
     const p = buildUserPrompt(input([msg('m1', '下节课要小测')]));

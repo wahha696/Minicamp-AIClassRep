@@ -5,7 +5,7 @@ import { blockOf, shanghaiDayStartTs } from './timetable';
 
 export { blockOf } from './timetable';
 
-type Slotable = Pick<EventDTO, 'id' | 'level' | 'start_at' | 'deadline_at'>;
+type Slotable = Pick<EventDTO, 'id' | 'level' | 'start_at' | 'deadline_at'> & { status?: EventDTO['status'] };
 
 /**
  * 槽位键 = 上海日期 + '#' + 落位块的块号。
@@ -21,7 +21,7 @@ export function slotKey(e: Slotable, atOf?: (item: Slotable) => number | null): 
 export interface SlotGroup<T> {
   key: string | null; // 无时间事件的组 key 为 null（每个自己一组）
   items: T[];
-  rep: T; // 代表 = 组内最急的（level 降序 → 时间升序 → id 升序）
+  rep: T; // 代表 = 组内最急的（未完成优先 → level 降序 → 时间升序 → id 升序）
 }
 
 /**
@@ -53,8 +53,9 @@ export function groupBySlot<T extends Slotable>(
     g.items.push(item);
   }
 
-  // 每组选最急的代表，并把组放到代表在原列表中的位置
-  const repRank = (e: T) => [-e.level, placement(e) ?? Number.MAX_SAFE_INTEGER, e.id] as const;
+  // 每组选最急的代表（已完成的排最后，免得还要做的那条被折叠藏起来），并把组放到代表在原列表中的位置
+  const repRank = (e: T) =>
+    [e.status === 'done' ? 1 : 0, -e.level, placement(e) ?? Number.MAX_SAFE_INTEGER, e.id] as const;
   for (const g of groups) {
     if (g.items.length > 1) {
       g.rep = g.items.reduce((best, x) => (compareRank(repRank(x), repRank(best)) < 0 ? x : best));
@@ -68,6 +69,10 @@ export function groupBySlot<T extends Slotable>(
   return groups;
 }
 
-function compareRank(a: readonly [number, number, number], b: readonly [number, number, number]): number {
-  return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+function compareRank(a: readonly number[], b: readonly number[]): number {
+  for (let i = 0; i < a.length; i++) {
+    const d = a[i]! - b[i]!;
+    if (d !== 0) return d;
+  }
+  return 0;
 }
