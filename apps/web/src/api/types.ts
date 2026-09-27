@@ -164,3 +164,17 @@ export interface LlmSettingsDTO {
   key_hint: string;                 // 例如 sk-****367f；没配为 ''
   source: 'web' | 'env' | 'none';   // web=网页保存的；env=.env 里的
 }
+
+// ===== 中南教务系统(csujwc)直连导入(课表页) =====
+
+/** POST /api/timetable/csu/start:返回会话 id 与验证码图片(data URL,直接 <img>;空串=本次登录不需要验证码) */
+export interface CsuImportStartDTO {
+  session_id: string;
+  captcha: string;
+}
+
+/** POST /api/timetable/csu/fetch:解析好的课次(不落库,走预览确认流程) */
+export interface CsuImportResultDTO {
+  courses: CourseDTO[];
+  warnings: string[];
+}

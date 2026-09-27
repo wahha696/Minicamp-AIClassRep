@@ -4,6 +4,8 @@ import { ApiError } from './error';
 import { mockApi } from './mock';
 import type {
   ConnectStatusDTO,
+  CsuImportResultDTO,
+  CsuImportStartDTO,
   EventDetailDTO,
   EventDTO,
   EventStatus,
@@ -50,6 +52,9 @@ export interface Api {
   getTimetable(): Promise<TimetableDTO>;
   saveTimetable(t: TimetableDTO): Promise<TimetableDTO>;
   clearTimetable(): Promise<{ ok: true }>;
+  /** 中南教务系统直连导入:第一步拿验证码(内联展示);第二步带验证码拉课次(不落库) */
+  csuStartImport(user: string, password: string): Promise<CsuImportStartDTO>;
+  csuFetchCourses(sessionId: string, captcha: string): Promise<CsuImportResultDTO>;
   getMemory(): Promise<MemoryDTO>;
   setMemoryEnabled(enabled: boolean): Promise<MemoryDTO>;
   deleteMemoryRule(id: number): Promise<MemoryDTO>;
@@ -116,6 +121,9 @@ const realApi: Api = {
   getTimetable: () => request('GET', '/api/timetable'),
   saveTimetable: (t) => request('PUT', '/api/timetable', t),
   clearTimetable: () => request('DELETE', '/api/timetable'),
+  csuStartImport: (user, password) => request('POST', '/api/timetable/csu/start', { user, password }),
+  csuFetchCourses: (sessionId, captcha) =>
+    request('POST', '/api/timetable/csu/fetch', { session_id: sessionId, captcha }),
   getMemory: () => request('GET', '/api/settings/memory'),
   setMemoryEnabled: (enabled) => request('PUT', '/api/settings/memory', { enabled }),
   deleteMemoryRule: (id) => request('DELETE', `/api/settings/memory/rules/${id}`),
@@ -150,6 +158,8 @@ export const {
   getTimetable,
   saveTimetable,
   clearTimetable,
+  csuStartImport,
+  csuFetchCourses,
   getMemory,
   setMemoryEnabled,
   deleteMemoryRule,

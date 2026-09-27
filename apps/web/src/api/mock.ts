@@ -555,6 +555,23 @@ export const mockApi: Api = {
     return delay({ ok: true as const });
   },
 
+  // 教务系统直连导入:假的验证码图 + 复用 mockTimetable 的课程
+  csuStartImport() {
+    const captcha =
+      'data:image/svg+xml,' +
+      encodeURIComponent(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 132 44">' +
+          '<rect width="132" height="44" fill="#eef2f7"/>' +
+          '<text x="66" y="30" font-size="22" text-anchor="middle" fill="#475569" font-family="monospace" letter-spacing="4">8k6q</text></svg>',
+      );
+    return delay({ session_id: 'mock-csu', captcha });
+  },
+
+  csuFetchCourses() {
+    const courses = structuredClone(mockTimetable.courses) as CourseDTO[];
+    return delay({ courses, warnings: [] as string[] });
+  },
+
   getMemory() {
     const body: MemoryDTO = { enabled: memory.enabled, rules: [...memory.rules], feedback_count: memory.feedback_count };
     return delay(body);
