@@ -21,7 +21,7 @@ interface Props {
   /** 每天的落位条目（groupByDay 的产物；落位时间 = item.at） */
   itemsByDay: WeekItem[][];
   onPick: (id: number) => void;
-  /** 预览模式（课表页确认前）：不显示事件、不可点击 */
+  /** 预览模式（设置页导入课表、确认前）：不显示事件、不可点击 */
   readonly?: boolean;
 }
 

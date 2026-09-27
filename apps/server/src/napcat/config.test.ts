@@ -55,10 +55,14 @@ describe('writeNapcatConfig', () => {
     // webui.json 原本不存在 → 只写 disableWebUI
     expect(JSON.parse(readFileSync(join(cfgDir, 'webui.json'), 'utf8'))).toEqual({ disableWebUI: true });
 
-    // loadNapCat.js：pathToFileURL，中文/空格路径会被编码
+    // loadNapCat.js：pathToFileURL，中文/空格路径会被编码；含快速登录 argv 注入（需求文档 §10-3）。
+    // 注意不能含 import.meta（QQ 的 package.json 无 type:module，加载器按 CJS 解析，import.meta 会语法报错）
     const entry = pathToFileURL(join(napcatDir, 'napcat.mjs')).href;
-    expect(readFileSync(join(napcatDir, 'loadNapCat.js'), 'utf8'))
-      .toBe(`(async () => {await import("${entry}")})()`);
+    const loader = readFileSync(join(napcatDir, 'loadNapCat.js'), 'utf8');
+    expect(loader).toContain(`await import(${JSON.stringify(entry)})`);
+    expect(loader).toContain('settings.json');
+    expect(loader).toContain('process.argv.push("-q"');
+    expect(loader).not.toContain('import.meta');
   });
 
   it('把已存在的每个 onebot11_*.json 覆盖成同一份内容，不碰其他文件', () => {

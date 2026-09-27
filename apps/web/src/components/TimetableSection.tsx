@@ -1,4 +1,4 @@
-// 课表页 /timetable（FR-13）：导入教务系统 xls 课表 → 预览网格 + warnings → 确认保存。
+// 设置页里的「课表」一栏（FR-13，原 /timetable 页）：导入教务系统 xls 课表 → 预览网格 + warnings → 确认保存。
 // 解析在浏览器里做（SheetJS 按需动态加载，不进首屏包），原始文件不上传服务器。
 // 已有课表时可「重新导入」「清空」（二次确认，默认焦点在取消）。
 import { useRef, useState } from 'react';
@@ -35,7 +35,7 @@ async function parseFile(file: File): Promise<ParsedTimetable> {
   return parseTimetable(rows.map((r) => r.map((c) => (c === null || c === undefined ? '' : String(c)))));
 }
 
-export default function Timetable() {
+export default function TimetableSection() {
   const { data, loading, refresh } = usePolling(getTimetable, 60_000);
   const toast = useToast();
   const fileRef = useRef<HTMLInputElement>(null);
@@ -111,15 +111,15 @@ export default function Timetable() {
   const previewCourses: CourseDTO[] = draft?.courses ?? [];
 
   return (
-    <section>
-      <h1 className="text-2xl font-bold text-slate-900 sm:text-3xl">课表</h1>
-      <p className="mt-2 text-sm text-slate-500">
+    <section id="timetable">
+      <h2 className="text-lg font-semibold text-slate-900">课表</h2>
+      <p className="mt-1 text-sm text-slate-500">
         从教务系统导出的课表（xls / xlsx），在浏览器里解析后直接保存——原始文件不会上传。
       </p>
 
       {/* 当前课表概况 */}
       {!loading && hasSaved && !draft && (
-        <div className="mt-6 rounded-xl border border-slate-200 bg-white p-4">
+        <div className="mt-3 rounded-xl border border-slate-200 bg-white p-4">
           <p className="text-sm text-slate-700">
             当前课表：第一周周一 <span className="font-medium">{saved!.semester_start}</span>，
             共 <span className="font-medium">{saved!.courses.length}</span> 个课次。
@@ -145,7 +145,7 @@ export default function Timetable() {
 
       {/* 没有课表时的引导 */}
       {!loading && !hasSaved && !draft && (
-        <div className="mt-6 rounded-2xl border border-dashed border-slate-300 bg-white px-6 py-14 text-center">
+        <div className="mt-3 rounded-2xl border border-dashed border-slate-300 bg-white px-6 py-8 text-center">
           <p className="text-lg font-medium text-slate-700">还没有课表</p>
           <p className="mt-2 text-sm text-slate-400">选一个教务系统导出的课表文件（xls / xlsx）</p>
           <button
@@ -159,6 +159,8 @@ export default function Timetable() {
         </div>
       )}
 
+      {loading && <div className="mt-3 h-24 animate-pulse rounded-xl bg-slate-200/60" aria-busy />}
+
       {/* 隐藏的文件选择器 */}
       <input
         ref={fileRef}
@@ -170,7 +172,7 @@ export default function Timetable() {
 
       {/* 解析预览 + 确认 */}
       {draft && (
-        <div className="mt-6">
+        <div className="mt-3">
           <div className="rounded-xl border border-slate-200 bg-white p-4">
             <h2 className="text-sm font-semibold text-slate-700">解析结果预览</h2>
             <p className="mt-1 text-xs text-slate-400">

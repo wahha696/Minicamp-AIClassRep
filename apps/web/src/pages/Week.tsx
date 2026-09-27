@@ -216,7 +216,7 @@ export default function Week() {
       {mode === 'grid' && !hasCourses && !timetable.loading && (
         <p className="mt-4 rounded-lg bg-sky-50 px-4 py-2.5 text-sm text-sky-800">
           导入课表后这里会显示你的课 →{' '}
-          <Link to="/timetable" className="font-medium underline underline-offset-2">
+          <Link to="/settings" className="font-medium underline underline-offset-2">
             去导入
           </Link>
         </p>
