@@ -1,0 +1,13 @@
+{
+  "$comment": "NapCat 采集端运行包的钉定版本（scripts/fetch-napcat.mjs 与 POST /api/setup/fetch-napcat 用）。/napcat/ 不进 git，克隆后由启动流程从这里记录的官方源自动下载。换版本：改 version/sha256/size（sha256 取 GitHub Release 资产的 digest）。",
+  "repo": "NapNeko/NapCatQQ",
+  "version": "v4.18.28",
+  "asset": "NapCat.Shell.zip",
+  "size": 29498670,
+  "sha256": "bcdd8bdb9e44bd0cf6a90908e572141787fd9e98cb8d8eecc5adf25bbdcabb94",
+  "qq_recommended": "9.9.26-44343",
+  "mirrors": [
+    "https://ghfast.top/https://github.com",
+    "https://gh-proxy.com/https://github.com"
+  ]
+}

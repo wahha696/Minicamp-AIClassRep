@@ -1,0 +1,62 @@
+# 发布流水线（问题 4）：推 v* 标签 → Windows 打包 → 传 release。
+# 步骤：装依赖 → 构建前端 → 准备 napcat/（用 scripts/fetch-napcat.mjs 下载官方 Release 并校验
+# SHA-256，版本钉在 napcat.version.json）→ node scripts/pack.mjs（下 node.exe + 组装 + 压缩）→
+# 上传 release/ClassRep.zip 到 GitHub Release（软更新：老包启动时检查 version.json 自动下载）。
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # 创建 Release 要写权限
+
+jobs:
+  release:
+    name: 打包 Windows 免安装版并发布
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 类型检查（发布前最后一道闸）
+        run: pnpm -r typecheck
+
+      - name: 构建（esbuild + vite）
+        run: pnpm -r build
+
+      - name: 下载 NapCat 运行包（napcat.version.json 钉版本 + SHA-256 校验）
+        run: node scripts/fetch-napcat.mjs
+
+      - name: 打包 Windows 免安装包
+        run: node scripts/pack.mjs
+        # CI 上没有 .env.release（组长私下给），包能跑但 LLM 不可用（网页可现场配）。
+        # 正式发布如需内置 key：把内容存到仓库 Secret APP_ENV，加一步
+        #   `echo "${{ secrets.APP_ENV }}" > .env.release` 再打包即可。
+
+      - name: 打标版本号（用 tag 改写包内 version.json）
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $p = 'release/ClassRep/app/version.json'
+          if (Test-Path $p) {
+            $j = Get-Content $p -Raw | ConvertFrom-Json
+            $j.version = $tag.TrimStart('v')
+            $j | ConvertTo-Json | Set-Content $p -Encoding UTF8
+          }
+
+      - name: 创建/更新 GitHub Release 并上传
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ClassRep ${{ github.ref_name }}
+          files: release/ClassRep.zip
+          generate_release_notes: true

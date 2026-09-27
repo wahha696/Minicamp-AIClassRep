@@ -3,15 +3,21 @@
 //   qq_conflict → error → kicked → online → waiting_qr → reconnecting → starting
 // error 的 message 用架构.md §7 原文案；非 Windows 按 00-总约定 §6 返回。
 import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { db } from '../db/index.js';
+import { legacyDataExists } from '../accounts.js';
 import type { ConnectState, ConnectStatusDTO } from '../types.js';
 import { getManagerFacts, getUin, type ManagerFacts } from './manager.js';
-import { getOnebotFacts, getSelfNickname } from './onebot.js';
-import { QRCODE_PATH } from './paths.js';
+import { EXTERNAL_ONEBOT, getOnebotFacts, getSelfNickname } from './onebot.js';
+import { NAPCAT_DIR, QRCODE_PATH } from './paths.js';
+
+/** 采集端主程序：缺它 = 缺运行包（/napcat/ 不进 git，克隆后需要下载，四问题修复 #3） */
+const NAPCAT_BOOT_EXE = join(NAPCAT_DIR, 'NapCatWinBootMain.exe');
 
 // ===== 架构.md §7 的用户文案 =====
 export const MSG_QQ_CONFLICT = 'ClassRep 需要接管电脑版 QQ，期间请用手机 QQ 聊天';
 export const MSG_NO_QQ = '需要先安装 QQ 电脑版';
+export const MSG_NO_NAPCAT = '采集端组件缺失。点「一键下载 NapCat 组件」自动补齐，也可以把 NapCat 运行包手动放进 napcat/ 目录';
 export const MSG_CRASH = '采集端异常。常见原因是 QQ 版本过旧，请更新到最新版 QQ 后重试';
 export const MSG_UNSUPPORTED = '当前系统不支持采集端（开发模式，可用演示回放）';
 
@@ -27,15 +33,28 @@ export interface ConnectInputs {
   /** messages 与 events 表都为空 */
   dbEmpty: boolean;
   isWindows: boolean;
+  /** napcat/NapCatWinBootMain.exe 是否存在（缺 = 缺运行包，克隆后未下载的典型状态）；缺省 true */
+  napcatInstalled?: boolean;
+  /** Docker 等外部 OneBot 部署（ONEBOT_WS_URL 指向远端）：不检查本机 QQ/NapCat，只看 WS 通不通 */
+  externalOnebot?: boolean;
 }
 
 /**
  * 状态判定（纯函数，不碰真实环境）。严格按架构.md §4 表格自上而下：
  * qq_conflict → error → kicked → online → waiting_qr → reconnecting → starting
  */
-export function deriveConnectStatus(input: ConnectInputs): { state: ConnectState; message?: string; first_run: boolean; uin?: string } {
+export function deriveConnectStatus(input: ConnectInputs): { state: ConnectState; message?: string; first_run: boolean; uin?: string; reason?: 'no_qq' | 'no_napcat' } {
   const { manager: m, onebot: o, qrcodeExists, uin, dbEmpty, isWindows } = input;
   const firstRun = uin === undefined && dbEmpty;
+  const napcatOk = input.napcatInstalled ?? true;
+
+  if (input.externalOnebot) {
+    // 外部 OneBot（Docker）：QQ 与 NapCat 都不在本机，只根据 WS 连接给出状态
+    if (o.kicked) return { state: 'kicked', first_run: firstRun, uin };
+    if (o.wsConnected && o.selfId !== null) return { state: 'online', first_run: firstRun, uin };
+    if (o.everOnline && !o.wsConnected) return { state: 'reconnecting', first_run: firstRun, uin };
+    return { state: 'starting', first_run: firstRun, uin };
+  }
 
   if (!isWindows) {
     // 00-总约定 §6：非 Windows 返回
@@ -47,7 +66,11 @@ export function deriveConnectStatus(input: ConnectInputs): { state: ConnectState
     return { state: 'qq_conflict', message: MSG_QQ_CONFLICT, first_run: firstRun };
   }
   if (m.qqExe === null) {
-    return { state: 'error', message: MSG_NO_QQ, first_run: firstRun, uin }; // 没装 QQ
+    return { state: 'error', message: MSG_NO_QQ, first_run: firstRun, uin, reason: 'no_qq' }; // 没装 QQ
+  }
+  if (!napcatOk) {
+    // 缺采集端运行包（/napcat/ 不进 git，克隆后要下载）：给出带动作的文案（四问题修复 #3）
+    return { state: 'error', message: MSG_NO_NAPCAT, first_run: firstRun, uin, reason: 'no_napcat' };
   }
   if (m.crashLoop || m.spawnFailed) {
     // spawn 失败 / 进程 60s 内退出 ≥3 次（架构.md §7 反复崩溃文案）
@@ -71,6 +94,7 @@ export function deriveConnectStatus(input: ConnectInputs): { state: ConnectState
 
 /** B 的 index.ts 与 /health 调用：收集真实输入后走纯判定，并维护「进入当前状态的时间」 */
 export function getConnectStatus(): ConnectStatusDTO {
+  const external = EXTERNAL_ONEBOT; // Docker 等外部 OneBot 部署：不检查本机 QQ / NapCat 运行包
   const derived = deriveConnectStatus({
     manager: getManagerFacts(),
     onebot: getOnebotFacts(),
@@ -78,6 +102,8 @@ export function getConnectStatus(): ConnectStatusDTO {
     uin: getUin(),
     dbEmpty: tablesEmpty(),
     isWindows: process.platform === 'win32',
+    napcatInstalled: external ? true : existsSync(NAPCAT_BOOT_EXE),
+    externalOnebot: external,
   });
   if (derived.state !== lastState) {
     lastState = derived.state;
@@ -90,6 +116,8 @@ export function getConnectStatus(): ConnectStatusDTO {
   };
   if (derived.uin !== undefined) dto.uin = derived.uin;
   if (derived.message !== undefined) dto.message = derived.message;
+  if (derived.reason !== undefined) dto.reason = derived.reason;
+  if (legacyDataExists()) dto.legacy_data = true; // 旧版单库被迁到 accounts/legacy，前端提示一次
   if (derived.state === 'online') {
     const nick = getSelfNickname();
     if (nick !== null) dto.nickname = nick;

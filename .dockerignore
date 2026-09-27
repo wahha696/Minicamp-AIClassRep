@@ -1,0 +1,13 @@
+# Docker 构建上下文只放源码，别把本机数据/产物塞进去
+node_modules/
+**/node_modules/
+data/
+release/
+napcat/
+tools/
+.git/
+.env
+.env.local
+.env.release
+*.log
+docs/

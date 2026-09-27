@@ -6,15 +6,18 @@
 //   ClassRep/napcat/                   ← 仓库根 napcat/，排除 config/ cache/ logs/ guild1.db loadNapCat.js *.bat
 //   ClassRep/app/server/dist/index.js  ← pnpm -r build 的 esbuild 产物
 //   ClassRep/app/web/dist/             ← pnpm -r build 的 vite 产物
+//   ClassRep/app/update.mjs            ← scripts/update.mjs（下次启动应用自更新包）
+//   ClassRep/app/version.json          ← { version, repo }：后端检查更新 / update.mjs 用
 //   ClassRep/app/.env                  ← 仓库根 .env.release（组长私下给，不进 git；缺了告警并跳过）
 //   ClassRep/data/mock/                ← 仿真剧本（data/mock 本来就进 git）
 // 真机验收：没装过 Node 的 Windows 电脑、解压到含中文+空格路径、双击 启动.bat 走完架构.md §0。
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execSync } from 'node:child_process';
 import {
-  cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync,
+  cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ensureNodeExe } from './lib/fetch-node.mjs';
 
 const REPO = dirname(dirname(fileURLToPath(import.meta.url))); // 仓库根
 const releaseDir = join(REPO, 'release');
@@ -57,24 +60,11 @@ mkdirSync(cacheDir, { recursive: true });
 // ---------- 3. 启动.bat ----------
 cpSync(join(REPO, '启动.bat'), join(outDir, '启动.bat'));
 
-// ---------- 4. runtime/node.exe ----------
-log('查询 nodejs.org 上最新的 v24 LTS …');
-const listRes = await fetch('https://nodejs.org/dist/index.json');
-if (!listRes.ok) fail(`拉取 node 版本列表失败：HTTP ${listRes.status}`);
-const versions = await listRes.json();
-const pick = versions.find((v) => typeof v?.version === 'string' && v.version.startsWith('v24.') && v.lts);
-if (!pick) fail('找不到 v24 LTS 版本');
-const version = pick.version; // 形如 v24.10.0
-const cacheExe = join(cacheDir, `node-${version}-win-x64.exe`);
-if (existsSync(cacheExe) && statSync(cacheExe).size > 50 * 1024 * 1024) {
-  log(`命中缓存 release/cache/node-${version}-win-x64.exe`);
-} else {
-  log(`下载 ${version} win-x64 node.exe（~80MB，只下这一次）…`);
-  const exeRes = await fetch(`https://nodejs.org/dist/${version}/win-x64/node.exe`);
-  if (!exeRes.ok) fail(`下载 node.exe 失败：HTTP ${exeRes.status}`);
-  writeFileSync(cacheExe, Buffer.from(await exeRes.arrayBuffer()));
-}
-cpSync(cacheExe, join(outDir, 'runtime', 'node.exe'));
+// ---------- 4. runtime/node.exe（lib/fetch-node.mjs：查最新 v24 LTS + 缓存，与 bootstrap 共用） ----------
+const { version } = await ensureNodeExe(join(outDir, 'runtime', 'node.exe'), {
+  cacheDir,
+  log: (m) => log(m),
+});
 log(`runtime/node.exe = ${version}`);
 
 // ---------- 5. napcat/（排除账号数据与启动脚本，架构.md §1） ----------
@@ -104,6 +94,27 @@ const mockSrc = join(REPO, 'data', 'mock');
 if (existsSync(mockSrc)) {
   cpSync(mockSrc, join(outDir, 'data', 'mock'), { recursive: true });
 }
+
+// ---------- 6.5 自更新器 + 版本信息（问题 4：update.mjs 每次启动前由 启动.bat 调用） ----------
+cpSync(join(REPO, 'scripts', 'update.mjs'), join(outDir, 'app', 'update.mjs'));
+const pkg = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8'));
+let repo = 'wahha696/Minicamp-AIClassRep';
+try {
+  const url = execSync('git remote get-url origin', { cwd: REPO, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
+    .toString().trim()
+    .replace(/\.git$/, '');
+  if (/github\.com[:/].+/.test(url)) {
+    repo = url.replace(/^.*github\.com[:/]/, '').replace(/\.git$/, '');
+  }
+} catch {
+  // 没有 git 信息就用默认仓库
+}
+writeFileSync(
+  join(outDir, 'app', 'version.json'),
+  `${JSON.stringify({ version: pkg.version ?? '0.0.0', repo, packed_at: new Date().toISOString() }, null, 2)}\n`,
+  'utf8',
+);
+log(`app/version.json = v${pkg.version ?? '0.0.0'}（${repo}）`);
 
 // ---------- 7. 压缩 release/ClassRep.zip ----------
 const zipPath = join(releaseDir, 'ClassRep.zip');

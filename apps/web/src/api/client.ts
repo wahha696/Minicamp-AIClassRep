@@ -3,6 +3,7 @@
 import { ApiError } from './error';
 import { mockApi } from './mock';
 import type {
+  AccountsDTO,
   ConnectStatusDTO,
   CsuImportResultDTO,
   CsuImportStartDTO,
@@ -16,6 +17,7 @@ import type {
   LlmSettingsDTO,
   MemoryDTO,
   ScenarioDTO,
+  SetupProgressDTO,
   TimetableDTO,
   TodayDTO,
   TodoDTO,
@@ -42,6 +44,12 @@ export interface Api {
   getConnectStatus(): Promise<ConnectStatusDTO>;
   restartConnect(): Promise<{ ok: true }>;
   logoutConnect(): Promise<{ ok: true }>;
+  /** 采集端组件一键下载（问题 3）：POST 立即返回，进度轮询 getFetchNapcatProgress */
+  startFetchNapcat(): Promise<{ ok: true }>;
+  getFetchNapcatProgress(): Promise<SetupProgressDTO>;
+  /** 账号数据管理（问题 1 延伸）：列出本机账号库 / 删除指定账号数据 */
+  listAccounts(): Promise<AccountsDTO>;
+  deleteAccountData(uin: string): Promise<{ ok: true }>;
   /** days=往前补拉多少天（1/7/30），缺省 7 */
   syncNow(days?: 1 | 7 | 30): Promise<{ groups: number; messages: number }>;
   getHealth(): Promise<HealthDTO>;
@@ -116,6 +124,10 @@ const realApi: Api = {
   getConnectStatus: () => request('GET', '/api/connect/status'),
   restartConnect: () => request('POST', '/api/connect/restart'),
   logoutConnect: () => request('POST', '/api/connect/logout'),
+  startFetchNapcat: () => request('POST', '/api/setup/fetch-napcat'),
+  getFetchNapcatProgress: () => request('GET', '/api/setup/napcat'),
+  listAccounts: () => request('GET', '/api/accounts'),
+  deleteAccountData: (uin) => request('DELETE', `/api/accounts/${encodeURIComponent(uin)}`),
   syncNow: (days) => request('POST', '/api/sync', days === undefined ? undefined : { days }),
   getHealth: () => request('GET', '/health'),
   getLlmSettings: () => request('GET', '/api/settings/llm'),
@@ -155,6 +167,10 @@ export const {
   getConnectStatus,
   restartConnect,
   logoutConnect,
+  startFetchNapcat,
+  getFetchNapcatProgress,
+  listAccounts,
+  deleteAccountData,
   syncNow,
   getHealth,
   getLlmSettings,

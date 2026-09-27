@@ -2,75 +2,28 @@
 //   node scripts/dev.mjs              前台模式：黑窗口里看日志，关窗口即退出（scripts\dev-start.bat）
 //   node scripts/dev.mjs --background 后台模式：不显示窗口，网页全关掉后自动退出（桌面快捷方式走这个）
 // 步骤：0) 在 main 分支上就先从 GitHub 拉最新代码（依赖变了顺便装）  1) 结束占着 8000~8010 端口的旧后端
-//       2) 重新打包前端  3) 启动后端并自动打开浏览器
+//       2) 前端产物有更新才重新打包（增量缓存）  3) 启动后端并自动打开浏览器
 // 加 --no-update 跳过第 0 步；不在 main 分支（正在开发别的分支）或没网时也会跳过，照常启动。
-// 再运行一次就是「重启」。
+// 再运行一次就是「重启」。杀后端 / 起后端 / 健康检查共用 scripts/lib/start-server.mjs（bootstrap.mjs 同款）。
 import { execSync, spawn } from 'node:child_process';
-import { mkdirSync, openSync, writeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  findHealthyPort,
+  killOldBackends,
+  openBackgroundLog,
+  openBrowser,
+  startServerChild,
+} from './lib/start-server.mjs';
+import { webBuildFresh } from './lib/build-cache.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const PORTS = Array.from({ length: 11 }, (_, i) => 8000 + i);
-const isWin = process.platform === 'win32';
 const background = process.argv.includes('--background');
+const noUpdate = process.argv.includes('--no-update');
 
 // 后台模式没有窗口，输出都写进日志文件，出问题时看 data/logs/background.log
-let log = (msg) => console.log(msg);
-let childStdio = 'inherit';
-if (background) {
-  const dir = join(ROOT, 'data', 'logs');
-  mkdirSync(dir, { recursive: true });
-  const fd = openSync(join(dir, 'background.log'), process.argv.includes('--no-update') ? 'a' : 'w') // 更新后重跑时接着写;
-  log = (msg) => writeSync(fd, `${msg}\n`);
-  childStdio = ['ignore', fd, fd];
-}
-
-function sh(cmd) {
-  return execSync(cmd, { cwd: ROOT, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).toString();
-}
-
-/** netstat 里处于 LISTENING 的 8000~8010 端口 → PID */
-function listeningPids() {
-  const pids = new Map();
-  let out = '';
-  try {
-    out = sh('netstat -ano');
-  } catch {
-    return pids;
-  }
-  for (const line of out.split(/\r?\n/)) {
-    const cols = line.trim().split(/\s+/);
-    if (cols.length < 5 || cols[0] !== 'TCP' || cols[3] !== 'LISTENING') continue;
-    const port = Number(cols[1].split(':').pop());
-    const pid = Number(cols[4]);
-    if (PORTS.includes(port) && pid > 0) pids.set(pid, port);
-  }
-  return pids;
-}
-
-/** 只结束 node 进程，别误杀别的程序 */
-function isNode(pid) {
-  try {
-    return /node\.exe/i.test(sh(`tasklist /FI "PID eq ${pid}" /NH`));
-  } catch {
-    return false;
-  }
-}
-
-/**
- * 以前开的 ClassRep 开发后端（tsx watch / 后台 tsx）。光结束占端口的子进程不够：
- * watch 父进程发现代码变了会立刻再拉起一个，把新后端挤到 8001、8002…，所以要连根结束。
- */
-function staleServerPids() {
-  const ps = "Get-CimInstance Win32_Process -Filter \"name='node.exe'\" | Where-Object { $_.CommandLine -like '*apps*server*tsx*src/index.ts*' } | ForEach-Object { $_.ProcessId }";
-  try {
-    const out = execSync(`powershell -NoProfile -Command "${ps.replace(/"/g, '\\"')}"`, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, timeout: 20_000 }).toString();
-    return out.split(/\s+/).map(Number).filter((pid) => pid > 0 && pid !== process.pid);
-  } catch {
-    return [];
-  }
-}
+const bgLog = background ? openBackgroundLog(ROOT, !noUpdate) : null; // 更新后重跑时接着写
+const log = bgLog ? bgLog.log : ((msg) => console.log(msg));
 
 /** 第 0 步：拉最新 main。返回 true 表示 dev.mjs 自己被更新了，需要用新版重新跑一遍 */
 function updateToLatest() {
@@ -103,7 +56,7 @@ function updateToLatest() {
   if (changed.some((f) => /(^|\/)(package\.json|pnpm-lock\.yaml)$/.test(f))) {
     log('    依赖有变化，正在安装...');
     try {
-      execSync('pnpm install --frozen-lockfile', { cwd: ROOT, stdio: childStdio, windowsHide: true });
+      execSync('pnpm install --frozen-lockfile', { cwd: ROOT, stdio: bgLog ? bgLog.stdio : 'inherit', windowsHide: true });
     } catch {
       log('    安装依赖失败，继续尝试启动');
     }
@@ -111,11 +64,45 @@ function updateToLatest() {
   return changed.includes('scripts/dev.mjs');
 }
 
-function openBrowser(url) {
-  if (isWin) spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+async function start() {
+  log(`[1/3] 关闭旧的 ClassRep 后端...${background ? '（后台模式）' : ''}`);
+  killOldBackends({ log });
+
+  log('[2/3] 检查前端产物...');
+  if (!webBuildFresh(ROOT)) {
+    log('    重新打包前端...');
+    try {
+      execSync('pnpm --filter web build', { cwd: ROOT, stdio: bgLog ? bgLog.stdio : 'inherit', windowsHide: true });
+    } catch {
+      log('\n前端打包失败，请把上面的报错发给开发同学。');
+      if (background) openBrowser(join(ROOT, 'data', 'logs', 'background.log'));
+      process.exit(1);
+    }
+  } else {
+    log('    前端产物无变化，跳过打包');
+  }
+
+  log('[3/3] 启动后端，几秒后自动打开浏览器...');
+  if (!background) log('（关闭此窗口 / 按 Ctrl+C 即退出）');
+  // 后台模式：直接 node 跑 tsx（不经 pnpm / cmd）不冒黑窗口；AUTO_EXIT=1 网页全关后自退
+  const { child: server, logFile } = startServerChild({ root: ROOT, background, watch: !background, bg: bgLog });
+  void logFile;
+
+  const port = await findHealthyPort(60_000);
+  if (port !== null) {
+    openBrowser(`http://localhost:${port}`);
+    log(`\n已打开 http://localhost:${port}\n`);
+  } else {
+    log('后端 60 秒内没有就绪，可稍后手动打开 http://localhost:8000');
+  }
+
+  server.on('exit', (code) => {
+    log(`后端已退出（${code ?? 0}）`);
+    process.exit(code ?? 0);
+  });
 }
 
-if (!process.argv.includes('--no-update') && updateToLatest()) {
+if (!noUpdate && updateToLatest()) {
   // 启动脚本自己也更新了：用新版重跑一遍（带 --no-update，不会重复拉取）
   log('    启动脚本也更新了，用新版重新启动...');
   const again = spawn(process.execPath, [fileURLToPath(import.meta.url), ...process.argv.slice(2), '--no-update'], {
@@ -128,76 +115,3 @@ if (!process.argv.includes('--no-update') && updateToLatest()) {
   start();
 }
 
-function start() {
-log(`[1/3] 关闭旧的 ClassRep 后端...${background ? '（后台模式）' : ''}`);
-if (isWin) {
-  for (const pid of staleServerPids()) {
-    try {
-      sh(`taskkill /PID ${pid} /T /F`);
-      log(`    已结束旧的后端进程（PID ${pid}）`);
-    } catch {
-      // 可能已经跟着父进程一起结束了
-    }
-  }
-  for (const [pid, port] of listeningPids()) {
-    if (pid === process.pid) continue;
-    if (!isNode(pid)) {
-      log(`    端口 ${port} 被其他程序占用（PID ${pid}），不是 ClassRep，跳过`);
-      continue;
-    }
-    try {
-      sh(`taskkill /PID ${pid} /T /F`);
-      log(`    已结束占用端口 ${port} 的旧后端（PID ${pid}）`);
-    } catch {
-      log(`    结束 PID ${pid} 失败，可以手动在任务管理器里结束 node.exe`);
-    }
-  }
-}
-
-log('[2/3] 打包前端...');
-try {
-  execSync('pnpm --filter web build', { cwd: ROOT, stdio: childStdio, windowsHide: true });
-} catch {
-  log('\n前端打包失败，请把上面的报错发给开发同学。');
-  if (background) openBrowser(join(ROOT, 'data', 'logs', 'background.log'));
-  process.exit(1);
-}
-
-log('[3/3] 启动后端，几秒后自动打开浏览器...');
-let server;
-if (background) {
-  // 直接用 node 跑 tsx（不经 pnpm / cmd），这样不会冒出黑窗口；AUTO_EXIT=1 让后端在网页全关后自己退出
-  const serverDir = join(ROOT, 'apps', 'server');
-  const tsx = join(serverDir, 'node_modules', 'tsx', 'dist', 'cli.mjs');
-  server = spawn(process.execPath, [tsx, 'src/index.ts'], {
-    cwd: serverDir,
-    stdio: childStdio,
-    windowsHide: true,
-    env: { ...process.env, AUTO_EXIT: '1' },
-  });
-} else {
-  log('（关闭此窗口 / 按 Ctrl+C 即退出）');
-  server = spawn('pnpm', ['--filter', 'server', 'dev'], { cwd: ROOT, stdio: 'inherit', shell: true });
-}
-
-let opened = false;
-const timer = setInterval(async () => {
-  try {
-    const r = await fetch('http://localhost:8000/health');
-    if (r.ok && !opened) {
-      opened = true;
-      clearInterval(timer);
-      openBrowser('http://localhost:8000');
-      log('\n已打开 http://localhost:8000\n');
-    }
-  } catch {
-    // 还没起来，继续等
-  }
-}, 1000);
-setTimeout(() => clearInterval(timer), 60_000);
-
-server.on('exit', (code) => {
-  log(`后端已退出（${code ?? 0}）`);
-  process.exit(code ?? 0);
-});
-}

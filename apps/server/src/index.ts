@@ -8,7 +8,8 @@ import { join } from 'node:path';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { env } from './env.js';
-import { db, openDb } from './db/index.js';
+import { db } from './db/index.js';
+import { initAccounts } from './accounts.js';
 import { startNapcat, stopNapcat } from './napcat/index.js';
 import { getConnectStatus } from './napcat/state.js';
 import { getPipelineStats, startScheduler } from './pipeline/index.js';
@@ -20,11 +21,13 @@ import { registerBusinessRoutes } from './routes/business.js';
 import { registerConnectRoutes } from './routes/connect.js';
 import { registerMemoryRoutes } from './routes/memory.js';
 import { registerPetChatRoutes } from './routes/pet-chat.js';
+import { registerSetupRoutes } from './routes/setup.js';
 import { registerSettingsRoutes } from './routes/settings.js';
 import { registerTimetableRoutes } from './routes/timetable.js';
 import { registerTodoRoutes } from './routes/todos.js';
 import { registerTrashRoutes } from './routes/trash.js';
 import { registerPresence } from './presence.js';
+import { startUpdateChecker } from './update-check.js';
 import { DATA_DIR, WEB_DIST } from './paths.js';
 import type { HealthDTO } from './types.js';
 
@@ -82,6 +85,7 @@ app.get('/health', (c) => {
 
 registerBusinessRoutes(app);
 registerConnectRoutes(app);
+registerSetupRoutes(app);
 registerSettingsRoutes(app);
 registerPetChatRoutes(app);
 registerTodoRoutes(app);
@@ -170,7 +174,8 @@ async function listenWithFallback(): Promise<number> {
 // 放在 openDb() 之前：启动阶段（建库、建目录）出问题也要能记下来。防 EPIPE 死循环 / 日志上限见 crash-log.ts
 installCrashHandlers(join(DATA_DIR, 'logs', 'server.log'));
 
-openDb();
+// 按账号分库（四问题修复 #1）：迁移旧单库 → 挂记住的账号库（无 uin 则开兜底库）
+await initAccounts();
 
 const port = await listenWithFallback();
 console.log(`ClassRep 已启动：http://localhost:${port}`);
@@ -182,6 +187,8 @@ startCleanupJob();
 if (isPackaged) {
   // 打包版才自动打开浏览器（架构.md §3）
   exec(`start "" http://localhost:${port}`);
+  // 打包版后台检查新版本：下载到 data/update/pending.json，下次启动由 启动.bat + app/update.mjs 应用
+  startUpdateChecker();
 }
 
 let stopping = false;

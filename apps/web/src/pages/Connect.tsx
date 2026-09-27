@@ -1,9 +1,26 @@
 // 连接页 /connect（D5，架构.md §4、§7）：按连接状态显示扫码 / 接管 QQ / 异常 / 加载。
 // 状态来自全局 ConnectStatusProvider（每 2s 轮询），这里不再单独轮询。
+// 连接页 /connect（D5，架构.md §4、§7）：按连接状态显示扫码 / 接管 QQ / 异常 / 加载。
+// 状态来自全局 ConnectStatusProvider（每 2s 轮询），这里不再单独轮询。
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getLlmSettings, logoutConnect, qrcodeUrl, restartConnect, saveLlmSettings } from '../api/client';
-import type { ConnectStatusDTO, LlmSettingsDTO } from '../api/types';
+import {
+  deleteAccountData,
+  getFetchNapcatProgress,
+  getLlmSettings,
+  listAccounts,
+  logoutConnect,
+  qrcodeUrl,
+  restartConnect,
+  saveLlmSettings,
+  startFetchNapcat,
+} from '../api/client';
+import type {
+  AccountsDTO,
+  ConnectStatusDTO,
+  LlmSettingsDTO,
+  SetupProgressDTO,
+} from '../api/types';
 import { qqAvatarUrl } from '../components/Avatar';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useConnectStatus } from '../components/ConnectStatus';
@@ -83,18 +100,21 @@ export default function Connect() {
       case 'error':
         body = (
           <Panel title={data.message || ERROR_FALLBACK} tone="error">
+            {data.reason === 'no_napcat' && <NapcatDownload onInstalled={refresh} />}
             <div className="flex flex-wrap justify-center gap-3">
               <BigButton onClick={onRestart} busy={busy}>
                 重启采集端
               </BigButton>
-              <a
-                href={QQ_DOWNLOAD_URL}
-                target="_blank"
-                rel="noreferrer"
-                className="rounded-xl border border-slate-300 px-6 py-3 text-base font-medium text-slate-700 hover:bg-slate-50"
-              >
-                下载最新版 QQ
-              </a>
+              {data.reason !== 'no_napcat' && (
+                <a
+                  href={QQ_DOWNLOAD_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="rounded-xl border border-slate-300 px-6 py-3 text-base font-medium text-slate-700 hover:bg-slate-50"
+                >
+                  下载最新版 QQ
+                </a>
+              )}
             </div>
           </Panel>
         );
@@ -151,6 +171,12 @@ export default function Connect() {
         <h2 className="mb-3 text-left text-sm font-semibold text-slate-500">AI 接入</h2>
         <AiSettings />
       </div>
+
+      {data?.legacy_data && readFlag(LEGACY_DATA_KEY) !== '1' && (
+        <LegacyDataNotice onDismiss={() => writeFlag(LEGACY_DATA_KEY, '1')} />
+      )}
+
+      <AccountsCard />
 
       {notice && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" role="dialog" aria-modal="true">
@@ -246,10 +272,180 @@ function AccountCard({ status, onLoggedOut }: { status: ConnectStatusDTO; onLogg
         onConfirm={() => void onLogout()}
         onCancel={() => setConfirm(false)}
       >
-        退出后回到扫码页，可以换另一个 QQ 号登录。已整理的群和日程会保留。
+        退出后回到扫码页，可以换另一个 QQ 号登录。该账号的数据会保留在这台电脑上，换号登录互不可见。
       </ConfirmDialog>
     </aside>
   );
+}
+
+/**
+ * 一键下载 NapCat 采集端组件（四问题修复 #3）：点按钮 → POST /api/setup/fetch-napcat
+ * → 每秒轮询进度 → 完成后刷新连接状态（后端就绪 error 消失）。
+ */
+function NapcatDownload({ onInstalled }: { onInstalled: () => Promise<unknown> | void }) {
+  const toast = useToast();
+  const [progress, setProgress] = useState<SetupProgressDTO | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const active = progress !== null && (progress.status === 'downloading' || progress.status === 'verifying' || progress.status === 'extracting');
+  const status = progress?.status;
+
+  useEffect(() => {
+    if (!active) return;
+    let cancelled = false;
+    const timer = setInterval(async () => {
+      try {
+        const p = await getFetchNapcatProgress();
+        if (cancelled) return;
+        setProgress(p);
+        if (p.status === 'done') {
+          toast('采集端组件下载完成，点「重启采集端」启动');
+          void onInstalled();
+        } else if (p.status === 'error') {
+          toast(p.message || '下载失败，请检查网络后重试', 'error');
+        }
+      } catch {
+        // 单次轮询失败不中断
+      }
+    }, 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [active, onInstalled, progress?.status, toast]);
+
+  async function onDownload() {
+    setBusy(true);
+    try {
+      await startFetchNapcat();
+      const p = await getFetchNapcatProgress();
+      setProgress(p);
+      toast('已开始下载，完成后自动恢复');
+    } catch (e) {
+      toastError(toast, e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (progress?.installed) return null;
+
+  return (
+    <div className="mb-5">
+      <button
+        type="button"
+        onClick={() => void onDownload()}
+        disabled={busy || active}
+        className="rounded-xl bg-slate-900 px-6 py-3 text-base font-medium text-white hover:bg-slate-700 disabled:opacity-60"
+      >
+        一键下载 NapCat 组件
+      </button>
+      {active && (
+        <div className="mx-auto mt-4 w-full max-w-xs text-left">
+          <div className="h-2 overflow-hidden rounded-full bg-slate-100">
+            <div
+              className="h-full rounded-full bg-slate-800 transition-all"
+              style={{ width: `${Math.max(progress!.percent, 3)}%` }}
+            />
+          </div>
+          <p className="mt-1.5 text-xs text-slate-500">{progress!.message || '下载中…'}</p>
+        </div>
+      )}
+      {progress?.status === 'error' && (
+        <p className="mt-2 text-xs text-rose-500">{progress.message || '下载失败，请检查网络后重试'}</p>
+      )}
+    </div>
+  );
+}
+
+/** 旧版单库数据迁移提示（升级后出现一次，用户可手动把 legacy 目录改成对应 QQ 号） */
+function LegacyDataNotice({ onDismiss }: { onDismiss: () => void }) {
+  return (
+    <div className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-4 text-left text-sm text-amber-800">
+      <p className="font-medium">检测到旧版本数据</p>
+      <p className="mt-1 leading-relaxed">
+        旧版的单一数据库已迁移到 <code className="rounded bg-amber-100 px-1">data/accounts/legacy/</code>。
+        因为无法确认它属于哪个 QQ 号，新账号会从空数据开始；如需找回，把该文件夹改名为对应 QQ 号即可。
+      </p>
+      <button type="button" onClick={onDismiss} className="mt-2 font-medium text-amber-700 underline-offset-2 hover:underline">
+        知道了
+      </button>
+    </div>
+  );
+}
+
+/** 本机账号数据管理（问题 1 延伸）：列出这台电脑上已有的账号库，可删除指定账号数据 */
+function AccountsCard() {
+  const toast = useToast();
+  const [data, setData] = useState<AccountsDTO | null>(null);
+  const [confirmUin, setConfirmUin] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    listAccounts()
+      .then(setData)
+      .catch(() => setData(null));
+  }, []);
+
+  async function onDelete() {
+    if (confirmUin === null) return;
+    setBusy(true);
+    try {
+      await deleteAccountData(confirmUin);
+      toast(`已删除账号 ${confirmUin} 的本机数据`);
+      setConfirmUin(null);
+      setData(await listAccounts());
+    } catch (e) {
+      toastError(toast, e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!data || data.accounts.length === 0) return null;
+
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white px-6 py-6 text-left shadow-sm">
+      <p className="text-sm font-medium text-slate-700">本机账号数据</p>
+      <p className="mt-1 text-xs text-slate-400">每个 QQ 号一个独立数据库，换号登录互不可见；删除不会影响其他账号。</p>
+      <ul className="mt-3 space-y-2">
+        {data.accounts.map((a) => (
+          <li key={a.uin} className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2 text-sm">
+            <span>
+              <span className="font-mono">{a.uin}</span>
+              {a.current && <span className="ml-2 text-xs text-emerald-600">当前登录</span>}
+              <span className="ml-2 text-xs text-slate-400">{formatBytes(a.size_bytes)}</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => setConfirmUin(a.uin)}
+              className="shrink-0 text-xs font-medium text-rose-500 hover:underline"
+            >
+              删除数据
+            </button>
+          </li>
+        ))}
+      </ul>
+
+      <ConfirmDialog
+        open={confirmUin !== null}
+        title={`删除账号 ${confirmUin ?? ''} 的数据？`}
+        confirmText="删除"
+        danger
+        busy={busy}
+        onConfirm={() => void onDelete()}
+        onCancel={() => setConfirmUin(null)}
+      >
+        该账号在这台电脑上的群监听、事件、待办、课表、记忆将全部删除，无法恢复。
+      </ConfirmDialog>
+    </div>
+  );
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
 /** AI 接入：目前只有 DeepSeek。key 存在本机 data/llm.json，页面上只显示打码后的提示 */
@@ -291,6 +487,15 @@ function AiSettings() {
 
   return (
     <div className="rounded-2xl border border-slate-200 bg-white px-6 py-6 text-left shadow-sm">
+      {info !== null && !info.configured && (
+        <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-relaxed text-amber-800">
+          <p className="font-medium">建议先填入 DeepSeek API Key（可选）</p>
+          <p className="mt-1 text-xs leading-relaxed text-amber-700">
+            填了 Key，AI 才会把群消息自动整理成日程；不填也能正常收消息、看日程，只是「AI 整理」不可用。
+            Key 只保存在这台电脑上，保存后立即生效。
+          </p>
+        </div>
+      )}
       <label className="block text-sm font-medium text-slate-700" htmlFor="ai-provider">
         服务商
       </label>

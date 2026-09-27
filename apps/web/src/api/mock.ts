@@ -7,6 +7,7 @@ import type { Api } from './client';
 import { ApiError } from './error';
 import { isTodo } from '../lib/todo';
 import type {
+  AccountsDTO,
   ConnectState,
   ConnectStatusDTO,
   CourseDTO,
@@ -20,6 +21,7 @@ import type {
   HistoryDTO,
   MemoryDTO,
   ScenarioDTO,
+  SetupProgressDTO,
   SourceMessageDTO,
   TimetableDTO,
   TodayDTO,
@@ -507,6 +509,32 @@ export const mockApi: Api = {
     return delay({ ok: true as const });
   },
 
+  startFetchNapcat() {
+    mockNapcatInstalled = true;
+    return delay({ ok: true as const });
+  },
+
+  getFetchNapcatProgress() {
+    return delay<SetupProgressDTO>({
+      status: mockNapcatInstalled ? 'done' : 'idle',
+      percent: mockNapcatInstalled ? 100 : -1,
+      message: '',
+      installed: mockNapcatInstalled,
+    });
+  },
+
+  listAccounts() {
+    return delay<AccountsDTO>({
+      accounts: [{ uin: '10001', current: connectState() === 'online', size_bytes: 1024 * 512, updated_at: bootAt }],
+      legacy_data: false,
+    });
+  },
+
+  deleteAccountData(uin) {
+    if (!/^\d{5,12}$/.test(uin)) return fail('账号格式不合法', 400);
+    return delay({ ok: true as const });
+  },
+
   syncNow(days = 7) {
     if (connectState() !== 'online') return fail('QQ 未连接', 409);
     // 天数越大补回的消息越多（mock 按比例给个数）
@@ -713,3 +741,5 @@ function trashItems(): TrashItemDTO[] {
 }
 
 let mockLlm: LlmSettingsDTO = { provider: 'deepseek', configured: false, key_hint: '', source: 'none' };
+/** mock 里采集端组件默认已就绪（localStorage.mockNapcatMissing=1 可模拟缺失，调一键下载按钮） */
+let mockNapcatInstalled = localStorage.getItem('mockNapcatInstalled') !== '1';

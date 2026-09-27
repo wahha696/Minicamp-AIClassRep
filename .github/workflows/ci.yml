@@ -1,0 +1,73 @@
+# CI（问题 4）：每次 push / PR 都跑。Windows 机器跑 typecheck + 单测 + 构建；
+# Ubuntu 上做「克隆即用」冒烟：全新目录 pnpm install + 构建产物 + 起后端打 /health。
+# 注意：单测里 vitest 在 windows-latest 上可能因 sandbox/杀软偶发超时，用 --passWithNoTests
+# 之外不加宽限；失败就看日志（不设 continue-on-error，CI 要红就红）。
+name: ci
+
+on:
+  push:
+    branches: [main, feat/**]
+  pull_request:
+    branches: [main]
+
+jobs:
+  windows:
+    name: Windows · typecheck + test + build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        # 版本取自 package.json 的 packageManager 字段
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 类型检查（server + web）
+        run: pnpm -r typecheck
+
+      - name: 单元测试（vitest）
+        run: pnpm -r test
+
+      - name: 构建（esbuild + vite）
+        run: pnpm -r build
+
+  smoke-linux:
+    name: Ubuntu · 全新克隆冒烟（/health）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: 安装依赖并构建
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter web build
+
+      - name: 起后端并打 /health（clone 即用冒烟，不需要 QQ/NapCat）
+        run: |
+          cd apps/server
+          node --import tsx src/index.ts &
+          SRV=$!
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8000/health; then
+              echo
+              echo "fresh-clone smoke OK"
+              kill $SRV
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "后端 60 秒内没有就绪"
+          exit 1

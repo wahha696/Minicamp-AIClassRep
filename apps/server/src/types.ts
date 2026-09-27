@@ -138,6 +138,8 @@ export interface ConnectStatusDTO {
   since: number;        // 进入当前状态的时间
   message?: string;     // error 时的用户文案（架构.md §7）
   first_run: boolean;   // 从未登录过（无 uin）且库里没有任何消息/事件 → 前端拦到 /connect
+  reason?: 'no_qq' | 'no_napcat'; // error 细分：没装 QQ / 缺采集端运行包（前端据此给一键下载）
+  legacy_data?: boolean; // 检测到旧版单库数据被迁到 data/accounts/legacy（前端提示一次）
 }
 
 export interface PipelineStats {

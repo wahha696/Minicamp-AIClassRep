@@ -1,0 +1,43 @@
+# ClassRep Docker Compose 部署模板（问题 4，Linux/NAS 服务器用）。
+# 组成：classrep（本项目后端+网页）+ napcat（官方 mlikiowa/napcat-docker，提供 OneBot WS）。
+# Windows 用户不用这个：直接用免安装包（双击 启动.bat），本机注入更省事。
+#
+# 用法：
+#   cd deploy
+#   docker compose up -d --build
+#   浏览器开 http://localhost:8000 ；QQ 扫码在 napcat 的 WebUI（http://<主机>:6099/webui，token 看 docker logs napcat）
+#   登录后在 napcat WebUI 的「网络配置」里新建 WebSocket 服务端，监听 3001，token 可留空。
+services:
+  napcat:
+    image: mlikiowa/napcat-docker:latest
+    container_name: napcat
+    restart: always
+    ports:
+      - "6099:6099" # WebUI（扫码登录用；公网环境请加防火墙/token，见 NapCat-Docker 文档）
+      # 3001 只在 compose 内部网络互通，不必映射到宿主机
+    volumes:
+      - napcat-qq:/app/.config/QQ        # QQ 登录态持久化（下次免扫码）
+      - napcat-config:/app/napcat/config # OneBot 配置持久化
+
+  classrep:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: classrep
+    restart: always
+    depends_on:
+      - napcat
+    environment:
+      # 关键：指向容器网络里的 NapCat WS 服务（本仓 onebot.ts 读这个环境变量）
+      - ONEBOT_WS_URL=ws://napcat:3001
+      # LLM：也可直接给环境变量（网页里配的 key 存在 data/ 里，二选一）
+      # - LLM_API_KEY=sk-xxxx
+    ports:
+      - "8000:8000" # 网页（8000~8010 自动顺延，容器内冲突会换口，宿主机固定映射 8000）
+    volumes:
+      - classrep-data:/app/data
+
+volumes:
+  napcat-qq:
+  napcat-config:
+  classrep-data:

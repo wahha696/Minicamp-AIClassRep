@@ -137,6 +137,9 @@ export function writeFlag(key: string, value: string): void {
 export const TAKEOVER_NOTICE_KEY = 'takeoverNoticeShown';
 export const TAKEOVER_NOTICE_TEXT = '电脑版 QQ 已由 ClassRep 接管，聊天请用手机 QQ';
 
+/** 旧版单库迁移提示（问题 1）：用户点「知道了」后不再显示 */
+export const LEGACY_DATA_KEY = 'legacyDataNoticeShown';
+
 /** first_run 时把用户拦到 /connect；D5 里点「先用演示模式看看」会写 localStorage.skipConnect=1 放行 */
 export function shouldRedirectToConnect(
   status: ConnectStatusDTO | undefined,
