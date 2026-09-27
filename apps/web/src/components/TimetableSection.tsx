@@ -213,9 +213,13 @@ export default function TimetableSection() {
                 <input
                   type="text"
                   value={csuUser}
+                  disabled={csuBusy !== ''}
                   autoComplete="off"
                   onChange={(e) => {
                     setCsuUser(e.target.value);
+                    setCsuSession('');
+                    setCsuCaptcha('');
+                    setCsuCode('');
                     setCsuErr('');
                   }}
                   className="w-40 rounded-lg border border-slate-200 px-2 py-1.5 text-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
@@ -226,9 +230,13 @@ export default function TimetableSection() {
                 <input
                   type="password"
                   value={csuPass}
+                  disabled={csuBusy !== ''}
                   autoComplete="off"
                   onChange={(e) => {
                     setCsuPass(e.target.value);
+                    setCsuSession('');
+                    setCsuCaptcha('');
+                    setCsuCode('');
                     setCsuErr('');
                   }}
                   className="w-40 rounded-lg border border-slate-200 px-2 py-1.5 text-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
