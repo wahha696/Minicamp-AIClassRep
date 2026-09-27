@@ -69,7 +69,19 @@ function getClient(): LlmClient {
 /** 防抖：调级/改规则后 5s 总结一次 */
 let timer: NodeJS.Timeout | null = null;
 
+/**
+ * 代数：删规则 / 清空 / 又排了一次新总结时 +1。总结要等 AI 好几秒，回来时代数变了就不写——
+ * 否则会把用户刚删掉的规则（用的是删之前的调级记录）写回去。
+ */
+let generation = 0;
+
+/** 让正在进行的总结作废（清空记忆时用；删规则走 schedulePreferenceSummary，同样会作废） */
+export function invalidatePreferenceSummary(): void {
+  generation++;
+}
+
 export function schedulePreferenceSummary(): void {
+  generation++;
   if (timer) clearTimeout(timer);
   timer = setTimeout(() => {
     timer = null;
@@ -80,6 +92,7 @@ export function schedulePreferenceSummary(): void {
 
 /** 把最近 100 条未忽略调级记录总结成规则，事务性替换 level_rules。失败时保留旧规则。 */
 export async function summarize(): Promise<void> {
+  const gen = generation;
   const feedback = db
     .prepare(
       `SELECT id, group_name, type, title, ai_level, user_level
@@ -122,6 +135,11 @@ export async function summarize(): Promise<void> {
     rules = parsed.data.rules;
   } catch (e) {
     console.warn('[preferences] summarize failed, keep old rules:', (e as Error).message);
+    return;
+  }
+
+  if (gen !== generation) {
+    console.warn('[preferences] 总结期间记忆有改动，丢弃这次结果');
     return;
   }
 

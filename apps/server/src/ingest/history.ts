@@ -12,22 +12,30 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const PAGE_SIZE = 200;
 const MAX_PAGES = 30;
 
-let inflight: Promise<{ groups: number; messages: number }> | null = null;
+type SyncResult = { groups: number; messages: number };
+let inflight: { days: number; promise: Promise<SyncResult> } | null = null;
 
 /**
  * 历史补齐。days=往前补多少天（1 / 7 / 30，缺省 7 保持登录自动补齐的行为）。
- * 一个群失败不影响其他群；同一时刻只允许一个 sync 在跑（第二次调用返回正在跑的那个）。
+ * 一个群失败不影响其他群；同一时刻只有一个 sync 在跑：
+ *   新请求的天数 ≤ 正在跑的 → 直接复用；更大 → 等它跑完再按新天数补一次（已入库的会被去重），两次结果相加。
  * 入库完就返回，不等流水线整理完（前端用 health.pending 看进度）。
  */
-export function syncHistory(days = 7): Promise<{ groups: number; messages: number }> {
-  if (inflight !== null) return inflight;
-  inflight = doSync(days).finally(() => {
-    inflight = null;
+export function syncHistory(days = 7): Promise<SyncResult> {
+  const running = inflight;
+  if (running !== null && days <= running.days) return running.promise;
+  const promise: Promise<SyncResult> = (async () => {
+    const first = running ? await running.promise.catch(() => ({ groups: 0, messages: 0 })) : null;
+    const r = await doSync(days);
+    return first ? { groups: Math.max(first.groups, r.groups), messages: first.messages + r.messages } : r;
+  })().finally(() => {
+    if (inflight?.promise === promise) inflight = null;
   });
-  return inflight;
+  inflight = { days, promise };
+  return promise;
 }
 
-async function doSync(days: number): Promise<{ groups: number; messages: number }> {
+async function doSync(days: number): Promise<SyncResult> {
   let rows: Array<{ group_id?: unknown }> = [];
   try {
     rows = db

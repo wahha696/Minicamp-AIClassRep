@@ -451,7 +451,7 @@ describe('PATCH /api/events/:id', () => {
     });
   });
 
-  it('手动设级：level+locked+version+history，记一条 level_feedback（ai_level=调整前的值）', async () => {
+  it('手动设级：level+locked+history（不升 version），记一条 level_feedback（ai_level=调整前的值）', async () => {
     const app = freshApp();
     addGroup('g1', '高数(2)班');
     const id = addEvent({ title: '大物实验报告' }); // 默认 level=2, unlocked
@@ -461,7 +461,8 @@ describe('PATCH /api/events/:id', () => {
     const event = body as EventDetailDTO;
     expect(event.level).toBe(4);
     expect(event.level_locked).toBe(true);
-    expect(event.version).toBe(2);
+    expect(event.version).toBe(1); // 不升版本，否则卡片会误显示「已按最新通知更新」
+    expect(event.history.at(-1)?.source_message_id).toBeNull();
     const levelChange = event.history.at(-1)?.changed_fields['level'] as { from: number; to: number };
     expect(levelChange).toEqual({ from: 2, to: 4 });
 
@@ -506,6 +507,38 @@ describe('PATCH /api/events/:id', () => {
     expect(event.level).toBe(4); // 交还后保留当前值，等 AI 下次覆盖
     expect(event.level_locked).toBe(false);
     expect((db.prepare('SELECT COUNT(*) n FROM level_feedback WHERE event_id = ?').get(id) as { n: number }).n).toBe(1);
+  });
+
+  it('交还 AI 后再调级：AI 没改过等级时 ai_level 仍是最初的 AI 原级', async () => {
+    const app = freshApp();
+    addGroup('g1', '高数(2)班');
+    const id = addEvent({ title: '高数小测' }); // AI 原级 2
+    await patchJson(app, `/api/events/${id}`, { level: 4 });
+    await patchJson(app, `/api/events/${id}`, { level: null }); // 交还，level 仍是 4
+    await patchJson(app, `/api/events/${id}`, { level: 3 });
+    const fb = db
+      .prepare('SELECT ai_level FROM level_feedback WHERE event_id = ? ORDER BY id')
+      .all(id) as { ai_level: number }[];
+    expect(fb.map((f) => f.ai_level)).toEqual([2, 2]);
+  });
+
+  it('交还 AI 后 AI 按群消息改过等级，再调级时 ai_level 取 AI 新给的值', async () => {
+    const app = freshApp();
+    addGroup('g1', '高数(2)班');
+    const id = addEvent({ title: '高数小测' });
+    await patchJson(app, `/api/events/${id}`, { level: 4 });
+    await patchJson(app, `/api/events/${id}`, { level: null });
+    // 模拟 reconcile：AI 按新消息把等级改成 1
+    db.prepare('UPDATE events SET level = 1, version = version + 1 WHERE id = ?').run(id);
+    db.prepare(
+      `INSERT INTO event_history (event_id, version, changed_fields, source_message_id, changed_at)
+       VALUES (?, 2, ?, 'm-ai', ?)`,
+    ).run(id, JSON.stringify({ level: { from: 4, to: 1 } }), Date.now() + 1);
+    await patchJson(app, `/api/events/${id}`, { level: 3 });
+    const last = db
+      .prepare('SELECT ai_level FROM level_feedback WHERE event_id = ? ORDER BY id DESC LIMIT 1')
+      .get(id) as { ai_level: number };
+    expect(last.ai_level).toBe(1);
   });
 
   it('level 越界 / 非整数 / 非数字 → 400', async () => {

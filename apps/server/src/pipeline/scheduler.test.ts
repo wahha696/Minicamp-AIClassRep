@@ -131,8 +131,8 @@ describe('runPipelineNow', () => {
   it('AI 连不上：这批不置已处理，歇一会；之后连上了再处理', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     ingestMessages(chat('demo-a', 20), 'demo');
-    extract.mockImplementation(async () => {
-      llmStats.failed++; // 真的 extractEvents 连不上时就是这样
+    extract.mockImplementation(async (_input, _client, status) => {
+      status!.llmFailed = true; // 真的 extractEvents 连不上时就是这样
       return [];
     });
     await runPipelineNow();
@@ -147,6 +147,22 @@ describe('runPipelineNow', () => {
     resetLlmRetry(); // 相当于等过了 60s
     await tick(Date.now() + 60_000);
     expect(count('processed = 0')).toBe(0);
+  });
+
+  it('多群并发：一个群 AI 连不上，不连累同时在跑的别的群', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    ingestMessages([...chat('demo-a', 5), ...chat('demo-b', 5)], 'demo');
+    extract.mockImplementation(async (input, _client, status) => {
+      await new Promise((r) => setTimeout(r, 10)); // 让两个群的调用重叠
+      if (input.groupId === 'demo-a') {
+        llmStats.failed++;
+        status!.llmFailed = true;
+      }
+      return [];
+    });
+    await runPipelineNow();
+    const left = db.prepare('SELECT group_id, COUNT(*) n FROM messages WHERE processed = 0 GROUP BY group_id').all();
+    expect(left).toEqual([{ group_id: 'demo-a', n: 5 }]);
   });
 
   it('候选全是噪声就不调 LLM', async () => {

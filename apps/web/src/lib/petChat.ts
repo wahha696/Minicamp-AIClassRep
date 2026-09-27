@@ -33,9 +33,6 @@ export const QUICK_QUESTIONS: readonly string[] = ['今天有什么事', '明天
 const INTRO =
   '我是 AI 课代表的看板娘，帮你盯着课程群的通知，整理成日历。单击我报日程，右键有更多玩法，双击就能这样跟我聊天~';
 
-const HELP =
-  '你可以这样问我：\n· 「今天有什么事」——今日安排\n· 「明天有什么事」——明天安排\n· 「接下来做什么」——下一件事和倒计时\n· 「最近截止」——快到期的作业\n· 「看看群」——监听中的群\n· 「同步一下」——立即收一遍群消息\n· 「打开本周」——跳到周视图';
-
 const CONNECT_TEXT: Record<ConnectState, string> = {
   online: 'QQ 连接正常，群通知正在实时采集~',
   reconnecting: '连接中断了，我在自动重连，页面照常能用。',

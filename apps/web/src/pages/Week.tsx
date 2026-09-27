@@ -1,14 +1,15 @@
 // 本周页 /week（D3，FR-7.2 + FR-14）：固定周一到周日 7 天，可翻上周 / 下周 / 回到本周。
 // 两种形态：「按时间」沿用纵向列表（套 SlotStack 折叠）；「按课表」是 7×5 网格（WeekGrid），
 // 课程灰底、事件落格。形态选择存 localStorage。只有截止时间的事件显示「DDL」徽标。
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { exportIcsUrl, getEvents, getTimetable } from '../api/client';
+import type { EventDTO } from '../api/types';
 import EventDrawer from '../components/EventDrawer';
 import SlotStack from '../components/SlotStack';
 import WeekGrid from '../components/WeekGrid';
 import { usePolling } from '../hooks/usePolling';
-import { isUpdated, typeMeta } from '../lib/eventMeta';
+import { isUpdated, levelStyle, typeMeta } from '../lib/eventMeta';
 import { hhmm, weekdayDate } from '../lib/time';
 import { weekOf } from '../lib/timetable';
 import { groupByDay, thisMonday, weekRange, type WeekItem } from '../lib/week';
@@ -38,6 +39,7 @@ function saveMode(m: Mode) {
 function Item({ item, onClick }: { item: WeekItem; onClick: () => void }) {
   const { event, at, isDeadline } = item;
   const meta = typeMeta(event.type);
+  const lv = levelStyle(event.type, event.level); // 等级决定色条深浅
   const done = event.status === 'done';
 
   return (
@@ -49,7 +51,7 @@ function Item({ item, onClick }: { item: WeekItem; onClick: () => void }) {
         isDeadline ? 'border-red-200 bg-red-50 hover:border-red-300' : 'border-slate-200 bg-white hover:border-slate-300'
       } ${done ? 'opacity-50' : ''}`}
     >
-      <span className="w-1 shrink-0" style={{ backgroundColor: meta.color }} aria-hidden />
+      <span className={`w-1 shrink-0 ${lv.bar}`} aria-hidden />
       <div className="min-w-0 flex-1 px-2 py-1.5">
         <div className="flex flex-wrap items-center gap-1 text-xs">
           {isDeadline ? (
@@ -86,14 +88,32 @@ export default function Week() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const timetable = usePolling(getTimetable, 60_000);
 
-  const { data, error, loading, refresh } = usePolling(
-    useCallback(() => {
-      const { from, to } = weekRange(monday);
-      return getEvents(from, to);
-    }, [monday]),
+  // 按周缓存（内存，页面内有效）：翻回看过的周立即显示，后台再刷新；同时预取前后各一周
+  const cacheRef = useRef(new Map<number, EventDTO[]>());
+  const [, bump] = useState(0);
+  const fetchWeek = useCallback(async (m: number) => {
+    const { from, to } = weekRange(m);
+    const events = await getEvents(from, to);
+    cacheRef.current.set(m, events);
+    return events;
+  }, []);
+
+  const { error, loading: firstLoading, refresh } = usePolling(
+    useCallback(() => fetchWeek(monday), [fetchWeek, monday]),
     10_000,
   );
+  // 翻周后立即拉新一周（usePolling 只在定时器到点时才用新的 fn），并预取相邻周
+  useEffect(() => {
+    void refresh();
+    for (const m of [monday - WEEK_MS, monday + WEEK_MS]) {
+      if (!cacheRef.current.has(m)) {
+        fetchWeek(m).then(() => bump((n) => n + 1), () => {});
+      }
+    }
+  }, [monday, refresh, fetchWeek]);
 
+  const data = cacheRef.current.get(monday);
+  const loading = firstLoading || data === undefined;
   const days = useMemo(() => groupByDay(data ?? [], monday), [data, monday]);
   const { from, to } = weekRange(monday);
   const total = days.reduce((n, d) => n + d.items.length, 0);
@@ -123,8 +143,11 @@ export default function Week() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-slate-900 sm:text-3xl">
-            {weekN !== null ? `第 ${weekN} 周` : '本周'}
-            <span className="ml-2 text-base font-normal text-slate-500">{rangeText}</span>
+            {/* 有课表：第 N 周 / 开学前；没课表：本周，翻到别的周只显示日期范围 */}
+            {weekN !== null ? (weekN >= 1 ? `第 ${weekN} 周` : '开学前') : isThisWeek ? '本周' : rangeText}
+            {(weekN !== null || isThisWeek) && (
+              <span className="ml-2 text-base font-normal text-slate-500">{rangeText}</span>
+            )}
           </h1>
           <p className="mt-1 text-sm text-slate-500">
             {loading ? '正在读取本周日程…' : `这一周共 ${total} 件事`}

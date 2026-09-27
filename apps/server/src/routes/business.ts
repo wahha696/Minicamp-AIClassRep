@@ -142,7 +142,7 @@ function getEventById(id: number): EventDTO | null {
   return row === undefined ? null : toEventDTO(row);
 }
 
-/** 详情 = 事件 + sources（时间升序）+ history（version 升序）；GET 详情与 PATCH 共用 */
+/** 详情 = 事件 + sources（时间升序）+ history（version、id 升序）；GET 详情与 PATCH 共用 */
 function getEventDetail(id: number): EventDetailDTO | null {
   const event = getEventById(id);
   if (event === null) return null;
@@ -155,7 +155,7 @@ function getEventDetail(id: number): EventDetailDTO | null {
 
   const historyRows = db
     .prepare(
-      'SELECT version, changed_fields, source_message_id, changed_at FROM event_history WHERE event_id = ? ORDER BY version',
+      'SELECT version, changed_fields, source_message_id, changed_at FROM event_history WHERE event_id = ? ORDER BY version, id',
     )
     .all(id) as unknown as {
     version: number;
@@ -179,27 +179,32 @@ function applyManualLevel(row: EventRow, level: number | null, now: number): voi
     db.prepare('UPDATE events SET level_locked = 0, updated_at = ? WHERE id = ?').run(now, row.id);
     return;
   }
-  // 已锁定时 AI 原级取上一条 feedback 的 ai_level（没记过就退回当前 level）
-  const aiLevel =
-    row.level_locked !== 0
-      ? ((
-          db
-            .prepare(
-              'SELECT ai_level FROM level_feedback WHERE event_id = ? ORDER BY id DESC LIMIT 1',
-            )
-            .get(row.id) as { ai_level: number } | undefined
-        )?.ai_level ?? row.level)
-      : row.level;
+  // AI 原级：取上一条 feedback 的 ai_level——除非那之后 AI 又按群消息改过等级（交还 AI 后才可能），
+  // 那时当前 level 就是 AI 给的。没记过 feedback 时当前 level 就是 AI 原级。
+  const lastFeedback = db
+    .prepare('SELECT ai_level, created_at FROM level_feedback WHERE event_id = ? ORDER BY id DESC LIMIT 1')
+    .get(row.id) as { ai_level: number; created_at: number } | undefined;
+  const aiChangedSince =
+    lastFeedback !== undefined &&
+    db
+      .prepare(
+        `SELECT 1 AS ok FROM event_history
+         WHERE event_id = ? AND source_message_id IS NOT NULL AND changed_at >= ?
+           AND json_extract(changed_fields, '$.level') IS NOT NULL LIMIT 1`,
+      )
+      .get(row.id, lastFeedback.created_at) !== undefined;
+  const aiLevel = lastFeedback !== undefined && !aiChangedSince ? lastFeedback.ai_level : row.level;
 
   if (level !== row.level) {
-    const version = row.version + 1;
+    // 手动调级不升 version：version>1 表示「按群里新通知改过」，卡片据此显示「已按最新通知更新」。
+    // 仍写一条 history（沿用当前 version、source_message_id 为 NULL），详情页按 id 排序展示。
     db.prepare(
-      'UPDATE events SET level = ?, level_locked = 1, version = ?, updated_at = ? WHERE id = ?',
-    ).run(level, version, now, row.id);
+      'UPDATE events SET level = ?, level_locked = 1, updated_at = ? WHERE id = ?',
+    ).run(level, now, row.id);
     db.prepare(
       `INSERT INTO event_history (event_id, version, changed_fields, source_message_id, changed_at)
        VALUES (?, ?, ?, NULL, ?)`,
-    ).run(row.id, version, JSON.stringify({ level: { from: row.level, to: level } }), now);
+    ).run(row.id, row.version, JSON.stringify({ level: { from: row.level, to: level } }), now);
   } else {
     db.prepare('UPDATE events SET level_locked = 1, updated_at = ? WHERE id = ?').run(now, row.id);
   }
@@ -412,15 +417,23 @@ export function registerBusinessRoutes(app: Hono): void {
 
     const now = Date.now();
     const data = parsed.data;
-    if (data.status !== undefined) {
-      db.prepare('UPDATE events SET status = ?, updated_at = ? WHERE id = ?').run(
-        data.status,
-        now,
-        id,
-      );
-    }
-    if (data.level !== undefined) {
-      applyManualLevel(row, data.level, now);
+    // 改状态、改等级、写 history / feedback 放一个事务里，中途出错不留半截
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      if (data.status !== undefined) {
+        db.prepare('UPDATE events SET status = ?, updated_at = ? WHERE id = ?').run(
+          data.status,
+          now,
+          id,
+        );
+      }
+      if (data.level !== undefined) {
+        applyManualLevel(row, data.level, now);
+      }
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
     }
 
     const detail = getEventDetail(id);

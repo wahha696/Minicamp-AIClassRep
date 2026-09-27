@@ -1,7 +1,7 @@
 // 同一节次块的事件列表浮层（FR-14 展开）：
 // 宽屏（md+）锚定在触发卡片旁的浮层，放不下时翻到另一侧；手机从底部弹出抽屉。
 // Esc / 点空白关闭；点某条 → onPick 交给外层（一般是打开 EventDrawer）。
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { EventDTO } from '../api/types';
 import { isUpdated, LEVEL_LABEL, levelStyle, typeMeta } from '../lib/eventMeta';
 import { eventTimeText } from '../lib/time';
@@ -56,16 +56,21 @@ export default function SlotPopover({ items, anchor, onPick, onClose }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
 
-  // Esc 关闭 + 打开时把焦点收进浮层
+  // Esc 关闭 + 打开时把焦点收进浮层，关掉后还给原来的触发按钮（键盘用户不丢位置）
   useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
     window.addEventListener('keydown', onKey);
     ref.current?.querySelector('button')?.focus();
-    return () => window.removeEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      if (opener?.isConnected) opener.focus();
+    };
   }, [onClose]);
 
-  // 宽屏定位：默认放锚点右边，右边放不下（距右缘 < 24rem）翻左边；垂直方向居中并夹在视口内
-  useEffect(() => {
+  // 宽屏定位（layout effect：首帧前就算好，不在错误位置闪一下）：
+  // 默认放锚点右边，右边放不下（距右缘 < 24rem）翻左边；垂直方向居中并夹在视口内
+  useLayoutEffect(() => {
     if (!anchor || window.innerWidth < 768) {
       setPos(null);
       return;

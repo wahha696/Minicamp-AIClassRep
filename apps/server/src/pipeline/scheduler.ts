@@ -10,10 +10,10 @@
 // Jev 分数在攒批期间就提前打好（triage），处理批次时直接复用，不再多等一次 Jev。
 import { db } from '../db/index.js';
 import type { Message } from '../types.js';
-import { type ExtractedEvent, extractEvents } from './extract.js';
+import { type ExtractStatus, type ExtractedEvent, extractEvents } from './extract.js';
 import { isNoise } from './filter.js';
 import { JEV_DROP_BELOW, JEV_URGENT_AT, jevAvailable, scoreWithJev } from './jev.js';
-import { jevStats, llmStats } from './stats.js';
+import { jevStats } from './stats.js';
 import { applyEvents, listActiveEvents } from './reconcile.js';
 
 const TICK_MS = 1_000;
@@ -85,7 +85,7 @@ const jevStage: Stage = async (b) => {
 const extractStage: Stage = async (b) => {
   const first = b.candidates[0];
   if (!first) return; // 候选为空不调 LLM
-  const failedBefore = llmStats.failed;
+  const status: ExtractStatus = { llmFailed: false };
   const t0 = Date.now();
   b.extracted = await extractEvents({
     groupId: b.groupId,
@@ -94,9 +94,9 @@ const extractStage: Stage = async (b) => {
     context: b.context,
     now: b.now,
     activeEvents: listActiveEvents(b.groupId, b.now),
-  });
+  }, undefined, status);
   b.timing.llmMs = Date.now() - t0;
-  if (llmStats.failed > failedBefore) {
+  if (status.llmFailed) {
     b.llmFailed = true;
     throw new LlmUnavailable(); // 后面的 stage 不用跑了
   }

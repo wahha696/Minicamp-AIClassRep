@@ -57,6 +57,7 @@ describe('变更记录', () => {
       {
         version: 2,
         when: '10/1 14:03',
+        manual: false,
         changes: [
           { field: 'start_at', label: '时间', from: '昨天 14:00', to: '后天 14:00' },
           { field: 'location', label: '地点', from: 'A301', to: 'A203' },
@@ -64,5 +65,16 @@ describe('变更记录', () => {
         ],
       },
     ]);
+  });
+
+  it('手动调级那条标成 manual（没有来源消息、只改 level）', () => {
+    const lines = historyLines(
+      [
+        { version: 1, changed_fields: { level: { from: 2, to: 4 } }, source_message_id: null, changed_at: NOW },
+        { version: 2, changed_fields: { level: { from: 2, to: 4 } }, source_message_id: 'm2', changed_at: NOW },
+      ],
+      NOW,
+    );
+    expect(lines.map((l) => l.manual)).toEqual([true, false]);
   });
 });

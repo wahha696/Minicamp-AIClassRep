@@ -6,6 +6,8 @@ interface Props {
   title: string;
   children?: ReactNode;      // 说明文字
   confirmText: string;
+  cancelText?: string;       // 默认「取消」
+  footer?: ReactNode;        // 按钮上方的附加内容（如「下次不再提醒」）
   danger?: boolean;          // 危险操作：确认按钮红色
   focusCancel?: boolean;     // 默认焦点放「取消」（清空课表这类不可逆操作防误触）
   busy?: boolean;
@@ -13,7 +15,7 @@ interface Props {
   onCancel: () => void;
 }
 
-export default function ConfirmDialog({ open, title, children, confirmText, danger, focusCancel, busy, onConfirm, onCancel }: Props) {
+export default function ConfirmDialog({ open, title, children, confirmText, cancelText = '取消', footer, danger, focusCancel, busy, onConfirm, onCancel }: Props) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && !busy && onCancel();
@@ -28,6 +30,7 @@ export default function ConfirmDialog({ open, title, children, confirmText, dang
       <div className="relative w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl">
         <h2 className="text-lg font-semibold text-slate-900">{title}</h2>
         {children && <div className="mt-2 text-sm leading-relaxed text-slate-600">{children}</div>}
+        {footer && <div className="mt-4">{footer}</div>}
         <div className="mt-6 flex justify-end gap-2">
           <button
             type="button"
@@ -36,7 +39,7 @@ export default function ConfirmDialog({ open, title, children, confirmText, dang
             autoFocus={focusCancel}
             className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60"
           >
-            取消
+            {cancelText}
           </button>
           <button
             type="button"

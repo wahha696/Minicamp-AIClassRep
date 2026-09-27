@@ -6,7 +6,7 @@ import { bannerFor, ERROR_FALLBACK, lightsFromHealth, shouldRedirectToConnect } 
 
 const health = (over: Partial<HealthDTO> = {}): HealthDTO => ({
   status: 'ok', db: 'ok', qq: 'online', llm: 'ok', jev: 'disabled',
-  filtered_count: 0, jev_filtered_count: 0, jev_called_count: 0, llm_called_count: 0, uptime: 1, ...over,
+  filtered_count: 0, jev_filtered_count: 0, jev_called_count: 0, llm_called_count: 0, uptime: 1, pending: 0, ...over,
 });
 const status = (state: ConnectState, over: Partial<ConnectStatusDTO> = {}): ConnectStatusDTO => ({
   state, since: 0, first_run: false, ...over,

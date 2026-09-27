@@ -3,7 +3,7 @@
 import type { Hono } from 'hono';
 import { z } from 'zod';
 import { db } from '../db/index.js';
-import { schedulePreferenceSummary } from '../pipeline/preferences.js';
+import { invalidatePreferenceSummary, schedulePreferenceSummary } from '../pipeline/preferences.js';
 import type { Level, LevelRuleDTO, MemoryDTO } from '../types.js';
 
 function memoryDTO(): MemoryDTO {
@@ -84,6 +84,7 @@ export function registerMemoryRoutes(app: Hono): void {
       db.exec('ROLLBACK');
       throw e;
     }
+    invalidatePreferenceSummary(); // 正在跑的总结别把规则写回来
     return c.json(memoryDTO());
   });
 }

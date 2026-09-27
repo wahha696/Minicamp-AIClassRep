@@ -50,7 +50,6 @@ export function weekOf(ts: number, semesterStart: string): number {
 
 // ---------- 教务系统 xls 解析 ----------
 
-const WEEKDAY_NAMES = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
 // 表头里的「星期X」→ 周几（1=周一 … 7=周日）
 const WEEKDAY_VALUE: Record<string, number> = {
   星期一: 1,
@@ -68,13 +67,26 @@ const BLOCK_ROW_RE = /^(\d+)\s*[－\-–—]\s*(\d+)$/;
 export interface ParsedTimetable {
   courses: CourseDTO[];
   warnings: string[];
+  /** 表里自带校历时推算出的第 1 周周一（'YYYY-MM-DD'），推不出来就没有 */
+  semesterStart?: string;
 }
 
 /**
  * 解析 sheet_to_json(ws, {header: 1, defval: ''}) 的结果（纯函数，不测 xls 本身）。
- * 规则见 docs/拓展功能-开发计划.md §4.6。
+ * 支持两种导出形式：
+ *   形式一：列 = 星期，行 = 节次（规则见 docs/拓展功能-开发计划.md §4.6）；
+ *   形式二：行 = 星期，列 = 节次（「1－2」「3－4」… 横排表头），格子里没有教师、周次写成「1-16周(32学时)」，底部带校历。
  */
 export function parseTimetable(rows: string[][]): ParsedTimetable {
+  const periodHeaderIdx = rows.findIndex(
+    (r) => r.filter((c) => BLOCK_ROW_RE.test(String(c).trim())).length >= 2,
+  );
+  if (periodHeaderIdx >= 0) return parseTransposed(rows, periodHeaderIdx);
+  return parseByWeekdayColumns(rows);
+}
+
+/** 形式一：列 = 星期，行 = 节次 */
+function parseByWeekdayColumns(rows: string[][]): ParsedTimetable {
   const warnings: string[] = [];
   const courses: CourseDTO[] = [];
 
@@ -116,6 +128,142 @@ export function parseTimetable(rows: string[][]): ParsedTimetable {
     }
   }
   return { courses, warnings };
+}
+
+/** 形式二：行 = 星期，列 = 节次。headerIdx 是「1－2 … 11－12 … 备注」那一行。 */
+function parseTransposed(rows: string[][], headerIdx: number): ParsedTimetable {
+  const warnings: string[] = [];
+  const courses: CourseDTO[] = [];
+  const header = rows[headerIdx]!;
+
+  // 列 → 节次范围：表头只写在每组合并单元格的第一列，后面的空列沿用左边最近的表头；「备注」及之后不算
+  const periodOfCol: Array<{ p1: number; p2: number } | null> = [];
+  let cur: { p1: number; p2: number } | null = null;
+  for (let i = 0; i < header.length; i++) {
+    const h = String(header[i]).trim();
+    if (h.startsWith('备注')) {
+      cur = null;
+    } else {
+      const m = BLOCK_ROW_RE.exec(h);
+      if (m) cur = { p1: Number(m[1]), p2: Number(m[2]) };
+    }
+    periodOfCol[i] = cur;
+  }
+
+  // 第一列是「星期X」的行才是课；校历 / 作息时间 / 说明等行第一列不是星期，自然跳过
+  for (let r = headerIdx + 1; r < rows.length; r++) {
+    const row = rows[r]!;
+    const weekday = WEEKDAY_VALUE[String(row[0] ?? '').trim()];
+    if (weekday === undefined) continue;
+    for (let c = 1; c < row.length; c++) {
+      const period = periodOfCol[c];
+      const cell = String(row[c] ?? '');
+      if (!period || cell.trim() === '') continue;
+      const { p1, p2 } = period;
+      const block = Math.ceil(p1 / 2);
+      if (p1 < 1 || p2 < p1 || p2 > 10 || block < 1 || block > 5) {
+        const first = cell.split('\n').map((l) => l.trim()).find((l) => l !== '') ?? '';
+        warnings.push(`第 ${p1}–${p2} 节不在作息表内，已忽略：${first}`);
+        continue;
+      }
+      parseCellNoTeacher(cell, weekday as CourseDTO['weekday'], block as CourseDTO['block'], courses, warnings);
+    }
+  }
+
+  const semesterStart = semesterStartFromCalendar(rows);
+  return semesterStart ? { courses, warnings, semesterStart } : { courses, warnings };
+}
+
+/** 形式二的周次行：「1-16周(32学时)」「8,12周(8学时)」「1-15单周」 */
+const WEEKS_SUFFIX_RE = /^\d[\d,，\-－\s单双]*周/;
+
+/**
+ * 形式二的格子：[课名] [周次行] [教室(可能为空行)] [班级]，可重复多门。
+ * 空行有意义（体育没有教室时就是一个空行），所以只去掉首尾空行、保留中间空行。
+ */
+function parseCellNoTeacher(
+  cell: string,
+  weekday: CourseDTO['weekday'],
+  block: CourseDTO['block'],
+  courses: CourseDTO[],
+  warnings: string[],
+): void {
+  const lines = cell.split('\n').map((l) => l.trim());
+  while (lines.length > 0 && lines[0] === '') lines.shift();
+  while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  const dayText = `周${['一', '二', '三', '四', '五', '六', '日'][weekday - 1]}`;
+  const anchors = lines.map((l, i) => (WEEKS_SUFFIX_RE.test(l) ? i : -1)).filter((i) => i >= 0);
+  if (anchors.length === 0) {
+    warnings.push(`${dayText} 第${block}块有内容但没有周次信息，已忽略：${lines.find((l) => l !== '') ?? ''}`);
+    return;
+  }
+
+  let prevAnchor = -1;
+  for (const a of anchors) {
+    // 课名 = 本锚点之前、上一门的「教室+班级」之后最近的非空行
+    let name = '';
+    for (let i = a - 1; i > prevAnchor + (prevAnchor >= 0 ? 2 : 0); i--) {
+      if (lines[i] !== '') {
+        name = lines[i]!;
+        break;
+      }
+    }
+    // 上一门没有班级行时，课名紧贴在本锚点前一行
+    if (name === '' && a - 1 > prevAnchor && lines[a - 1] !== '') name = lines[a - 1]!;
+    prevAnchor = a;
+    if (name === '') {
+      warnings.push(`${dayText} 第${block}块有一门课没解析出课名，已忽略`);
+      continue;
+    }
+    const weeks = parseWeeks(lines[a]!);
+    if (weeks === null) {
+      warnings.push(`「${name}」的周次「${lines[a]!}」没解析出来，已跳过这门课`);
+      continue;
+    }
+    const next = lines[a + 1] ?? '';
+    const location = WEEKS_SUFFIX_RE.test(next) ? '' : next;
+    courses.push({ name, teacher: '', location, weekday, block, weeks });
+  }
+}
+
+/**
+ * 从形式二底部的校历推第 1 周周一：
+ *   「周次」行里值为 1 的那一列 → 同列「星期日」行的日期 + 左侧最近的「N月」+ 学年学期的年份 → 该周日 +1 天。
+ * 校历的周是「周日…周六」，所以第 1 周的周一 = 那个周日的后一天。任何一步对不上就返回 undefined。
+ */
+function semesterStartFromCalendar(rows: string[][]): string | undefined {
+  const cellText = (r: string[] | undefined, i: number) => String(r?.[i] ?? '').trim();
+  // 只在「月份」行及之后找，避免撞上课表主体里第一列的「星期日」
+  const monthIdx = rows.findIndex((r) => r.slice(0, 3).some((c) => String(c).trim() === '月份'));
+  if (monthIdx < 0) return undefined;
+  const calendar = rows.slice(monthIdx);
+  const labelled = (label: string) => calendar.find((r) => r.slice(0, 3).some((c) => String(c).trim() === label));
+  const weekRow = labelled('周次');
+  const sunRow = labelled('星期日');
+  const monthRow = calendar[0]!;
+  if (!weekRow || !sunRow) return undefined;
+  const col = weekRow.findIndex((c, i) => i >= 1 && String(c).trim() === '1');
+  if (col < 0) return undefined;
+  const day = Number(cellText(sunRow, col));
+  let month = NaN;
+  for (let i = col; i >= 1; i--) {
+    const m = /^(\d{1,2})月$/.exec(cellText(monthRow, i));
+    if (m) {
+      month = Number(m[1]);
+      break;
+    }
+  }
+  const termM = rows
+    .flat()
+    .map((c) => /学年学期[：:]\s*(\d{4})-(\d{4})/.exec(String(c)))
+    .find((m) => m !== null);
+  if (!termM || !(day >= 1 && day <= 31) || !(month >= 1 && month <= 12)) return undefined;
+  // 秋季学期 8–12 月在前一年，其余月份在后一年
+  const year = month >= 8 ? Number(termM[1]) : Number(termM[2]);
+  const sunday = Date.UTC(year, month - 1, day);
+  const d = new Date(sunday);
+  if (d.getUTCDate() !== day || d.getUTCDay() !== 0) return undefined;
+  return new Date(sunday + DAY).toISOString().slice(0, 10);
 }
 
 const WEEKS_RE = /\[周\]/;
@@ -185,9 +333,14 @@ function parseCell(
   }
 }
 
-/** 「3-16」「8,12」「1-15单」「1-16双」→ 周次数组；解析不了返回 null */
+/** 「3-16」「8,12」「1-15单」「1-16双」（可带「[周]」或「周(32学时)」后缀）→ 周次数组；解析不了返回 null */
 export function parseWeeks(text: string): number[] | null {
-  const body = text.replace('[周]', '').replace(/\s/g, '');
+  const body = text
+    .replace('[周]', '')
+    .replace(/周\s*([(（][^)）]*[)）])?$/, '')
+    .replace(/\s/g, '')
+    .replace(/，/g, ',')
+    .replace(/－/g, '-');
   if (body === '') return null;
   const weeks = new Set<number>();
   for (const part of body.split(',')) {

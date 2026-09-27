@@ -2,7 +2,7 @@
 // + 事件卡片（按时间 / 按紧急两种排序，可切换；同一节次块折叠成最急的一张），每 10s 刷新。
 import { useCallback, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { exportIcsUrl, getToday, getTodos } from '../api/client';
+import { exportIcsUrl, getEvents, getToday, getTodos } from '../api/client';
 import EventCard from '../components/EventCard';
 import EventDrawer from '../components/EventDrawer';
 import SlotStack from '../components/SlotStack';
@@ -12,6 +12,7 @@ import { groupBySlot } from '../lib/slots';
 import { SORT_LABEL, type SortMode, sortEvents } from '../lib/sort';
 import { shanghaiDayRange } from '../lib/time';
 
+const UPCOMING_DAYS = 3;
 const SORT_KEY = 'todaySort'; // 记住上次选的排序
 
 function loadSort(): SortMode {
@@ -25,6 +26,11 @@ function loadSort(): SortMode {
 export default function Today() {
   const { data, error, loading, refresh } = usePolling(getToday, 10_000);
   const todos = usePolling(getTodos, 10_000);
+  // 接下来 3 天（明天 0 点起）：周末 / 周日也能一眼看到下周初的事
+  const upcoming = usePolling(
+    useCallback(() => getEvents(shanghaiDayRange(1).from, shanghaiDayRange(UPCOMING_DAYS).to), []),
+    30_000,
+  );
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [sort, setSort] = useState<SortMode>(loadSort);
 
@@ -39,12 +45,17 @@ export default function Today() {
   }
 
   // 每次轮询拿到新数据都按当前时间重排（「两小时内」会随时间变化），再按节次块折叠
+  const upcomingEvents = useMemo(
+    () => sortEvents((upcoming.data ?? []).filter((e) => e.status !== 'done'), 'time'),
+    [upcoming.data],
+  );
   const groups = useMemo(() => groupBySlot(sortEvents(data?.events ?? [], sort)), [data, sort]);
 
   const onChanged = useCallback(() => {
     void refresh();
     void todos.refresh();
-  }, [refresh, todos.refresh]);
+    void upcoming.refresh();
+  }, [refresh, todos.refresh, upcoming.refresh]);
   const closeDrawer = useCallback(() => setSelectedId(null), []);
   const { from, to } = shanghaiDayRange(0);
 
@@ -142,6 +153,25 @@ export default function Today() {
                 className="mt-6 inline-block rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700"
               >
                 去演示控制台看看效果 →
+              </Link>
+            </div>
+          )}
+
+          {upcomingEvents.length > 0 && (
+            <div className="mt-8">
+              <h2 className="text-sm font-semibold text-slate-600">
+                接下来 {UPCOMING_DAYS} 天
+                <span className="ml-2 font-normal text-slate-400">{upcomingEvents.length} 件</span>
+              </h2>
+              <ul className="mt-3 space-y-3">
+                {upcomingEvents.map((e) => (
+                  <li key={e.id}>
+                    <EventCard event={e} onClick={() => setSelectedId(e.id)} />
+                  </li>
+                ))}
+              </ul>
+              <Link to="/week" className="mt-3 inline-block text-xs text-slate-500 underline underline-offset-2">
+                看完整周历 →
               </Link>
             </div>
           )}

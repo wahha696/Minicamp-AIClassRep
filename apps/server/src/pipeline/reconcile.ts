@@ -84,20 +84,49 @@ const q = {
     ),
 };
 
-function findTarget(groupId: string, ev: ExtractedEvent): EventRow | undefined {
+/** create 走模糊匹配、且新消息比目标事件的来源还早（历史补齐）时，两边的关键时间要在这个范围内才算同一件事 */
+const FUZZY_CREATE_TIME_TOLERANCE = 86400_000;
+
+const keyTime = (e: { start_at: number | null; deadline_at: number | null }) => e.start_at ?? e.deadline_at;
+
+function findTarget(groupId: string, ev: ExtractedEvent, byId: Map<string, Message>): EventRow | undefined {
   if (ev.update_of != null) {
     const row = q.byId().get(ev.update_of, groupId) as EventRow | undefined;
     if (row) return row;
   }
   if (!ev.title) return undefined;
-  // update_of 没给或无效：同群、同 type、还活着、标题足够像 → 视为同一件事
+  // update_of 没给或无效：同群、同 type、还活着、标题足够像 → 视为同一件事。
+  // 例外：补拉回来的旧消息说「create」，而同名事件是更晚的消息建的、时间差超过 1 天 → 是另一件事
+  // （比如旧消息「周三开会」与新消息「周四开会」），不能合并，否则会把新事件的时间改回旧的。
+  const evTime = keyTime(ev);
   let best: EventRow | undefined;
   let bestScore = FUZZY_THRESHOLD;
   for (const row of q.sameType().all(groupId, ev.type) as unknown as EventRow[]) {
+    if (ev.action === 'create') {
+      const rowTime = keyTime(row);
+      if (
+        evTime !== null &&
+        rowTime !== null &&
+        Math.abs(evTime - rowTime) > FUZZY_CREATE_TIME_TOLERANCE &&
+        isStale(row.id, ev.source_message_ids, byId)
+      ) {
+        continue;
+      }
+    }
     const s = titleSimilarity(row.title, ev.title);
     if (s > bestScore) [best, bestScore] = [row, s];
   }
   return best;
+}
+
+function isStale(eventId: number, ids: string[], byId: Map<string, Message>): boolean {
+  const times = ids.map((id) => byId.get(id)?.sent_at).filter((t): t is number => t !== undefined);
+  if (times.length === 0) return false;
+  const row = db.prepare('SELECT MAX(sent_at) AS latest FROM event_sources WHERE event_id = ?').get(eventId) as
+    | { latest: number | null }
+    | undefined;
+  const latest = row?.latest ?? null;
+  return latest !== null && Math.max(...times) < latest;
 }
 
 function addSources(eventId: number, ids: string[], byId: Map<string, Message>): void {
@@ -127,8 +156,15 @@ function writeChange(
 }
 
 function applyOne(groupId: string, ev: ExtractedEvent, byId: Map<string, Message>, now: number): void {
-  const target = findTarget(groupId, ev);
+  const target = findTarget(groupId, ev, byId);
   const sourceId = ev.source_message_ids[0] ?? null;
+
+  // 历史补齐进来的旧消息比已经处理过的新消息晚进流水线：
+  // 如果本条的来源消息全都早于目标事件已有的最新来源，只追加来源、不改字段（避免把新信息改回旧的）
+  if (target && isStale(target.id, ev.source_message_ids, byId)) {
+    addSources(target.id, ev.source_message_ids, byId);
+    return;
+  }
 
   if (ev.action === 'cancel') {
     if (!target) {

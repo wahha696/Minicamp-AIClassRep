@@ -319,10 +319,10 @@ function Body({
         <section className="mt-5">
           <h3 className="text-sm font-medium text-slate-700">变更记录</h3>
           <ol className="mt-2 space-y-2 border-l-2 border-slate-200 pl-3">
-            {lines.map((l) => (
-              <li key={l.version} className="text-sm">
+            {lines.map((l, i) => (
+              <li key={i} className="text-sm">
                 <div className="text-xs text-slate-400">
-                  {l.version} 版 · {l.when}
+                  {l.manual ? '手动调整' : `${l.version} 版`} · {l.when}
                 </div>
                 <div className="mt-0.5 text-slate-700">
                   {l.changes.map((c, i) => (

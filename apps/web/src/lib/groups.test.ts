@@ -4,17 +4,19 @@ import {
   enabledIds,
   filterGroups,
   groupsToChange,
+  keepOrder,
   loadPresets,
   matchesPreset,
   presetChanges,
   reverseChanges,
   runInBatches,
   savePresets,
+  sortEnabledFirst,
   toChanges,
   upsertPreset,
 } from './groups';
 
-const g = (group_id: string, name: string): GroupDTO => ({ group_id, name, enabled: true, message_count: 0, event_count: 0 });
+const g = (group_id: string, name: string): GroupDTO => ({ group_id, name, enabled: true, message_count: 0, event_count: 0, course_name: null });
 const list = [
   g('123456', '高数(2)班'),
   g('789012', 'Java 课程群'),
@@ -144,5 +146,21 @@ describe('群管理预设', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe('sortEnabledFirst / keepOrder', () => {
+  const mk = (id: string, enabled: boolean): GroupDTO => ({ ...g(id, id), enabled });
+  const ids = (xs: GroupDTO[]) => xs.map((x) => x.group_id);
+
+  it('监听中的群排前面，同类保持原顺序', () => {
+    const xs = [mk('a', false), mk('b', true), mk('c', false), mk('d', true)];
+    expect(ids(sortEnabledFirst(xs))).toEqual(['b', 'd', 'a', 'c']);
+  });
+
+  it('按记下的顺序排，开关变了也不挪；新群排最后', () => {
+    const order = ['b', 'd', 'a', 'c'];
+    const xs = [mk('a', true), mk('b', false), mk('c', false), mk('d', true), mk('e', true)];
+    expect(ids(keepOrder(xs, order))).toEqual(['b', 'd', 'a', 'c', 'e']);
   });
 });

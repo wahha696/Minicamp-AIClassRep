@@ -10,7 +10,7 @@ const NOW = 1_000_000_000_000; // 固定「现在」，让断言可确定
 const ev = (over: Partial<EventDTO> = {}): EventDTO => ({
   id: 1, group_id: 'g', group_name: 'g', type: 'other', title: '高数小测', description: '',
   start_at: null, end_at: null, deadline_at: null, location: null, action_required: null,
-  status: 'active', confidence: 1, version: 1, created_at: 0, updated_at: 0, ...over,
+  status: 'active', confidence: 1, level: 2, level_locked: false, version: 1, created_at: 0, updated_at: 0, ...over,
 });
 const ctx = (over: Partial<Parameters<typeof petReply>[1]> = {}) => ({
   now: NOW, events: [] as EventDTO[], summary: '今天没有待办，轻松一天', ...over,
@@ -65,8 +65,8 @@ describe('对话框：日程问答', () => {
     expect(petReply('看看群', ctx())).toMatchObject({ needGroups: true });
     expect(groupListText([])).toContain('还没有监听任何群');
     expect(groupListText([
-      { group_id: '1', name: '高数(2)班', enabled: true, message_count: 3, event_count: 1 },
-      { group_id: '2', name: '英语群', enabled: false, message_count: 0, event_count: 0 },
+      { group_id: '1', name: '高数(2)班', enabled: true, message_count: 3, event_count: 1, course_name: null },
+      { group_id: '2', name: '英语群', enabled: false, message_count: 0, event_count: 0, course_name: null },
     ])).toBe('监听中的群 1/2 个：高数(2)班、英语群。要增删监听去「群管理」页~');
   });
 });
