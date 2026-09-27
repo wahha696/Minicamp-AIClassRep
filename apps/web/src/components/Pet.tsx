@@ -10,19 +10,24 @@
 // - PET-5 层级 z-30：盖过普通内容，低于详情抽屉(z-40)与弹窗/Toast(z-50)，不挡正事。
 // - PET-6 性能与体贴：位移动画只用 transform；系统开「减少动态效果」时自动停掉
 //   呼吸/摇摆/Zzz 等循环动画（见 pet.css）。
-// - PET-7 双击对话框：规则引擎在 lib/petChat.ts（纯函数、离线可用），可查日程/截止/群，
-//   也能执行同步、跳页面、走两步；连接状态复用 ConnectStatusProvider，零额外轮询。
+// - PET-7 双击对话框：对话直接走 DeepSeek（后端 /api/pet/chat 持 key，前端不带 key）；
+//   连接状态复用 ConnectStatusProvider，零额外轮询。
 // - PET-8 系统联动：新事件播报（轮询 diff）→ 临期提醒（10/5/1 分钟各一次）→
 //   连接状态变化感知（中断/被踢/恢复）。对话框开着时，这些播报改走对话框，不打架。
 // - PET-9 深夜（23:00~6:00）自动睡觉：Zzz 浮标，不闲聊不散步，点了会嘟囔一句。
 // - PET-10 全页自由移动：不再只左右走，x/y 都可动、可拖到页面任意位置；
 //   气泡/菜单/对话框贴屏幕上沿时自动改到桌宠下方弹出。
 // - PET-11 高频自主活动：6~12s 一次概率触发散步或跳一下（原来 16~38s），睡觉/收起时不闹腾。
-// - PET-12 对话接入 DeepSeek：规则引擎（lib/petChat.ts）优先——命中即答还能执行动作；
-//   没命中才走 /api/pet/chat 由后端持 key 调 DeepSeek；LLM 失败回退规则兜底，用户无感。
+// - PET-15 对话直连大模型：删除关键词规则引擎（原 lib/petChat.ts），每一句话都发给后端
+//   /api/pet/chat 由 DeepSeek 回答；现场数据（今日摘要/事件/连接状态）随消息带上，让 LLM
+//   有据可答。没配 Key / mock 模式 / LLM 失败时如实告知用户（不再假装命中规则）。
+//   聊天里的「同步/走两步/跳页面」动作随规则引擎一起移除——这些操作走右键菜单。
+// - PET-12 对话全走 DeepSeek（PET-15 取消规则引擎）：不再有关键词规则匹配，
+//   每句话都发 /api/pet/chat 由后端持 key 调 DeepSeek；现场数据（今日摘要/事件/连接状态）
+//   随消息带给 LLM；没配 Key / LLM 失败时如实告知用户，不假装答上。
 // - PET-13 自定义形象与说话风格：右键「换形象」打开设置面板；图片压成 256px dataURL 存
 //   localStorage（classrep.pet.img），说话风格（classrep.pet.style）随对话发给后端改 LLM 人设；
-//   两者的初始/默认项都是奶龙，可一键恢复。规则引擎的固定话术不受风格影响。
+//   两者的初始/默认项都是奶龙，可一键恢复。
 // - PET-14 避让主体内容：桌宠只在页面空白处活动与停留——「顶栏 + 居中内容列」算主体，
 //   散步只挑空白点；拖拽落地/窗口变化/页面滚动后若压到内容，自动挪到最近的空白处；
 //   对话框/右键菜单/设置面板打开期间完全站住，不做任何自主移动（陪人说话要专心）。
@@ -31,13 +36,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getEvents, getGroups, getToday, syncNow } from '../api/client';
+import { getToday } from '../api/client';
 import type { ConnectState } from '../api/types';
 import { useConnectStatus } from './ConnectStatus';
 import { usePolling } from '../hooks/usePolling';
 import { clamp, petGreeting, petLine } from '../lib/pet';
-import { dayListText, groupListText, petReply, QUICK_QUESTIONS } from '../lib/petChat';
-import type { ChatAction } from '../lib/petChat';
 import { askPetLlm, llmAvailable } from '../lib/petLlm';
 import nailongUrl from '../assets/nailong.jpg';
 import './pet.css';
@@ -58,6 +61,17 @@ interface ChatMsg {
   id: number;
   role: 'bot' | 'user';
   text: string;
+}
+
+/** 聊天面板的快捷问题（PET-15：全部交给大模型回答，不再有规则动作项） */
+const QUICK_QUESTIONS: readonly string[] = ['今天有什么事', '接下来做什么', '最近截止', '你是谁呀'];
+
+/** PET-15：LLM 不可用/失败时的固定提示——如实告知，不用规则话术假装答上 */
+function llmFallbackText(err: unknown): string {
+  const msg = err instanceof Error ? err.message : '';
+  if (/key|503/i.test(msg)) return '我还没配好大脑——去「设置」页填上 AI Key，马上就能聊~';
+  if (/超时|timeout|abort/i.test(msg)) return '想得太久啦…网络或 AI 服务有点慢，再问我一次？';
+  return '呜…我的大脑（AI 服务）暂时没响应，稍后再问我一次？';
 }
 
 function readStore(key: string): string | null {
@@ -264,43 +278,16 @@ export default function Pet() {
       events: t?.events ?? [],
       connect: connRef.current?.state,
     };
-    const answer = petReply(text, ctx);
-    if (answer.matched || !llmAvailable()) {
-      // 规则命中（或 mock 模式）：直接回答，还能执行动作
-      pushMsg('bot', answer.text);
-    } else {
-      // PET-12：规则没命中 → 走后端 DeepSeek；失败/超时回退规则兜底话术
-      const id = pushMsg('bot', '…');
-      void askPetLlm(text, msgsRef.current, ctx, petStyle)
-        .then((reply) => replaceMsg(id, reply))
-        .catch(() => replaceMsg(id, answer.text));
+    if (!llmAvailable()) {
+      // PET-15：演示/mock 模式没有后端 LLM，规则引擎已删——如实说明，不假装会答
+      pushMsg('bot', '（演示模式连不上我的大脑：启动后端并在「设置」页配好 AI Key，我就能真正聊起来~）');
+      return;
     }
-    if (answer.needGroups) {
-      void getGroups()
-        .then((gs) => pushMsg('bot', groupListText(gs)))
-        .catch(() => pushMsg('bot', '群列表没取到，去「群管理」页看看吧。'));
-    }
-    if (answer.needEvents) {
-      // 明天/后天：拉对应整天的事件再回答（规则有真实数据，不走 LLM）
-      const { label, from, to } = answer.needEvents;
-      void getEvents(from, to)
-        .then((evs) => pushMsg('bot', dayListText(evs, Date.now(), label)))
-        .catch(() => pushMsg('bot', `${label}的安排没取到，去「本周」页看看吧。`));
-    }
-    if (answer.action) runAction(answer.action);
-  }
-  function runAction(a: ChatAction) {
-    if (a === 'sync') { void doSync(); return; }
-    if (a === 'stroll') { stroll(); playAnim('hop', 640); return; }
-    nav(a === 'nav-week' ? '/week' : a === 'nav-groups' ? '/groups' : '/');
-  }
-  async function doSync() {
-    try {
-      const r = await syncNow();
-      pushMsg('bot', `同步完成：${r.groups} 个群、${r.messages} 条消息。`);
-    } catch {
-      pushMsg('bot', '同步失败了，可能 QQ 没连上，去「连接」页看看吧。');
-    }
+    // PET-15：每句话直接问 DeepSeek（后端代理）；现场数据随消息带上，LLM 据此回答
+    const id = pushMsg('bot', '…');
+    void askPetLlm(text, msgsRef.current, ctx, petStyle)
+      .then((reply) => replaceMsg(id, reply))
+      .catch((err: unknown) => replaceMsg(id, llmFallbackText(err)));
   }
   const sayRefStable = useRef(saySomething); sayRefStable.current = saySomething;
 
@@ -698,7 +685,7 @@ export default function Pet() {
   );
 }
 
-/** 对话面板（PET-7）：纯展示，逻辑在 Pet 与 lib/petChat.ts */
+/** 对话面板（PET-7/PET-15）：纯展示，回复全部由后端 DeepSeek 生成（lib/petLlm.ts） */
 function PetChatPanel({ msgs, onSend, onClose }: {
   msgs: ChatMsg[];
   onSend: (text: string) => void;

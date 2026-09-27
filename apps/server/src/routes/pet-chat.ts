@@ -1,6 +1,5 @@
-// POST /api/pet/chat：桌宠对话框的 LLM 通道（PET-12）。
-// 前端规则引擎（apps/web/src/lib/petChat.ts）没命中时才调这里；本服务端持 key 调 DeepSeek
-// （OpenAI 兼容协议，复用 llm-settings 的配置），key 永远不下发到前端。
+// POST /api/pet/chat：桌宠对话框的 LLM 通道（PET-15：前端已无规则引擎，每句话都走这里）。
+// 本服务端持 key 调 DeepSeek（OpenAI 兼容协议，复用 llm-settings 的配置），key 永远不下发到前端。
 // 局域网写操作已被 lan-guard 统一 403，本接口实际只服务本机页面。
 import type { Hono } from 'hono';
 import OpenAI from 'openai';

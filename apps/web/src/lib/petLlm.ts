@@ -1,6 +1,6 @@
-// 桌宠对话的 LLM 通道（PET-12）：规则引擎没命中时，把消息发给后端 /api/pet/chat，
+// 桌宠对话的 LLM 通道（PET-15）：对话框里说的每句话都发到这里，
 // 由服务端持 key 调 DeepSeek（OpenAI 兼容协议）。key 永远不进前端。
-// 失败（没配 key / 超时 / 服务出错）一律抛错，调用方回退规则兜底话术，用户无感。
+// 失败（没配 key / 超时 / 服务出错）一律抛错，调用方如实提示用户——前端已无规则引擎兜底。
 import { isMock } from '../api/client';
 import { eventTimeText } from './time';
 import type { ConnectState, EventDTO } from '../api/types';
@@ -18,7 +18,7 @@ export interface PetLlmMsg {
   text: string;
 }
 
-/** mock 模式没有后端，直接走规则兜底 */
+/** mock/演示模式没有后端，调用方据此给出「演示模式」提示 */
 export function llmAvailable(): boolean {
   return !isMock;
 }
