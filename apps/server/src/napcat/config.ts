@@ -7,7 +7,7 @@
 //      不动其他字段——字段类型写错会导致整份配置读取失败退回默认值（接口规格 §2）。
 //   3. loadNapCat.js ← 用 pathToFileURL 生成动态 import，中文/空格路径安全（接口规格 §1）。
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { NAPCAT_DIR } from './paths.js';
 
@@ -56,18 +56,26 @@ export function writeNapcatConfig(napcatDir: string = NAPCAT_DIR): void {
   //    `-q <uin>` 转发进 QQ.exe 命令行（真机实测，A7-2），而 napcat.mjs 是从 QQ 进程的
   //    process.argv 读 -q/--qq 的。本加载器在 QQ 进程里、napcat.mjs 之前运行，这里直接把
   //    data/settings.json 里记住的 uin 注入 argv，让快速登录真正生效；读不到就原样走二维码。
+  //    注意：QQ 的 package.json（qqnt.json 补丁）没有 type:module，加载器按 CJS 解析，
+  //    所以绝不能用 import.meta（会整文件语法崩掉）；settings 路径在生成期直接内嵌。
+  //    诊断：每次加载都往 napcat\_loader_debug.log 追加一行，定位用，问题清楚后可去掉。
   const entry = pathToFileURL(join(napcatDir, 'napcat.mjs')).href;
+  const settingsPath = join(dirname(napcatDir), 'data', 'settings.json');
+  const debugPath = join(napcatDir, '_loader_debug.log');
   const loader = [
     '(async () => {',
+    `  const dbg = ${JSON.stringify(debugPath)};`,
+    '  const w = async (s) => { try { (await import("node:fs")).appendFileSync(dbg, s + "\\n"); } catch {} };',
     '  try {',
-    '    const { readFileSync } = await import("node:fs");',
-    '    const { fileURLToPath } = await import("node:url");',
-    '    const { join, dirname } = await import("node:path");',
-    '    const p = join(dirname(fileURLToPath(import.meta.url)), "..", "data", "settings.json");',
-    '    const uin = JSON.parse(readFileSync(p, "utf8")).uin;',
+    '    const fs = await import("node:fs");',
+    `    const uin = JSON.parse(fs.readFileSync(${JSON.stringify(settingsPath)}, "utf8")).uin;`,
+    `    await w("uin=" + uin + " argv_before=" + JSON.stringify(process.argv.slice(1)));`,
     '    if (uin && !process.argv.some((a) => a === "-q" || a === "--qq")) process.argv.push("-q", String(uin));',
-    '  } catch { /* 没有 settings.json 就走 NapCat 自己的流程（出二维码） */ }',
-    `  await import("${entry}");`,
+    '    await w("argv_after=" + JSON.stringify(process.argv.slice(1)));',
+    '  } catch (e) {',
+    '    await w("ERR " + String(e));',
+    '  }',
+    `  await import(${JSON.stringify(entry)});`,
     '})()',
   ].join('\n');
   writeFileSync(join(napcatDir, 'loadNapCat.js'), loader, 'utf8');
