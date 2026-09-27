@@ -618,6 +618,20 @@ export function parseKbtable(html: string): { raw: RawCourse[]; warnings: string
 
   const raw: RawCourse[] = [];
   const warnings: string[] = [];
+  // 强智当前页面常把周日放在第一列；不能把数据列序号直接当星期。
+  const weekdayByCol = new Map<number, number>();
+  for (const tr of table.find('tr').toArray() as Element[]) {
+    const cells = $(tr).children('td,th').toArray() as Element[];
+    const found = cells.map((cell, i) => {
+      const m = /^星期([一二三四五六日天])$/.exec($(cell).text().replace(/\s+/g, ''));
+      const day = m ? { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 日: 7, 天: 7 }[m[1]!] : undefined;
+      return day === undefined ? null : [i, day] as const;
+    }).filter((v): v is readonly [number, number] => v !== null);
+    if (found.length >= 3) {
+      for (const [col, day] of found) weekdayByCol.set(col, day);
+      break;
+    }
+  }
   const sectionByRow = new Map<number, [number, number]>();
   // rowspan 占位:行 → 列 → {el, colspan}
   const pendingCells = new Map<number, Map<number, { el: Element; colspan: number }>>();
@@ -662,6 +676,9 @@ export function parseKbtable(html: string): { raw: RawCourse[]; warnings: string
     }
     flush(); // 行尾剩余占位(理论上没有)
   });
+  if (weekdayByCol.size) {
+    for (const course of raw) course.dayOfWeek = weekdayByCol.get(course.dayOfWeek) ?? course.dayOfWeek;
+  }
   return { raw, warnings };
 }
 
