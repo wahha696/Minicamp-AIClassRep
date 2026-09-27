@@ -62,6 +62,22 @@ export interface EventDetailDTO extends EventDTO {
   history: HistoryDTO[];
 }
 
+/**
+ * 回收站的一项（设置页「回收站」）：从日历上消失、可以一键恢复的，只列最近 30 天。
+ * - cancelled：被取消的事件（by=manual 自己取消 / group 群消息取消），恢复 = 回到取消前的状态
+ * - changed：群消息改期 / 改地点 / 改标题前的旧版本（by 恒为 group），恢复 = 这些字段改回 from
+ */
+export interface TrashItemDTO {
+  id: string;                 // 'cancel-<事件 id>' | 'change-<history id>'，恢复时原样传回
+  kind: 'cancelled' | 'changed';
+  by: 'manual' | 'group';
+  event: EventDTO;            // 事件现在的样子
+  changes: Record<string, { from: unknown; to: unknown }>; // cancelled 时为 { status: {from,to} }
+  source_text: string | null; // 触发这次取消 / 改动的群消息原文（快照）；手动取消为 null
+  at: number;                 // 取消 / 改动的时间
+  expires_at: number;         // at + 30 天，过了就不在回收站显示（库里仍保留）
+}
+
 export interface TodayDTO {
   date: string;         // 'YYYY-MM-DD'（Asia/Shanghai）
   summary: string;      // 如 "今天 4 件事，最急的是 14:00 高数小测"；没有事件时 "今天没有待办，轻松一天"
