@@ -1,6 +1,7 @@
 // 业务路由：今日 / 事件查询 / 事件详情 / 改状态 / 导出 .ics / 群管理 / 演示。主人是 B。
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
+import { currentAccount } from '../accounts.js';
 import { beginTx, commitTx, db, rollbackTx } from '../db/index.js';
 import { env } from '../env.js';
 import { buildIcs } from '../ics.js';
@@ -333,7 +334,7 @@ const ICS_HEADERS = {
 
 /** 事件 → .ics 响应（区间里没有事件时是合法的空日历，照样 200 下载） */
 function icsResponse(c: Context, events: EventDTO[]): Response {
-  return c.body(buildIcs(events), 200, ICS_HEADERS);
+  return c.body(buildIcs(events, Date.now(), currentAccount() ?? 'local'), 200, ICS_HEADERS);
 }
 
 // ===== 路由

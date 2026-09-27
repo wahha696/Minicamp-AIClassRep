@@ -171,7 +171,12 @@ function applyOne(groupId: string, ev: ExtractedEvent, byId: Map<string, Message
       console.warn(`[reconcile] 取消找不到对应事件，忽略：${ev.title || `#${ev.update_of}`}`);
       return;
     }
-    writeChange(target, { status: { from: target.status, to: 'cancelled' } }, sourceId, now);
+    // A03：低置信度的取消不直接下死手——原安排保留，转 pending_confirm 等用户在界面上确认；
+    // 已是 pending_confirm 时维持原状（只记来源）。高置信度取消照旧直接取消。
+    const to: EventStatus = ev.confidence < PENDING_BELOW ? 'pending_confirm' : 'cancelled';
+    if (to !== target.status) {
+      writeChange(target, { status: { from: target.status, to } }, sourceId, now);
+    }
     addSources(target.id, ev.source_message_ids, byId);
     return;
   }
@@ -186,6 +191,17 @@ function applyOne(groupId: string, ev: ExtractedEvent, byId: Map<string, Message
     // 用户手动锁过的等级，AI 更新不覆盖（FR-12：手动调级锁定）
     if (ev.level !== null && target.level_locked === 0 && ev.level !== target.level) {
       changes.level = { from: target.level, to: ev.level };
+    }
+    // A03：低置信度消息要动关键字段（时间/截止/地点/标题）时，保留原安排不覆盖，
+    // 只把事件转成 pending_confirm 挂起，改动内容留在 event_sources 快照里供人核对。
+    const CRITICAL = new Set(['start_at', 'end_at', 'deadline_at', 'location', 'title']);
+    const criticalHit = Object.keys(changes).some((f) => CRITICAL.has(f));
+    if (ev.confidence < PENDING_BELOW && criticalHit) {
+      if (target.status === 'active') {
+        writeChange(target, { status: { from: 'active', to: 'pending_confirm' } }, sourceId, now);
+      }
+      addSources(target.id, ev.source_message_ids, byId);
+      return;
     }
     if (Object.keys(changes).length) writeChange(target, changes, sourceId, now);
     addSources(target.id, ev.source_message_ids, byId);

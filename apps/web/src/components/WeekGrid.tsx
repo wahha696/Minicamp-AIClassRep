@@ -5,7 +5,7 @@ import type { CourseDTO } from '../api/types';
 import { isUpdated, levelStyle, typeMeta } from '../lib/eventMeta';
 import { groupBySlot } from '../lib/slots';
 import { hhmm, weekdayDate } from '../lib/time';
-import { blockOf, CLASS_BLOCKS } from '../lib/timetable';
+import { blockOf, CLASS_BLOCKS, courseBlocks, sectionLabel } from '../lib/timetable';
 import type { WeekItem } from '../lib/week';
 import SlotStack from './SlotStack';
 
@@ -69,7 +69,7 @@ function Cell({
         <div
           key={i}
           className="rounded-md bg-slate-200/70 px-1.5 py-1 text-xs leading-tight text-slate-500"
-          title={`${c.name}　${c.teacher}`}
+          title={`${c.name}　${c.teacher}　${sectionLabel(c)}`}
         >
           <div className="line-clamp-2 font-medium">{c.name}</div>
           {c.location && <div className="truncate text-[10px] text-slate-400">{c.location}</div>}
@@ -123,7 +123,9 @@ export default function WeekGrid({ days, courses, itemsByDay, onPick, readonly }
                 <div>{b.time}</div>
               </th>
               {days.map((d, di) => {
-                const cellCourses = courses.filter((c) => c.weekday === di + 1 && c.block === b.block);
+                const cellCourses = courses.filter(
+                  (c) => c.weekday === di + 1 && courseBlocks(c).includes(b.block),
+                );
                 const cellItems = (itemsByDay[di] ?? []).filter((i) => blockOf(i.at) === b.block);
                 return (
                   <td

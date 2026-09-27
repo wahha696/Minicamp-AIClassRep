@@ -2,6 +2,7 @@
 import { readFile } from 'node:fs/promises';
 import type { Hono } from 'hono';
 import { z } from 'zod';
+import { db } from '../db/index.js';
 import { syncHistory } from '../ingest/history.js';
 import { QRCODE_PATH } from '../napcat/paths.js';
 import { isOnline } from '../napcat/onebot.js';
@@ -73,6 +74,24 @@ export function registerConnectRoutes(app: Hono): void {
       return c.json(await syncHistory(days));
     } catch (err) {
       return c.json({ error: `同步失败：${err instanceof Error ? err.message : String(err)}` }, 500);
+    }
+  });
+
+  // GET /api/sync/status：每群最近一次历史补齐的结果（R03，只读，离线也能看上次补到哪）
+  // complete=0 的群 = 可能被截断/中途失败，前端可提示「这群没补全，建议再同步一次」
+  app.get('/api/sync/status', (c) => {
+    try {
+      const rows = db
+        .prepare(
+          `SELECT s.group_id, COALESCE(g.name, s.group_id) AS name,
+                  s.last_sync_at, s.oldest_at, s.complete, s.reason
+           FROM group_sync s LEFT JOIN groups g ON g.group_id = s.group_id
+           ORDER BY s.last_sync_at DESC`,
+        )
+        .all();
+      return c.json(rows);
+    } catch {
+      return c.json([]); // 表还没建（旧库首启）→ 空数组，不 500
     }
   });
 }

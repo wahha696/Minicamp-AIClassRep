@@ -72,7 +72,11 @@ describe('/api/settings/llm', () => {
     const d = mkdtempSync(join(dir, 'f-'));
     setLlmSettingsDir(d);
     await put({ provider: 'deepseek', api_key: 'sk-22222222bbbb' });
-    expect(JSON.parse(readFileSync(join(d, 'llm.json'), 'utf8'))).toEqual({ provider: 'deepseek', api_key: 'sk-22222222bbbb' });
+    const raw = JSON.parse(readFileSync(join(d, 'llm.json'), 'utf8')) as Record<string, unknown>;
+    expect(raw.provider).toBe('deepseek');
+    // Windows 下 key 走 DPAPI 密文字段（S06）；非 Windows / 加密不可用时是明文 api_key
+    expect(raw.api_key === 'sk-22222222bbbb' || typeof raw.api_key_dpapi === 'string').toBe(true);
+    expect(getLlmConfig().apiKey).toBe('sk-22222222bbbb');
   });
 
   it('空 key / 格式不对 / 不支持的服务商 → 400 + 中文 error', async () => {

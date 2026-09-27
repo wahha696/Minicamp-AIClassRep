@@ -10,7 +10,8 @@ const COURSE = {
   teacher: '彭丽华(副教授)',
   location: 'B座312',
   weekday: 2,
-  block: 2,
+  start: 3,
+  end: 4,
   weeks: [3, 4, 5, 6],
 };
 
@@ -52,7 +53,7 @@ describe('PUT /api/timetable', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as TimetableDTO;
     expect(body.courses).toHaveLength(1);
-    expect(body.courses[0]).toMatchObject({ name: '概率论与数理统计A', weekday: 2, block: 2, weeks: [3, 4, 5, 6] });
+    expect(body.courses[0]).toMatchObject({ name: '概率论与数理统计A', weekday: 2, start: 3, end: 4, weeks: [3, 4, 5, 6] });
 
     const res2 = await req(app, 'PUT', '/api/timetable', {
       semester_start: '2027-02-22', // 周一
@@ -69,7 +70,8 @@ describe('PUT /api/timetable', () => {
       { semester_start: '2026-09-08', courses: [] }, // 周二
       { semester_start: '2026/09/07', courses: [] },
       { semester_start: '2026-09-07', courses: [{ ...COURSE, weekday: 8 }] },
-      { semester_start: '2026-09-07', courses: [{ ...COURSE, block: 0 }] },
+      { semester_start: '2026-09-07', courses: [{ ...COURSE, start: 0 }] },
+      { semester_start: '2026-09-07', courses: [{ ...COURSE, start: 4, end: 2 }] }, // end < start
       { semester_start: '2026-09-07', courses: [{ ...COURSE, weeks: [] }] },
       { semester_start: '2026-09-07', courses: [{ ...COURSE, name: '' }] },
     ];

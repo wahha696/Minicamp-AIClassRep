@@ -161,11 +161,14 @@ describe('db 建表', () => {
     expect(g).toMatchObject({ name: '高数(2)班', course_name: null });
 
     // 新表建出来了 + schema_version 写入（D3）
-    for (const t of ['todos', 'level_feedback', 'level_rules', 'courses', 'kv', 'message_seen']) {
+    for (const t of ['todos', 'level_feedback', 'level_rules', 'courses', 'kv', 'message_seen', 'group_sync']) {
       expect(tableNames()).toContain(t);
     }
+    const courseCols = (db.prepare('PRAGMA table_info(courses)').all() as { name: string }[]).map((c) => c.name);
+    expect(courseCols).toContain('start_section');
+    expect(courseCols).toContain('end_section');
     const kv = db.prepare("SELECT value FROM kv WHERE key = 'schema_version'").get() as { value: string };
-    expect(kv.value).toBe('2');
+    expect(kv.value).toBe('3');
   });
 
   it('文件库的 journal_mode 是 WAL', () => {

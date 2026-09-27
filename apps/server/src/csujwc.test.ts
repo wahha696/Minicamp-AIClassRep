@@ -128,33 +128,33 @@ describe('parseKbtable', () => {
   });
 });
 
-describe('toCourseDTOs(节次对齐 5 块 + 合并)', () => {
-  it('1-2 节→块1,5-6 节→块3;周次收敛到 1~30', () => {
+describe('toCourseDTOs(节次范围原样保留 + 合并)', () => {
+  it('1-2 节→{1,2},5-6 节→{5,6};周次收敛到 1~30', () => {
     const raw: RawCourse[] = [
       { name: '高等数学', teacher: '张三', location: 'A-301', dayOfWeek: 1, startSection: 1, endSection: 2, weeks: [1, 2, 3] },
       { name: '大学物理', teacher: '王五', location: 'B-102', dayOfWeek: 2, startSection: 5, endSection: 6, weeks: [1, 2] },
     ];
     const dtos = toCourseDTOs(raw);
     expect(dtos).toHaveLength(2);
-    expect(dtos[0]).toMatchObject({ weekday: 1, block: 1, weeks: [1, 2, 3] });
-    expect(dtos[1]).toMatchObject({ weekday: 2, block: 3 });
+    expect(dtos[0]).toMatchObject({ weekday: 1, start: 1, end: 2, weeks: [1, 2, 3] });
+    expect(dtos[1]).toMatchObject({ weekday: 2, start: 5, end: 6 });
   });
 
-  it('跨作息块给 warning;周次收敛到 1~30;同名同格合并周次', () => {
+  it('超范围节次给 warning;跨块连排原样保留;同名同格合并周次', () => {
     const raw: RawCourse[] = [
       { name: '体育', teacher: '李四', location: '体育馆', dayOfWeek: 5, startSection: 2, endSection: 3, weeks: [1, 2] },
-      { name: '选修', teacher: '', location: '', dayOfWeek: 3, startSection: 1, endSection: 11, weeks: [1] },
-      { name: '高等数学', teacher: '张三', location: 'A-301', dayOfWeek: 1, startSection: 1, endSection: 2, weeks: [1, 3, 5] },
-      { name: '高等数学', teacher: '张三', location: 'A-301', dayOfWeek: 1, startSection: 1, endSection: 2, weeks: [7, 99] },
+      { name: '选修', teacher: '', location: '', dayOfWeek: 3, startSection: 1, endSection: 13, weeks: [1] },
+      { name: '高等数学', teacher: '张三', location: 'A-301', dayOfWeek: 1, startSection: 1, endSection: 4, weeks: [1, 3, 5] },
+      { name: '高等数学', teacher: '张三', location: 'A-301', dayOfWeek: 1, startSection: 1, endSection: 4, weeks: [7, 99] },
     ];
     const warnings: string[] = [];
     const dtos = toCourseDTOs(raw, warnings);
-    // 跨块 + 超范围 + 正常三门 → 两门(同名合并)
-    expect(warnings.some((w) => w.includes('跨作息块'))).toBe(true);
-    expect(warnings.some((w) => w.includes('不在作息表内'))).toBe(true);
-    expect(dtos).toHaveLength(2);
+    // 13 节超范围 → warning；1–4 跨块连排原样保留（不再有跨块警告）
+    expect(warnings.some((w) => w.includes('超出支持范围'))).toBe(true);
+    expect(dtos).toHaveLength(2); // 选修超范围被丢弃；两门高数合并
     const math = dtos.find((d) => d.name === '高等数学')!;
     expect(math.weeks).toEqual([1, 3, 5, 7]); // 99 被收敛掉,两周次合并
-    expect(dtos.find((d) => d.name === '高等数学')!.block).toBe(1);
+    expect(math).toMatchObject({ start: 1, end: 4 });
+    expect(dtos.find((d) => d.name === '体育')).toMatchObject({ start: 2, end: 3 }); // 跨块边界课保留原范围
   });
 });

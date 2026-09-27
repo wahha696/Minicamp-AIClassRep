@@ -21,6 +21,7 @@ export const MSG_NO_NAPCAT = '采集端组件缺失。点「一键下载 NapCat 
 export const MSG_CRASH = '采集端异常。常见原因是 QQ 版本过旧，请更新到最新版 QQ 后重试';
 export const MSG_UNSUPPORTED = '当前系统不支持采集端（开发模式，可用演示回放）';
 export const MSG_NAPCAT_MISSING = '采集组件缺失（napcat 文件夹不完整），请重新克隆仓库或下载完整发布包';
+export const MSG_ACCOUNT_DB = '账号数据库挂载失败（磁盘空间或权限问题）。消息暂不写入避免写错账号，请点「重新连接」或重启应用重试';
 
 let since = Date.now();
 let lastState: ConnectState | null = null;
@@ -28,7 +29,7 @@ let lastState: ConnectState | null = null;
 /** state.ts 判定所需的全部输入（抽出便于测试） */
 export interface ConnectInputs {
   manager: ManagerFacts;
-  onebot: { wsConnected: boolean; everOnline: boolean; selfId: string | null; kicked: boolean };
+  onebot: { wsConnected: boolean; everOnline: boolean; selfId: string | null; kicked: boolean; accountError?: string | null };
   qrcodeExists: boolean;
   uin: string | undefined;
   /** DeepSeek Key 是否已配置（网页或 .env） */
@@ -55,6 +56,10 @@ export function deriveConnectStatus(input: ConnectInputs): { state: ConnectState
   if (input.externalOnebot) {
     // 外部 OneBot（Docker）：QQ 与 NapCat 都不在本机，只根据 WS 连接给出状态
     if (o.kicked) return { state: 'kicked', first_run: firstRun, uin };
+    if (o.wsConnected && o.selfId !== null && o.accountError) {
+      // 在线但账号库没挂上：显示错误比假在线重要（消息在被丢弃）
+      return { state: 'error', message: MSG_ACCOUNT_DB, first_run: firstRun, uin };
+    }
     if (o.wsConnected && o.selfId !== null) return { state: 'online', first_run: firstRun, uin };
     if (o.everOnline && !o.wsConnected) return { state: 'reconnecting', first_run: firstRun, uin };
     return { state: 'starting', first_run: firstRun, uin };
@@ -86,6 +91,10 @@ export function deriveConnectStatus(input: ConnectInputs): { state: ConnectState
   if (o.kicked) {
     // 收到 bot_offline 且进程树已被结束；等用户点「重新连接」，不自动重启
     return { state: 'kicked', first_run: firstRun, uin };
+  }
+  if (o.wsConnected && o.selfId !== null && o.accountError) {
+    // 在线但账号库没挂上：显示错误比假在线重要（消息在被丢弃，避免写错账号）
+    return { state: 'error', message: MSG_ACCOUNT_DB, first_run: firstRun, uin };
   }
   if (o.wsConnected && o.selfId !== null) {
     return { state: 'online', first_run: firstRun, uin };

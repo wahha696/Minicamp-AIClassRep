@@ -1,7 +1,7 @@
 // 修复计划第一节验收：lifecycle 换号 —— self_id 变了就切到对应账号库，同号重发是空操作。
 // 换号后到的新消息进新库（D6：新群默认禁用，先登记不存消息）。
 // 切库是异步的（先静默流水线再换库文件），测试里用 vi.waitFor 等它完成。
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it, vi } from 'vitest';
@@ -20,7 +20,7 @@ vi.mock('./manager.js', async (importOriginal) => {
 
 import { currentAccount, setAccountsDirForTest, switchAccount } from '../accounts.js';
 import { db, dbGeneration } from '../db/index.js';
-import { handleOnebotMessage } from './onebot.js';
+import { getOnebotFacts, handleOnebotMessage } from './onebot.js';
 
 const dirs: string[] = [];
 function tempDir(): string {
@@ -95,5 +95,32 @@ describe('lifecycle 换号（修复计划第一节 §4）', () => {
 
     await switchAccount('11111'); // 切回旧号：看不到 22222 刚登记的群
     expect(count('groups')).toBe(0);
+  });
+
+  it('切库失败 → 断流不写错库、facts 暴露错误；修复后 lifecycle 重试恢复', async () => {
+    const d = tempDir();
+    setAccountsDirForTest(join(d, 'accounts'), join(d, 'fallback.db'));
+    await switchAccount('11111'); // 当前挂载 11111 的库
+
+    // 让 22222 的库目录建不出来：accounts/22222 是个文件 → openDb 的 mkdirSync 抛 ENOTDIR
+    const blocker = join(d, 'accounts', '22222');
+    writeFileSync(blocker, 'not a directory');
+
+    handleOnebotMessage(lifecycle('22222'));
+    await vi.waitFor(() => expect(getOnebotFacts().accountError).not.toBeNull());
+
+    // 断流：新消息不写进 11111 的库（连群登记都没有），getOnebotFacts 让状态机能报 error
+    handleOnebotMessage(groupMsg('1'));
+    expect(count('groups')).toBe(0);
+    expect(count('messages')).toBe(0);
+
+    // 修复目录后重连（lifecycle 重发）→ 切库重试成功、断流解除
+    rmSync(blocker);
+    handleOnebotMessage(lifecycle('22222'));
+    await vi.waitFor(() => expect(currentAccount()).toBe('22222'));
+    expect(getOnebotFacts().accountError).toBeNull();
+    handleOnebotMessage(groupMsg('2'));
+    const g = db.prepare('SELECT enabled FROM groups WHERE group_id = ?').get('9001') as { enabled: number };
+    expect(g.enabled).toBe(0); // D6：新群登记但不收消息
   });
 });

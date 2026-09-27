@@ -5,6 +5,7 @@
 //       删 pending 与 staging → 退出 0，启动.bat 接着正常启动（此时已是新版文件）。
 // 任何失败：保留 pending.json 与 staging（下次启动重试），退出码非 0（启动.bat 继续用旧版跑）。
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,6 +30,16 @@ const zipPath = pending.zip;
 if (!zipPath || !existsSync(zipPath)) {
   console.error(`[update] ❌ 更新包不存在（${zipPath ?? '未指定'}）。删除 pending.json 可跳过本次更新。`);
   process.exit(1);
+}
+
+// ---------- 1.5 SHA-256 复核（S05）：pending.json 里的摘要来自发版清单，落盘后必须仍一致 ----------
+if (typeof pending.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(pending.sha256)) {
+  // 缺校验信息的 pending 不应用（老版本 updater 写的不带 sha256；宁可不更不盲更）
+  quarantine(`缺少 sha256 校验信息`);
+}
+const got = createHash('sha256').update(readFileSync(zipPath)).digest('hex');
+if (got !== pending.sha256.toLowerCase()) {
+  quarantine(`SHA-256 校验失败（文件可能被篡改或下载损坏）`);
 }
 
 // ---------- 2. 解压 ----------
@@ -66,6 +77,26 @@ rmSync(STAGING, { recursive: true, force: true });
 console.log(`[update] ✅ 已更新到 v${pending.to ?? '?'}，继续启动...`);
 
 // ===== helpers =====
+
+/**
+ * 校验不过的更新包不应用、也不让 pending.json 留在原地反复重试：
+ * pending → pending.failed.json、zip → .zip.bad（留档可查，下次发版会覆盖）。
+ */
+function quarantine(reason) {
+  console.error(`[update] ❌ 更新包校验未通过：${reason}。已隔离，本次用旧版继续启动。`);
+  try {
+    renameSync(pendingPath, `${pendingPath}.failed.json`);
+  } catch {
+    rmSync(pendingPath, { force: true });
+  }
+  try {
+    renameSync(zipPath, `${zipPath}.bad`);
+  } catch {
+    // 改名失败就删掉，绝不留着被下次读到
+    rmSync(zipPath, { force: true });
+  }
+  process.exit(1);
+}
 
 /** runtime/node.exe 热替换：Windows 允许给正在运行的 exe 改名，但不允许覆盖/删除。 */
 function swapRuntime(srcExe, targetExe) {

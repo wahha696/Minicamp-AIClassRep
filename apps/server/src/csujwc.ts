@@ -604,7 +604,7 @@ export function parseKbtable(html: string): { raw: RawCourse[]; warnings: string
     return {
       raw: structured.courses.map(c => ({
         name: c.name, teacher: c.teacher, location: c.location, dayOfWeek: c.weekday,
-        startSection: c.block * 2 - 1, endSection: c.block * 2, weeks: c.weeks,
+        startSection: c.start, endSection: c.end, weeks: c.weeks,
       })),
       warnings: structured.warnings,
     };
@@ -682,7 +682,7 @@ export function parseKbtable(html: string): { raw: RawCourse[]; warnings: string
   return { raw, warnings };
 }
 
-/** 强智解析结果 → CourseDTO:节次对齐到 5 个作息块,周次收敛到 1~30,重复课次合并 */
+/** 强智解析结果 → CourseDTO:节次范围(1~12)原样保留,周次收敛到 1~30,重复课次合并 */
 export function toCourseDTOs(
   raw: RawCourse[],
   warnings: string[] = [],
@@ -690,20 +690,16 @@ export function toCourseDTOs(
   const merged = new Map<string, CourseDTO>();
   for (const c of raw) {
     const dayText = `周${'一二三四五六日'[c.dayOfWeek - 1] ?? c.dayOfWeek}`;
-    if (c.startSection < 1 || c.endSection < c.startSection || c.endSection > 10) {
-      warnings.push(`${dayText}「${c.name}」的节次(第${c.startSection}-${c.endSection}节)不在作息表内,已忽略`);
+    if (c.startSection < 1 || c.endSection < c.startSection || c.endSection > 12) {
+      warnings.push(`${dayText}「${c.name}」的节次(第${c.startSection}-${c.endSection}节)超出支持范围(1–12),已忽略`);
       continue;
-    }
-    const block = Math.min(5, Math.max(1, Math.ceil(c.startSection / 2))) as CourseDTO['block'];
-    if (Math.ceil(c.endSection / 2) !== Math.ceil(c.startSection / 2)) {
-      warnings.push(`${dayText}「${c.name}」第${c.startSection}-${c.endSection}节跨作息块,按第 ${block} 块(前半)处理`);
     }
     const weeks = [...new Set(c.weeks.filter((w) => w >= 1 && w <= 30))].sort((a, b) => a - b);
     if (!weeks.length) {
       warnings.push(`「${c.name}」(${dayText})没有有效周次,已忽略`);
       continue;
     }
-    const key = `${c.name}|${c.teacher}|${c.location}|${c.dayOfWeek}|${block}`;
+    const key = `${c.name}|${c.teacher}|${c.location}|${c.dayOfWeek}|${c.startSection}|${c.endSection}`;
     const prev = merged.get(key);
     if (prev) {
       const set = new Set([...prev.weeks, ...weeks]);
@@ -714,7 +710,8 @@ export function toCourseDTOs(
         teacher: c.teacher.slice(0, 100),
         location: c.location.slice(0, 60),
         weekday: c.dayOfWeek as CourseDTO['weekday'],
-        block,
+        start: c.startSection,
+        end: c.endSection,
         weeks,
       });
     }

@@ -634,7 +634,7 @@ describe('GET /api/events/:id/export.ics', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('text/calendar; charset=utf-8');
     const text = await res.text();
-    expect(text).toContain('UID:classrep-' + id + '@local');
+    expect(text).toContain('UID:classrep-local-' + id + '@classrep');
     expect(text).toContain('SUMMARY:[考试]要导出的');
     expect(text).not.toContain('不要的');
     expect(text.match(/BEGIN:VEVENT/g)).toHaveLength(1);

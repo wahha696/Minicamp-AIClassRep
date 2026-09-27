@@ -132,12 +132,15 @@ function buildDescription(event: EventDTO): string | null {
   return parts.length === 0 ? null : parts.join('\n');
 }
 
-function writeEvent(event: EventDTO, now: number): string[] {
+function writeEvent(event: EventDTO, now: number, uidNs: string): string[] {
   const lines: string[] = [];
   const typeCn = TYPE_CN[event.type] ?? TYPE_CN.other;
 
   lines.push('BEGIN:VEVENT');
-  lines.push(`UID:classrep-${event.id}@local`);
+  // R02：UID 带账号命名空间——同一事件在换账号导出的日历里是不同的 UID，
+  // 避免两个账号的 .ics 混进同一日历时互相覆盖；SEQUENCE 跟着 version 走，改期能被日历客户端识别为更新。
+  lines.push(`UID:classrep-${uidNs}-${event.id}@classrep`);
+  lines.push(`SEQUENCE:${Math.max(0, event.version - 1)}`);
   lines.push(`DTSTAMP:${formatUtc(now)}`);
 
   if (event.start_at !== null) {
@@ -170,7 +173,7 @@ function writeEvent(event: EventDTO, now: number): string[] {
  * 生成 .ics 文本。没有可导出的事件时也返回合法的空日历（只含 VTIMEZONE）。
  * `now` 只影响 DTSTAMP，测试里传固定值。
  */
-export function buildIcs(events: EventDTO[], now: number = Date.now()): string {
+export function buildIcs(events: EventDTO[], now: number = Date.now(), uidNs = 'local'): string {
   const exportable = events
     .filter((e) => e.start_at !== null || e.deadline_at !== null)
     .sort((a, b) => {
@@ -181,7 +184,7 @@ export function buildIcs(events: EventDTO[], now: number = Date.now()): string {
     });
   const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', `PRODID:${PRODID}`, ...vtimezoneLines()];
   for (const event of exportable) {
-    lines.push(...writeEvent(event, now));
+    lines.push(...writeEvent(event, now, uidNs));
   }
   lines.push('END:VCALENDAR');
 

@@ -151,6 +151,81 @@ describe('cancel', () => {
     applyEvents(G, [ev(again, { action: 'cancel', update_of: id, type: 'activity' })], [again]);
     expect(events()[0]).toMatchObject({ version: 2 });
   });
+
+  it('A03：低置信度取消不直接取消 → 转 pending_confirm，来源照留', () => {
+    const id = create({ type: 'activity', title: '迎新茶话会' });
+    const m = msg('好像取消了？');
+    applyEvents(G, [ev(m, { action: 'cancel', update_of: id, title: '', type: 'activity', confidence: 0.4 })], [m]);
+    expect(events()[0]).toMatchObject({ status: 'pending_confirm', version: 2 });
+    expect(JSON.parse(history(id)[0]!.changed_fields as string)).toEqual({
+      status: { from: 'active', to: 'pending_confirm' },
+    });
+    expect(sources(id)).toHaveLength(2); // 原消息 + 取消消息都留证
+  });
+
+  it('A03：pending_confirm 上再来低置信度取消 → 维持待确认；高置信度取消 → 照取消', () => {
+    const id = create({ type: 'activity', title: '迎新茶话会', confidence: 0.4 });
+    expect(events()[0]).toMatchObject({ status: 'pending_confirm' });
+    const m1 = msg('取消了吧');
+    applyEvents(G, [ev(m1, { action: 'cancel', update_of: id, type: 'activity', confidence: 0.3 })], [m1]);
+    expect(events()[0]).toMatchObject({ status: 'pending_confirm', version: 1 }); // 没写重复 history
+    const m2 = msg('确认了，取消');
+    applyEvents(G, [ev(m2, { action: 'cancel', update_of: id, type: 'activity', confidence: 0.9 })], [m2]);
+    expect(events()[0]).toMatchObject({ status: 'cancelled', version: 2 });
+  });
+});
+
+describe('A03：低置信度关键变更 → pending_confirm 门', () => {
+  it('低置信度改期保留原时间，事件转待确认，改动留在来源快照', () => {
+    const id = create();
+    const m = msg('可能改到周五了？');
+    applyEvents(
+      G,
+      [ev(m, { action: 'update', update_of: id, title: '', start_at: T0 + 3 * DAY, confidence: 0.4 })],
+      [m],
+    );
+    const row = events()[0]!;
+    expect(row).toMatchObject({ status: 'pending_confirm', start_at: T0, version: 2 });
+    // 拟改动没写进字段，但这条消息进了来源——界面上能核对
+    expect(sources(id).map((s) => s.text)).toContain('可能改到周五了？');
+    expect(JSON.parse(history(id)[0]!.changed_fields as string)).toEqual({
+      status: { from: 'active', to: 'pending_confirm' },
+    });
+  });
+
+  it('低置信度但只动非关键字段（description/action_required）→ 正常改，不挂起', () => {
+    const id = create();
+    const m = msg('补充：带学生证');
+    applyEvents(
+      G,
+      [ev(m, { action: 'update', update_of: id, title: '', description: '补充：带学生证', action_required: '带学生证', confidence: 0.4 })],
+      [m],
+    );
+    expect(events()[0]).toMatchObject({ status: 'active', action_required: '带学生证', version: 2 });
+  });
+
+  it('已经是 pending_confirm 的低置信度关键变更 → 只追加来源', () => {
+    const id = create({ confidence: 0.4 });
+    const m = msg('好像又变了');
+    applyEvents(
+      G,
+      [ev(m, { action: 'update', update_of: id, title: '', start_at: T0 + DAY, confidence: 0.3 })],
+      [m],
+    );
+    expect(events()[0]).toMatchObject({ status: 'pending_confirm', start_at: T0, version: 1 });
+    expect(sources(id)).toHaveLength(2);
+  });
+
+  it('高置信度改期照常覆盖（不进门）', () => {
+    const id = create();
+    const m = msg('改到周五了');
+    applyEvents(
+      G,
+      [ev(m, { action: 'update', update_of: id, title: '', start_at: T0 + 3 * DAY, confidence: 0.9 })],
+      [m],
+    );
+    expect(events()[0]).toMatchObject({ status: 'active', start_at: T0 + 3 * DAY, version: 2 });
+  });
 });
 
 describe('create', () => {

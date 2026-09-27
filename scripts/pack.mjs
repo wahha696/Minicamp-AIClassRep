@@ -12,6 +12,7 @@
 // 不打 .env.release：API Key 由用户首次启动时在向导页填（修复计划 3.2），密钥绝不进发布包。
 // 真机验收：没装过 Node 的 Windows 电脑、解压到含中文+空格路径、双击 启动.bat 走完修复计划的目标体验。
 import { spawnSync, execSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
@@ -63,11 +64,11 @@ mkdirSync(cacheDir, { recursive: true });
 cpSync(join(REPO, '启动.bat'), join(outDir, '启动.bat'));
 
 // ---------- 4. runtime/node.exe（lib/fetch-node.mjs：查最新 LTS + 缓存，与 bootstrap 共用） ----------
-const { version } = await ensureNodeExe(join(outDir, 'runtime', 'node.exe'), {
+const { version: nodeVersion } = await ensureNodeExe(join(outDir, 'runtime', 'node.exe'), {
   cacheDir,
   log: (m) => log(m),
 });
-log(`runtime/node.exe = ${version}`);
+log(`runtime/node.exe = ${nodeVersion}`);
 
 // ---------- 5. napcat/（排除规则与 .gitignore 一致：账号数据、运行时生成文件、非 win32-x64 原生库） ----------
 const napcatSrc = join(REPO, 'napcat');
@@ -107,8 +108,13 @@ if (existsSync(mockSrc)) {
 }
 
 // ---------- 6.5 自更新器 + 版本信息（update.mjs 每次启动前由 启动.bat 调用） ----------
+// --version <v> 或 PACK_VERSION：CI 里 tag 必须在 zip 之前就写进 version.json（成熟度评估 D04）
 cpSync(join(REPO, 'scripts', 'update.mjs'), join(outDir, 'app', 'update.mjs'));
 const pkg = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8'));
+const argVersionIdx = process.argv.indexOf('--version');
+const packVersion = (argVersionIdx >= 0 ? process.argv[argVersionIdx + 1] : process.env.PACK_VERSION ?? '')
+  .replace(/^v/i, '');
+const version = packVersion || pkg.version || '0.0.0';
 let repo = 'wahha696/Minicamp-AIClassRep';
 try {
   const url = execSync('git remote get-url origin', { cwd: REPO, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
@@ -122,10 +128,10 @@ try {
 }
 writeFileSync(
   join(outDir, 'app', 'version.json'),
-  `${JSON.stringify({ version: pkg.version ?? '0.0.0', repo, packed_at: new Date().toISOString() }, null, 2)}\n`,
+  `${JSON.stringify({ version, repo, packed_at: new Date().toISOString() }, null, 2)}\n`,
   'utf8',
 );
-log(`app/version.json = v${pkg.version ?? '0.0.0'}（${repo}）`);
+log(`app/version.json = v${version}（${repo}）`);
 
 // ---------- 7. 压缩 release/ClassRep.zip ----------
 const zipPath = join(releaseDir, 'ClassRep.zip');
@@ -138,6 +144,17 @@ const tar = spawnSync('tar', ['-a', '-c', '-f', 'ClassRep.zip', 'ClassRep'], {
   cwd: releaseDir,
 });
 if (tar.status !== 0) fail('tar 压缩失败（需要 Windows 10 1803+ 或自行安装 bsdtar）');
+
+// ---------- 8. 发布清单（成熟度评估 S05）：自更新按它校验 SHA-256 + 大小，校验不过不更新 ----------
+const zipSize = statSync(zipPath).size;
+const zipSha256 = createHash('sha256').update(readFileSync(zipPath)).digest('hex');
+const manifestPath = join(releaseDir, 'ClassRep.manifest.json');
+writeFileSync(
+  manifestPath,
+  `${JSON.stringify({ version, zip: 'ClassRep.zip', sha256: zipSha256, size: zipSize }, null, 2)}\n`,
+  'utf8',
+);
+log(`发布清单 ${manifestPath}（sha256=${zipSha256.slice(0, 12)}…）`);
 
 log('打包完成 ✅');
 log(`  ${outDir}（${mb(dirSize(outDir))}）`);

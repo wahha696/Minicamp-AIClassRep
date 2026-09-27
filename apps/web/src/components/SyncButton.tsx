@@ -85,8 +85,11 @@ export default function SyncButton() {
       // 补拉前的 pending 作基线：群里本来就在排队的消息不算进「整理中」
       const base = await getHealth().then((h) => h.pending, () => 0);
       const res = await syncNow(days);
+      if ((res.failures ?? 0) > 0) {
+        toast(`有 ${res.failures} 个群可能没补全，建议稍后再同步一次`);
+      }
       if (res.messages === 0) {
-        toast('没有漏掉的消息');
+        if ((res.failures ?? 0) === 0) toast('没有漏掉的消息');
         return;
       }
       toast(`补回 ${res.messages} 条消息，正在整理…`);

@@ -53,9 +53,14 @@ const msgCount = () => (db.prepare('SELECT COUNT(*) AS n FROM messages').get() a
 beforeAll(() => openDb(':memory:'));
 afterAll(() => db.close());
 beforeEach(() => {
-  db.exec('DELETE FROM messages; DELETE FROM groups; DELETE FROM message_seen;');
+  db.exec('DELETE FROM messages; DELETE FROM groups; DELETE FROM message_seen; DELETE FROM group_sync;');
   callActionMock.mockReset();
 });
+
+const syncRow = (id = '1001') =>
+  db.prepare('SELECT * FROM group_sync WHERE group_id = ?').get(id) as
+    | { last_sync_at: number; oldest_at: number | null; complete: number; reason: string }
+    | undefined;
 
 describe('syncHistory 翻页', () => {
   it('3 页：首页不带 message_seq，之后用上一页最早一条的 message_id', async () => {
@@ -66,7 +71,7 @@ describe('syncHistory 翻页', () => {
       .mockResolvedValueOnce({ messages: page([101, NOW - 3 * DAY], [100, NOW - 4 * DAY]) })
       .mockResolvedValueOnce({ messages: [] });
     const res = await syncHistory(7);
-    expect(res).toEqual({ groups: 1, messages: 4 });
+    expect(res).toEqual({ groups: 1, messages: 4, failures: 0 });
     expect(msgCount()).toBe(4);
 
     const calls = callActionMock.mock.calls as unknown as [string, Record<string, unknown>][];
@@ -162,5 +167,56 @@ describe('syncHistory 翻页', () => {
     expect(r1.messages).toBe(1);
     expect(r2.messages).toBe(3); // 7 天那次的 1 条 + 30 天补出来的 8 天前、20 天前 2 条
     expect(msgCount()).toBe(3);
+  });
+});
+
+describe('group_sync 落账（R03：补到哪/补没补全可报告）', () => {
+  it('补到窗口尽头 → complete=1 reason=ok，oldest_at 是拉到的最早一条', async () => {
+    seedGroup();
+    callActionMock
+      .mockResolvedValueOnce({ messages: page([102, NOW - 1 * DAY], [101, NOW - 20 * DAY]) });
+    const res = await syncHistory(7);
+    expect(res.failures).toBe(0);
+    const row = syncRow();
+    expect(row).toBeDefined();
+    expect(row!.complete).toBe(1);
+    expect(row!.reason).toBe('ok');
+    expect(row!.oldest_at).toBe(NOW - 20 * DAY - (NOW - 20 * DAY) % 1000); // time 是秒级
+  });
+
+  it('翻页报错 → complete=0 reason=page_error，计入 failures', async () => {
+    seedGroup();
+    callActionMock.mockRejectedValueOnce(new Error('网络超时'));
+    const res = await syncHistory(7);
+    expect(res.failures).toBe(1);
+    const row = syncRow();
+    expect(row!.complete).toBe(0);
+    expect(row!.reason).toBe('page_error');
+  });
+
+  it('NapCat「消息不存在」= 翻到顶，算补全不是失败', async () => {
+    seedGroup();
+    callActionMock.mockRejectedValueOnce(new Error('消息 99 不存在'));
+    const res = await syncHistory(7);
+    expect(res.failures).toBe(0);
+    const row = syncRow();
+    expect(row!.complete).toBe(1);
+    expect(row!.reason).toBe('ok');
+  });
+
+  it('群级异常 → reason=error 且不影响其他群', async () => {
+    seedGroup();
+    db.prepare(
+      "INSERT INTO groups (group_id, name, enabled, adapter, created_at) VALUES ('2002', '群2002', 1, 'onebot', ?)",
+    ).run(Date.now());
+    callActionMock.mockImplementation((_a: string, params: Record<string, unknown>) =>
+      params.group_id === 1001
+        ? Promise.reject(new Error('boom'))
+        : Promise.resolve({ messages: [] }),
+    );
+    const res = await syncHistory(7);
+    expect(res.failures).toBe(1);
+    expect(syncRow()!.reason).toBe('page_error'); // 翻页里的错
+    expect(syncRow('2002')!.reason).toBe('ok'); // 空页 = 补全
   });
 });

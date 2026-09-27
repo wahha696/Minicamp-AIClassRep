@@ -21,7 +21,8 @@ const course = (over: Partial<CourseDTO> = {}): CourseDTO => ({
   teacher: '彭丽华(副教授)',
   location: 'B座312',
   weekday: 2, // 周二
-  block: 2, // 10:00–11:40
+  start: 3, // 3–4 节 10:00–11:40
+  end: 4,
   weeks: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
   ...over,
 });
@@ -40,7 +41,9 @@ describe('blockOf', () => {
     ['12:30', 2], // 午休 → 归上一块
     ['13:59', 2], // 第 3 块开始前一分钟
     ['17:50', 4], // 晚饭后 → 归上一块
-    ['21:00', 5], // 晚自习结束还归最后一块
+    ['20:50', 5], // 晚课课间 → 归 5 块
+    ['21:00', 6], // 11–12 节块
+    ['23:30', 6], // 晚自习结束还归最后一块
   ] as const)('%s → 块 %i', (hhmm, want) => {
     expect(blockOf(sh('2026-09-23', hhmm))).toBe(want);
   });
@@ -71,7 +74,7 @@ describe('存取', () => {
     let t = getTimetable();
     expect(t.semester_start).toBe('2026-09-07');
     expect(t.courses).toHaveLength(1);
-    expect(t.courses[0]).toMatchObject({ name: '概率论与数理统计A', weekday: 2, block: 2 });
+    expect(t.courses[0]).toMatchObject({ name: '概率论与数理统计A', weekday: 2, start: 3, end: 4 });
 
     saveTimetable({ semester_start: '2027-02-23', courses: [course({ name: '体育' })] });
     t = getTimetable();
@@ -84,8 +87,8 @@ describe('存取', () => {
 
   it('weeks 是坏 JSON 时给空数组不炸', () => {
     db.prepare(
-      'INSERT INTO courses (name, teacher, location, weekday, block, weeks) VALUES (?, ?, ?, ?, ?, ?)',
-    ).run('坏数据课', '', '', 1, 1, 'not-json');
+      'INSERT INTO courses (name, teacher, location, weekday, start_section, end_section, weeks) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ).run('坏数据课', '', '', 1, 1, 2, 'not-json');
     expect(getTimetable().courses[0]!.weeks).toEqual([]);
   });
 });
@@ -113,6 +116,20 @@ describe('occurrences', () => {
     expect(occurrences(sh('2026-09-07'), sh('2026-09-14'))).toHaveLength(1); // 第 1 周
     expect(occurrences(sh('2026-09-14'), sh('2026-09-21'))).toHaveLength(0); // 第 2 周
     expect(occurrences(sh('2026-09-21'), sh('2026-09-28'))).toHaveLength(1); // 第 3 周
+  });
+
+  it('跨块连排（1–4 节）与晚课（11–12 节）按节次范围展开', () => {
+    saveTimetable({
+      semester_start: '2026-09-07',
+      courses: [
+        course({ name: '上午连排', start: 1, end: 4 }),
+        course({ name: '晚课', start: 11, end: 12 }),
+      ],
+    });
+    const occ = occurrences(sh('2026-09-21'), sh('2026-09-23'));
+    expect(occ).toHaveLength(2);
+    expect(occ[0]).toMatchObject({ course: { name: '上午连排' }, start: sh('2026-09-22', '08:00'), end: sh('2026-09-22', '11:40') });
+    expect(occ[1]).toMatchObject({ course: { name: '晚课' }, start: sh('2026-09-22', '21:00'), end: sh('2026-09-22', '22:40') });
   });
 
   it('开学前（week ≤ 0）不产课次；没课表返回 []', () => {

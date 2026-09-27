@@ -8,14 +8,17 @@ import type { TimetableDTO } from '../types.js';
 
 const TZ = 8 * 3600_000;
 
-const courseSchema = z.object({
-  name: z.string().trim().min(1).max(60),
-  teacher: z.string().trim().max(100).default(''),
-  location: z.string().trim().max(60).default(''),
-  weekday: z.number().int().min(1).max(7),
-  block: z.number().int().min(1).max(5),
-  weeks: z.array(z.number().int().min(1).max(30)).min(1).max(30),
-});
+const courseSchema = z
+  .object({
+    name: z.string().trim().min(1).max(60),
+    teacher: z.string().trim().max(100).default(''),
+    location: z.string().trim().max(60).default(''),
+    weekday: z.number().int().min(1).max(7),
+    start: z.number().int().min(1).max(12),
+    end: z.number().int().min(1).max(12),
+    weeks: z.array(z.number().int().min(1).max(30)).min(1).max(30),
+  })
+  .refine((c) => c.end >= c.start, { message: '结束节次不能小于开始节次' });
 
 const timetableSchema = z.object({
   semester_start: z

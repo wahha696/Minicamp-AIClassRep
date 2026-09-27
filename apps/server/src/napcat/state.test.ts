@@ -64,6 +64,15 @@ describe('deriveConnectStatus（架构.md §4，自上而下先命中为准）',
     expect(r.uin).toBe('10001');
   });
 
+  it('4b. online 但账号库挂载失败 → error（S04：不能假在线静默丢消息）', () => {
+    const r = deriveConnectStatus(base({
+      onebot: { wsConnected: true, everOnline: true, selfId: '10001', kicked: false, accountError: 'SQLITE_CANTOPEN' },
+      uin: '10001',
+    }));
+    expect(r.state).toBe('error');
+    expect(r.message).toContain('账号数据库挂载失败');
+  });
+
   it('5. waiting_qr：进程在、WS 未连上、二维码已出现', () => {
     const r = deriveConnectStatus(base({ qrcodeExists: true }));
     expect(r.state).toBe('waiting_qr');

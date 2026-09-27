@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { env } from './env.js';
 import { DATA_DIR } from './paths.js';
+import { dpapiAvailable, protectString, unprotectString } from './secure-store.js';
 
 /** 目前只支持 DeepSeek；以后加别家在这里加一行 */
 export const LLM_PROVIDERS = {
@@ -15,6 +16,15 @@ interface Saved {
   provider?: LlmProvider;
   api_key?: string;
   typesafe_api_key?: string;
+}
+
+/** 磁盘上的 llm.json：Windows 下密钥以 *_dpapi（DPAPI CurrentUser）存放；明文字段仅作旧版/降级兼容 */
+interface SavedFile {
+  provider?: LlmProvider;
+  api_key?: string;
+  typesafe_api_key?: string;
+  api_key_dpapi?: string;
+  typesafe_api_key_dpapi?: string;
 }
 
 let dir = DATA_DIR;
@@ -33,26 +43,64 @@ function file(): string {
   return join(dir, 'llm.json');
 }
 
+/** 读取一个密钥字段：优先 DPAPI 密文（解不开=换用户/换机了，回落明文），再回落明文兼容字段 */
+function readKey(raw: SavedFile, encField: 'api_key_dpapi' | 'typesafe_api_key_dpapi', plainField: 'api_key' | 'typesafe_api_key'): string | undefined {
+  const enc = raw[encField];
+  if (typeof enc === 'string' && enc !== '') {
+    const plain = unprotectString(enc);
+    if (plain !== null && plain !== '') return plain;
+    // 解不开不直接用明文兜底字段——明文字段在已经是真明文时本来就该有值
+  }
+  const plain = raw[plainField];
+  return typeof plain === 'string' && plain !== '' ? plain : undefined;
+}
+
 function readSaved(): Saved | null {
   if (cache !== undefined) return cache;
   cache = null;
   try {
     if (existsSync(file())) {
-      const raw = JSON.parse(readFileSync(file(), 'utf8')) as Partial<Saved>;
+      const raw = JSON.parse(readFileSync(file(), 'utf8')) as Partial<SavedFile>;
       const out: Saved = {};
-      if (typeof raw.api_key === 'string' && raw.api_key !== '') {
+      const apiKey = readKey(raw, 'api_key_dpapi', 'api_key');
+      if (apiKey) {
         out.provider = raw.provider && raw.provider in LLM_PROVIDERS ? raw.provider : 'deepseek';
-        out.api_key = raw.api_key;
+        out.api_key = apiKey;
       }
-      if (typeof raw.typesafe_api_key === 'string' && raw.typesafe_api_key !== '') {
-        out.typesafe_api_key = raw.typesafe_api_key;
+      const jevKey = readKey(raw, 'typesafe_api_key_dpapi', 'typesafe_api_key');
+      if (jevKey) out.typesafe_api_key = jevKey;
+      if (out.api_key || out.typesafe_api_key) {
+        cache = out;
+        // S06：文件里还躺着明文密钥且 DPAPI 可用 → 原地升级成加密存储
+        if (dpapiAvailable() && (raw.api_key || raw.typesafe_api_key)) persist(out);
       }
-      if (out.api_key || out.typesafe_api_key) cache = out;
     }
   } catch {
     // 文件坏了按没配处理
   }
   return cache;
+}
+
+/** 写盘：DPAPI 可用就只写密文字段（明文绝不落盘），不可用退回明文（README 已声明） */
+function persist(s: Saved): void {
+  const out: SavedFile = { provider: s.provider };
+  if (dpapiAvailable()) {
+    if (s.api_key) {
+      const enc = protectString(s.api_key);
+      if (enc) out.api_key_dpapi = enc;
+      else out.api_key = s.api_key; // 加密失败退回明文，不让配置丢失
+    }
+    if (s.typesafe_api_key) {
+      const enc = protectString(s.typesafe_api_key);
+      if (enc) out.typesafe_api_key_dpapi = enc;
+      else out.typesafe_api_key = s.typesafe_api_key;
+    }
+  } else {
+    if (s.api_key) out.api_key = s.api_key;
+    if (s.typesafe_api_key) out.typesafe_api_key = s.typesafe_api_key;
+  }
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(file(), `${JSON.stringify(out, null, 2)}\n`, 'utf8');
 }
 
 export interface LlmConfig {
@@ -156,8 +204,7 @@ export function saveAiSettings(input: { deepseek_key?: string; jev_key?: string 
     if (input.jev_key === '') delete next.typesafe_api_key;
     else next.typesafe_api_key = input.jev_key;
   }
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(file(), `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+  persist(next);
   cache = next.api_key || next.typesafe_api_key ? next : null;
   version++;
 }
@@ -166,8 +213,7 @@ export function saveAiSettings(input: { deepseek_key?: string; jev_key?: string 
 export function saveLlmSettings(provider: LlmProvider, apiKey: string): void {
   const cur = readSaved() ?? {};
   const next: Saved = { ...cur, provider, api_key: apiKey };
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(file(), `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+  persist(next);
   cache = next;
   version++;
 }

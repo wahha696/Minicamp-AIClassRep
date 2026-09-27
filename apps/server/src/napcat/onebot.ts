@@ -81,6 +81,8 @@ export interface OnebotFacts {
   everOnline: boolean;
   selfId: string | null;
   kicked: boolean;
+  /** 切库失败信息（null = 账号库正常）。挂库失败时停止写消息，防止串库 */
+  accountError: string | null;
 }
 
 // ===== WS 连接循环 =====
@@ -223,6 +225,14 @@ export function handleOnebotMessage(text: string): void {
     if (mentionOf(obj.message, currentSelfId()) === 'other') return;
     const m = toMessage(obj);
     if (m === null) return;
+    if (accountDbError !== null) {
+      // 账号库挂载失败：写进去就是串到别的账号的库。宁可丢弃（下次 lifecycle 重试切库后历史补齐会兜回）
+      accountDbDropped++;
+      if (accountDbDropped === 1 || accountDbDropped % 100 === 0) {
+        console.warn(`[onebot] 账号库挂载失败，已丢弃 ${accountDbDropped} 条消息：${accountDbError}`);
+      }
+      return;
+    }
     if (isAccountSwitching()) {
       // 正在切账号库：先攒着，切完按序入库（onLifecycleOnline 里 flush）
       if (switchBuffer.length >= SWITCH_BUFFER_MAX) {
@@ -241,17 +251,29 @@ const SWITCH_BUFFER_MAX = 500;
 let switchBufferDropped = 0;
 const switchBuffer: Message[] = [];
 
+/**
+ * 账号库挂载失败状态（成熟度评估 S04 残留）：非 null 时所有群消息直接丢弃、
+ * 历史补齐不再跑——写下去就是串到别的账号库/兜底库。连接状态机会把「账号库挂载失败」
+ * 报给用户；下次 lifecycle（重连/重启）会重试 switchAccount。
+ */
+let accountDbError: string | null = null;
+let accountDbDropped = 0;
+
 /** lifecycle 后：切到该账号的库 → 攒下的消息按序入库 → 刷群名 + 历史补齐（FR-2）。 */
 async function onLifecycleOnline(uin: string): Promise<void> {
   try {
     await switchAccount(uin);
   } catch (e) {
-    // 切库失败（磁盘满等）不能挡住收消息：沿用当前库，缓冲的消息丢掉（历史补齐会兜回来）
-    console.warn('[onebot] 切换账号库失败，沿用当前库：', e);
+    // 切库失败（磁盘满/权限/文件锁）：绝不能沿用当前库继续写——那会把 A 号的消息写进 B 号。
+    // 断流 + 报错；缓冲丢弃，等切库重试成功后历史补齐兜回。
+    accountDbError = e instanceof Error ? e.message : String(e);
+    accountDbDropped = 0;
+    console.error('[onebot] 切换账号库失败，暂停写入直到重连重试：', e);
     switchBuffer.length = 0;
-    void afterOnline();
     return;
   }
+  accountDbError = null;
+  accountDbDropped = 0;
   if (switchBufferDropped > 0) {
     console.warn(`[onebot] 切库期间缓冲溢出，丢弃了 ${switchBufferDropped} 条早期消息（历史补齐会补回）`);
     switchBufferDropped = 0;
@@ -451,6 +473,7 @@ export function getOnebotFacts(): OnebotFacts {
     everOnline,
     selfId,
     kicked,
+    accountError: accountDbError,
   };
 }
 
@@ -489,6 +512,8 @@ export function resetAfterRestart(): void {
   groupNameCache.clear();
   backoffMs = BACKOFF_START_MS;
   stopped = false;
+  accountDbError = null; // 重连会重新走 lifecycle → switchAccount 重试
+  accountDbDropped = 0;
   connect();
 }
 

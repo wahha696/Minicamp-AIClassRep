@@ -56,7 +56,7 @@ export interface Api {
   listAccounts(): Promise<AccountsDTO>;
   deleteAccountData(uin: string): Promise<{ ok: true }>;
   /** days=往前补拉多少天（1/7/30），缺省 7 */
-  syncNow(days?: 1 | 7 | 30): Promise<{ groups: number; messages: number }>;
+  syncNow(days?: 1 | 7 | 30): Promise<{ groups: number; messages: number; failures?: number }>;
   getHealth(): Promise<HealthDTO>;
   getLlmSettings(): Promise<LlmSettingsDTO>;
   saveLlmSettings(provider: LlmProvider, apiKey: string): Promise<LlmSettingsDTO>;

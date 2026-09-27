@@ -110,7 +110,9 @@ export interface CourseDTO {
   teacher: string;
   location: string;
   weekday: 1 | 2 | 3 | 4 | 5 | 6 | 7; // 1=周一…7=周日
-  block: 1 | 2 | 3 | 4 | 5;
+  /** 节次范围：第 start–end 节连排（1–12），如 1–4 大节连上、11–12 晚课都原样保留 */
+  start: number;
+  end: number;
   weeks: number[];
 }
 

@@ -61,9 +61,32 @@ describe('ai-settings（修复计划 3.2）', () => {
     saveAiSettings({ deepseek_key: 'sk-1111111111' });
     saveAiSettings({ jev_key: 'ts-2222' });
     const raw = JSON.parse(readFileSync(join(dir, 'llm.json'), 'utf8')) as Record<string, unknown>;
-    expect(raw.api_key).toBe('sk-1111111111');
-    expect(raw.typesafe_api_key).toBe('ts-2222');
+    if (process.platform === 'win32' && raw.api_key === undefined) {
+      // Windows + DPAPI：密钥只以密文落盘，明文字段不出现（S06）
+      expect(typeof raw.api_key_dpapi).toBe('string');
+      expect(String(raw.api_key_dpapi)).not.toContain('sk-1111111111');
+      expect(raw.typesafe_api_key_dpapi).toBeTruthy();
+    } else {
+      expect(raw.api_key).toBe('sk-1111111111');
+      expect(raw.typesafe_api_key).toBe('ts-2222');
+    }
     expect(getLlmConfig().apiKey).toBe('sk-1111111111');
+    expect(getJevConfig().apiKey).toBe('ts-2222');
+  });
+
+  it('S06：旧版明文 llm.json 读取后被原地升级为 DPAPI 密文（仅 Windows）', () => {
+    const dir = tempDir();
+    setLlmSettingsDir(dir);
+    writeFileSync(join(dir, 'llm.json'), JSON.stringify({ provider: 'deepseek', api_key: 'sk-plain9999' }), 'utf8');
+    expect(getLlmConfig().apiKey).toBe('sk-plain9999'); // 明文照样读得出（兼容）
+    if (process.platform === 'win32') {
+      const raw = JSON.parse(readFileSync(join(dir, 'llm.json'), 'utf8')) as Record<string, unknown>;
+      if (raw.api_key_dpapi !== undefined) {
+        // DPAPI 可用 → 明文已从磁盘消失
+        expect(raw.api_key).toBeUndefined();
+        expect(getLlmConfig().apiKey).toBe('sk-plain9999');
+      }
+    }
   });
 
   it('坏掉的 llm.json 按「没存过网页 key」处理，不抛', () => {

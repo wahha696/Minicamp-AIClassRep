@@ -130,15 +130,24 @@ CREATE TABLE IF NOT EXISTS level_rules (
   feedback_ids TEXT NOT NULL,
   created_at   INTEGER NOT NULL
 );
--- 课表：weekday 1=周一…7=周日，block 1–5，weeks 是 JSON 数组如 [3,4,...,16]
+-- 课表：weekday 1=周一…7=周日，start/end 是节次范围（第几节，1–12），weeks 是 JSON 数组如 [3,4,...,16]
 CREATE TABLE IF NOT EXISTS courses (
-  id       INTEGER PRIMARY KEY AUTOINCREMENT,
-  name     TEXT NOT NULL,
-  teacher  TEXT NOT NULL DEFAULT '',
-  location TEXT NOT NULL DEFAULT '',
-  weekday  INTEGER NOT NULL,
-  block    INTEGER NOT NULL,
-  weeks    TEXT NOT NULL
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  name         TEXT NOT NULL,
+  teacher      TEXT NOT NULL DEFAULT '',
+  location     TEXT NOT NULL DEFAULT '',
+  weekday      INTEGER NOT NULL,
+  start_section INTEGER NOT NULL,
+  end_section   INTEGER NOT NULL,
+  weeks        TEXT NOT NULL
+);
+-- 每群历史补齐游标（R03）：补拉到哪、是否到顶、被页数上限截断没有，都留痕可展示
+CREATE TABLE IF NOT EXISTS group_sync (
+  group_id     TEXT PRIMARY KEY,
+  last_sync_at INTEGER NOT NULL,
+  oldest_at    INTEGER,
+  complete     INTEGER NOT NULL DEFAULT 0,
+  reason       TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS kv (
   key   TEXT PRIMARY KEY,
@@ -154,8 +163,8 @@ CREATE TABLE IF NOT EXISTS message_seen (
 );
 `;
 
-/** 当前 schema 版本（D3）：1 = 老库（单列 message_id 主键）；2 = (group_id, message_id) 复合主键 */
-const SCHEMA_VERSION = 2;
+/** 当前 schema 版本（D3）：1 = 老库；2 = (group_id, message_id) 复合主键；3 = courses 按节次范围存（start_section/end_section） */
+const SCHEMA_VERSION = 3;
 
 function schemaVersion(): number {
   try {
@@ -219,6 +228,40 @@ function migrateToV2(): void {
   }
 }
 
+/**
+ * v2 → v3：courses 从「两节一块 block(1–5)」改成「节次范围 start_section/end_section(1–12)」。
+ * 旧数据 block b 对应第 2b-1 ~ 2b 节；新库已是新列（无 block 列）则跳过。
+ */
+function migrateToV3(): void {
+  const cols = db.prepare('PRAGMA table_info(courses)').all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === 'block')) return;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    db.exec(`
+      CREATE TABLE courses_v3 (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        name          TEXT NOT NULL,
+        teacher       TEXT NOT NULL DEFAULT '',
+        location      TEXT NOT NULL DEFAULT '',
+        weekday       INTEGER NOT NULL,
+        start_section INTEGER NOT NULL,
+        end_section   INTEGER NOT NULL,
+        weeks         TEXT NOT NULL
+      );
+      INSERT INTO courses_v3 (id, name, teacher, location, weekday, start_section, end_section, weeks)
+        SELECT id, name, teacher, location, weekday,
+               MIN(MAX(block * 2 - 1, 1), 12), MIN(MAX(block * 2, 1), 12), weeks
+        FROM courses;
+      DROP TABLE courses;
+      ALTER TABLE courses_v3 RENAME TO courses;
+    `);
+    db.exec('COMMIT');
+  } catch (e) {
+    rollbackTx();
+    throw e;
+  }
+}
+
 /** 老库自动升级：补列 + 版本化迁移（D3）。在 db.exec(SCHEMA) 之后调用。 */
 function migrate(): void {
   ensureColumn('events', 'level', 'level INTEGER NOT NULL DEFAULT 2');
@@ -226,6 +269,7 @@ function migrate(): void {
   ensureColumn('groups', 'course_name', 'course_name TEXT');
   db.prepare("INSERT OR IGNORE INTO kv (key, value) VALUES ('memory_enabled', '1')").run();
   if (schemaVersion() < 2) migrateToV2();
+  if (schemaVersion() < 3) migrateToV3();
   db.prepare(
     "INSERT INTO kv (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
   ).run(String(SCHEMA_VERSION));
