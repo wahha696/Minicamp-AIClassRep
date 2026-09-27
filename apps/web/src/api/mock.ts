@@ -12,6 +12,7 @@ import type {
   CourseDTO,
   EventDetailDTO,
   EventDTO,
+  EventStatus,
   GroupDTO,
   HealthDTO,
   Level,
@@ -24,6 +25,7 @@ import type {
   TodayDTO,
   TodoDTO,
   TodosDTO,
+  TrashItemDTO,
 } from './types';
 
 const MIN = 60_000;
@@ -216,9 +218,28 @@ let events: MockEvent[] = [
     type: 'other',
     title: '周末班级聚餐',
     start_at: at(2, 18),
+    location: '二食堂三楼',
     status: 'cancelled',
     confidence: 0.8,
     level: 1,
+    version: 2,
+    updated_at: bootAt - 40 * MIN,
+    sources: [
+      {
+        message_id: 'demo-class-12',
+        sender_name: '班长',
+        text: '周末聚餐先取消了，等期中考完再约',
+        sent_at: bootAt - 40 * MIN,
+      },
+    ],
+    history: [
+      {
+        version: 2,
+        changed_fields: { status: { from: 'active', to: 'cancelled' } },
+        source_message_id: 'demo-class-12',
+        changed_at: bootAt - 40 * MIN,
+      },
+    ],
   }),
   // ===== 待办类事件（没有截止，不进 today/events/ics，出现在待办框里）
   makeEvent({
@@ -366,7 +387,19 @@ export const mockApi: Api = {
   patchEvent(id, patch) {
     const e = events.find((x) => x.id === id);
     if (!e) return fail('事件不存在', 404);
-    if (patch.status !== undefined) e.status = patch.status;
+    if (patch.status !== undefined && patch.status !== e.status) {
+      // 与后端一致：手动改状态也写一条 history（不升 version），回收站靠它认出「你取消的」
+      e.history = [
+        ...e.history,
+        {
+          version: e.version,
+          changed_fields: { status: { from: e.status, to: patch.status } },
+          source_message_id: null,
+          changed_at: Date.now(),
+        },
+      ];
+      e.status = patch.status;
+    }
     if (patch.level !== undefined) {
       if (patch.level === null) {
         e.level_locked = false;
@@ -599,6 +632,84 @@ export const mockApi: Api = {
     const body: MemoryDTO = { enabled: memory.enabled, rules: [], feedback_count: 0 };
     return delay(body);
   },
+
+  getTrash() {
+    return delay(trashItems());
+  },
+
+  restoreTrash(id) {
+    const item = trashItems().find((t) => t.id === id);
+    if (!item) return fail('这条已经不在回收站里了', 409);
+    const e = events.find((x) => x.id === item.event.id)!;
+    const now = Date.now();
+    if (item.kind === 'cancelled') {
+      const prev = item.changes['status']?.from;
+      const to: EventStatus = prev === 'pending_confirm' || prev === 'done' ? prev : 'active';
+      e.history = [...e.history, { version: e.version, changed_fields: { status: { from: 'cancelled', to } }, source_message_id: null, changed_at: now }];
+      e.status = to;
+    } else {
+      const changed: HistoryDTO['changed_fields'] = {};
+      const rec = e as unknown as Record<string, unknown>;
+      for (const [f, c] of Object.entries(item.changes)) {
+        changed[f] = { from: rec[f], to: c.from };
+        rec[f] = c.from;
+      }
+      e.history = [...e.history, { version: e.version, changed_fields: changed, source_message_id: null, changed_at: now }];
+    }
+    e.updated_at = now;
+    return delay(trashItems());
+  },
 };
+
+// ===== 回收站（与后端 routes/trash.ts 同一套规则）
+
+const TRASH_KEEP = 30 * DAY;
+const TRASH_VANISH = ['start_at', 'end_at', 'deadline_at', 'location', 'title'];
+const TRASH_RESTORABLE = ['title', 'description', 'start_at', 'end_at', 'deadline_at', 'location', 'action_required'];
+
+function trashItems(): TrashItemDTO[] {
+  const now = Date.now();
+  const out: TrashItemDTO[] = [];
+  for (const e of events) {
+    const sourceText = (mid: string | null) => e.sources.find((s) => s.message_id === mid)?.text ?? null;
+    if (e.status === 'cancelled') {
+      const h = [...e.history].reverse().find((x) => x.changed_fields['status']?.to === 'cancelled');
+      const at = h?.changed_at ?? e.updated_at;
+      if (at < now - TRASH_KEEP) continue;
+      out.push({
+        id: `cancel-${e.id}`,
+        kind: 'cancelled',
+        by: h?.source_message_id ? 'group' : 'manual',
+        event: toDTO(e),
+        changes: { status: { from: h?.changed_fields['status']?.from ?? 'active', to: 'cancelled' } },
+        source_text: sourceText(h?.source_message_id ?? null),
+        at,
+        expires_at: at + TRASH_KEEP,
+      });
+      continue;
+    }
+    const rec = e as unknown as Record<string, unknown>;
+    e.history.forEach((h, i) => {
+      if (h.source_message_id === null || h.changed_at < now - TRASH_KEEP) return;
+      const live: HistoryDTO['changed_fields'] = {};
+      for (const f of TRASH_RESTORABLE) {
+        const c = h.changed_fields[f];
+        if (c && (c.to ?? null) === rec[f] && (c.from ?? null) !== (c.to ?? null)) live[f] = c;
+      }
+      if (!TRASH_VANISH.some((f) => f in live)) return;
+      out.push({
+        id: `change-${e.id * 1000 + i}`,
+        kind: 'changed',
+        by: 'group',
+        event: toDTO(e),
+        changes: live,
+        source_text: sourceText(h.source_message_id),
+        at: h.changed_at,
+        expires_at: h.changed_at + TRASH_KEEP,
+      });
+    });
+  }
+  return out.sort((a, b) => b.at - a.at);
+}
 
 let mockLlm: LlmSettingsDTO = { provider: 'deepseek', configured: false, key_hint: '', source: 'none' };

@@ -132,6 +132,32 @@ describe('mock 模式', () => {
     expect((await c.clearMemory()).rules).toEqual([]);
   });
 
+  it('回收站：群里取消 + 改期旧版本；手动取消也进；恢复后回到日历', async () => {
+    const c = await loadClient(true);
+    const trash = await c.getTrash();
+    expect(trash.map((t) => [t.id, t.kind, t.by])).toEqual([
+      ['change-1000', 'changed', 'group'],
+      ['cancel-8', 'cancelled', 'group'],
+    ]);
+    expect(trash[1]!.source_text).toContain('取消');
+
+    await c.patchEvent(4, { status: 'cancelled' });
+    const withManual = await c.getTrash();
+    expect(withManual[0]).toMatchObject({ id: 'cancel-4', by: 'manual', source_text: null });
+
+    await c.restoreTrash('cancel-4');
+    await c.restoreTrash('cancel-8');
+    expect((await c.getEvents()).map((e) => e.id)).toEqual(expect.arrayContaining([4, 8]));
+
+    const before = (await c.getEvent(1)).start_at;
+    const after = await c.restoreTrash('change-1000');
+    expect(after).toEqual([]);
+    const e1 = await c.getEvent(1);
+    expect(e1.location).toBe('A301');
+    expect(e1.start_at).not.toBe(before);
+    await expect(c.restoreTrash('change-1000')).rejects.toMatchObject({ status: 409 });
+  });
+
   it('演示：剧本、回放、粘贴、清空', async () => {
     const c = await loadClient(true);
     const [s] = await c.getScenarios();
@@ -225,6 +251,8 @@ describe('真实模式（fetch 打桩）', () => {
     await c.setMemoryEnabled(true);
     await c.deleteMemoryRule(2);
     await c.clearMemory();
+    await c.getTrash();
+    await c.restoreTrash('change-12');
     expect(calls).toEqual([
       { method: 'GET', url: '/api/today' },
       { method: 'GET', url: '/api/events' },
@@ -260,6 +288,8 @@ describe('真实模式（fetch 打桩）', () => {
       { method: 'PUT', url: '/api/settings/memory', body: { enabled: true } },
       { method: 'DELETE', url: '/api/settings/memory/rules/2' },
       { method: 'DELETE', url: '/api/settings/memory' },
+      { method: 'GET', url: '/api/trash' },
+      { method: 'POST', url: '/api/trash/change-12/restore' },
     ]);
     expect(c.exportIcsUrl(1, 2)).toBe('/api/export.ics?from=1&to=2');
     expect(c.eventIcsUrl(5)).toBe('/api/events/5/export.ics');

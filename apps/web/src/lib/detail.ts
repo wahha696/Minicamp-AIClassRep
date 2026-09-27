@@ -78,14 +78,13 @@ export interface HistoryChange {
 export interface HistoryLine {
   version: number;
   when: string; // 「10/1 14:03」
-  manual: boolean; // 用户手动调级（不升 version，和同版本的流水线记录共用版本号）
+  manual: boolean; // 用户手动调整：调级 / 改状态 / 回收站恢复（不升 version，和同版本的流水线记录共用版本号）
   changes: HistoryChange[];
 }
 
-/** 手动调级写的 history：没有来源消息、只改了 level */
-function isManualLevel(h: HistoryDTO): boolean {
-  const fields = Object.keys(h.changed_fields);
-  return h.source_message_id === null && fields.length === 1 && fields[0] === 'level';
+/** 手动调整写的 history（调级、改状态、回收站恢复）都没有来源消息 */
+function isManual(h: HistoryDTO): boolean {
+  return h.source_message_id === null;
 }
 
 /** 「10/1 14:03」（上海时间） */
@@ -98,7 +97,7 @@ export function historyLines(history: HistoryDTO[], now = Date.now()): HistoryLi
   return history.map((h) => ({
     version: h.version,
     when: monthDayTime(h.changed_at),
-    manual: isManualLevel(h),
+    manual: isManual(h),
     changes: Object.entries(h.changed_fields).map(([field, c]) => ({
       field,
       label: FIELD_TEXT[field] ?? field,

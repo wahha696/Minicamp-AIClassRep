@@ -1,10 +1,12 @@
 // 设置页 /settings：「课表」导入（FR-13，原 /timetable 页）+「长期记忆」开关与 AI 学到的偏好规则（FR-12，逐条删 / 清空）。
 // 关闭记忆开关后规则不再进 AI 提示词，但手动调级仍会被记下。
 // 「待办」：勾选待办时是否弹确认（对应待办弹窗里的「下次不再提醒」，存在本机）。
+// 「回收站」：最近 30 天取消的事件、群里改期前的旧安排，逐条恢复（TrashSection）。
 import { useCallback, useState } from 'react';
 import { clearMemory, deleteMemoryRule, getMemory, setMemoryEnabled } from '../api/client';
 import ConfirmDialog from '../components/ConfirmDialog';
 import TimetableSection from '../components/TimetableSection';
+import TrashSection from '../components/TrashSection';
 import { useToast } from '../components/Toast';
 import { usePolling } from '../hooks/usePolling';
 import { toastError } from '../lib/errors';
@@ -213,6 +215,8 @@ export default function Settings() {
           </section>
         </>
       )}
+
+      <TrashSection />
 
       <ConfirmDialog
         open={confirmClear}
