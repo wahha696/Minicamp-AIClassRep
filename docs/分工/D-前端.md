@@ -69,6 +69,9 @@
 「预设」**右侧边栏**（FR-10.6，宽屏在列表右边、滚动时固定；手机上排在列表上面；`lib/groups.ts` 的 `presetChanges` 等）：「＋ 把当前选择存为预设」存下监听中的群号（localStorage `classrep.groupPresets`，同名覆盖）；点预设 = 作用于全部群，预设里的开、其他关（包括之后新出现的群）；当前状态正好是某预设时高亮 ✓；× 删除预设（toast 可撤销，不改群开关）。一键全开/全关、套用预设成功后 toast 带「撤销」，并显示「↶ 撤销刚才的操作」按钮，单独拨开关后消失。
 顶部模糊搜索框（FR-10.4，`lib/groups.ts` 的 `filterGroups`），没结果时显示「没有找到和「x」相关的群」。
 
+**设置页 `/settings`**（FR-12.4、FR-13.1）
+上面「课表」栏（`components/TimetableSection.tsx`，原 `/timetable` 页并入，旧地址自动跳到 `/settings`；导航不再单独有「课表」）：导入 xls/xlsx → 预览 → 填第一周周一 → 保存 / 重新导入 / 清空。下面「长期记忆」：开关 + 学到的偏好（逐条删 / 清空）。
+
 **D7. 演示控制台 `/demo`**（FR-11）
 - 剧本列表（`/api/demo/scenarios`），每个一个「回放」按钮，回放中显示 loading，完成后 toast「已注入 N 条消息」。
 - 回放过的剧本（`active: true`）按钮变为红色「取消」（`POST /api/demo/undo`），只删这个剧本的假数据（FR-11.5）。
