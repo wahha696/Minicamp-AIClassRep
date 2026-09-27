@@ -426,6 +426,14 @@ export function registerBusinessRoutes(app: Hono): void {
           now,
           id,
         );
+        // 手动改状态也记一条 history（不升 version，source_message_id 为 NULL，同手动调级）：
+        // 回收站靠它区分「自己取消」和「群消息取消」、知道取消前是什么状态
+        if (data.status !== row.status) {
+          db.prepare(
+            `INSERT INTO event_history (event_id, version, changed_fields, source_message_id, changed_at)
+             VALUES (?, ?, ?, NULL, ?)`,
+          ).run(id, row.version, JSON.stringify({ status: { from: row.status, to: data.status } }), now);
+        }
       }
       if (data.level !== undefined) {
         applyManualLevel(row, data.level, now);

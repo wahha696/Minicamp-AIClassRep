@@ -67,14 +67,16 @@ describe('变更记录', () => {
     ]);
   });
 
-  it('手动调级那条标成 manual（没有来源消息、只改 level）', () => {
+  it('没有来源消息的（手动调级 / 改状态 / 回收站恢复）标成 manual', () => {
     const lines = historyLines(
       [
         { version: 1, changed_fields: { level: { from: 2, to: 4 } }, source_message_id: null, changed_at: NOW },
         { version: 2, changed_fields: { level: { from: 2, to: 4 } }, source_message_id: 'm2', changed_at: NOW },
+        { version: 2, changed_fields: { status: { from: 'active', to: 'cancelled' } }, source_message_id: null, changed_at: NOW },
+        { version: 2, changed_fields: { location: { from: 'A203', to: 'A301' } }, source_message_id: null, changed_at: NOW },
       ],
       NOW,
     );
-    expect(lines.map((l) => l.manual)).toEqual([true, false]);
+    expect(lines.map((l) => l.manual)).toEqual([true, false, true, true]);
   });
 });

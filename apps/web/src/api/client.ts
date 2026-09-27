@@ -20,6 +20,7 @@ import type {
   TodayDTO,
   TodoDTO,
   TodosDTO,
+  TrashItemDTO,
 } from './types';
 
 export { ApiError };
@@ -59,6 +60,10 @@ export interface Api {
   setMemoryEnabled(enabled: boolean): Promise<MemoryDTO>;
   deleteMemoryRule(id: number): Promise<MemoryDTO>;
   clearMemory(): Promise<MemoryDTO>;
+  /** 回收站：最近 30 天取消的事件 + 群消息改期前的旧版本，最新的在前 */
+  getTrash(): Promise<TrashItemDTO[]>;
+  /** 恢复一项（取消 → 回到日历；改期 → 改回旧时间地点），返回最新的回收站列表 */
+  restoreTrash(id: string): Promise<TrashItemDTO[]>;
 }
 
 export const isMock = import.meta.env.VITE_MOCK === '1';
@@ -128,6 +133,8 @@ const realApi: Api = {
   setMemoryEnabled: (enabled) => request('PUT', '/api/settings/memory', { enabled }),
   deleteMemoryRule: (id) => request('DELETE', `/api/settings/memory/rules/${id}`),
   clearMemory: () => request('DELETE', '/api/settings/memory'),
+  getTrash: () => request('GET', '/api/trash'),
+  restoreTrash: (id) => request('POST', `/api/trash/${encodeURIComponent(id)}/restore`),
 };
 
 const api: Api = isMock ? mockApi : realApi;
@@ -164,6 +171,8 @@ export const {
   setMemoryEnabled,
   deleteMemoryRule,
   clearMemory,
+  getTrash,
+  restoreTrash,
 } = api;
 
 // ===== 直接给 <a href> / <img src> 用的地址（不经 fetch）

@@ -23,6 +23,7 @@ import { registerPetChatRoutes } from './routes/pet-chat.js';
 import { registerSettingsRoutes } from './routes/settings.js';
 import { registerTimetableRoutes } from './routes/timetable.js';
 import { registerTodoRoutes } from './routes/todos.js';
+import { registerTrashRoutes } from './routes/trash.js';
 import { registerPresence } from './presence.js';
 import { DATA_DIR, WEB_DIST } from './paths.js';
 import type { HealthDTO } from './types.js';
@@ -86,6 +87,7 @@ registerPetChatRoutes(app);
 registerTodoRoutes(app);
 registerTimetableRoutes(app);
 registerMemoryRoutes(app);
+registerTrashRoutes(app);
 
 // 后台模式（scripts/dev.mjs --background 设 AUTO_EXIT=1）：网页全关掉后自动退出
 const AUTO_EXIT = process.env.AUTO_EXIT === '1';
