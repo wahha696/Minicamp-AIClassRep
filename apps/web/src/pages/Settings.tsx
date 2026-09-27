@@ -1,8 +1,9 @@
-// 设置页 /settings（FR-12）：「长期记忆」开关 + AI 学到的偏好规则列表（逐条删 / 清空）。
-// 关闭开关后规则不再进 AI 提示词，但手动调级仍会被记下。
+// 设置页 /settings：「课表」导入（FR-13，原 /timetable 页）+「长期记忆」开关与 AI 学到的偏好规则（FR-12，逐条删 / 清空）。
+// 关闭记忆开关后规则不再进 AI 提示词，但手动调级仍会被记下。
 import { useCallback, useState } from 'react';
 import { clearMemory, deleteMemoryRule, getMemory, setMemoryEnabled } from '../api/client';
 import ConfirmDialog from '../components/ConfirmDialog';
+import TimetableSection from '../components/TimetableSection';
 import { useToast } from '../components/Toast';
 import { usePolling } from '../hooks/usePolling';
 import { toastError } from '../lib/errors';
@@ -62,8 +63,15 @@ export default function Settings() {
     <section>
       <h1 className="text-2xl font-bold text-slate-900 sm:text-3xl">设置</h1>
 
+      <div className="mt-6">
+        <TimetableSection />
+      </div>
+
+      <h2 className="mt-10 text-lg font-semibold text-slate-900">长期记忆</h2>
+      <p className="mt-1 text-sm text-slate-500">你在日程详情里调整等级，AI 会记下来，以后定等级时参考。</p>
+
       {error && !data && (
-        <div className="mt-6 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">
+        <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">
           {error.message}
           <button type="button" onClick={() => void refresh()} className="ml-3 font-medium underline">
             重试
@@ -72,7 +80,7 @@ export default function Settings() {
       )}
 
       {loading && (
-        <div className="mt-6 space-y-3" aria-busy>
+        <div className="mt-3 space-y-3" aria-busy>
           <div className="h-24 animate-pulse rounded-xl bg-slate-200/60" />
           <div className="h-40 animate-pulse rounded-xl bg-slate-200/60" />
         </div>
@@ -81,10 +89,10 @@ export default function Settings() {
       {data && (
         <>
           {/* 长期记忆开关 */}
-          <section className="mt-6 rounded-xl border border-slate-200 bg-white p-4">
+          <section className="mt-3 rounded-xl border border-slate-200 bg-white p-4">
             <div className="flex items-center justify-between gap-4">
               <div className="min-w-0">
-                <h2 className="text-sm font-semibold text-slate-800">长期记忆</h2>
+                <h3 className="text-sm font-semibold text-slate-800">开启长期记忆</h3>
                 <p className="mt-1 text-sm leading-relaxed text-slate-500">
                   开启后 AI 定等级时会参考下面的偏好；关闭后不参考，但你的调整仍会被记下。
                 </p>
@@ -116,7 +124,7 @@ export default function Settings() {
           {/* 规则列表 */}
           <section className="mt-4 rounded-xl border border-slate-200 bg-white">
             <header className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
-              <h2 className="text-sm font-semibold text-slate-800">学到的偏好</h2>
+              <h3 className="text-sm font-semibold text-slate-800">学到的偏好</h3>
               <span className="text-xs text-slate-400">基于 {data.feedback_count} 次调整</span>
             </header>
 

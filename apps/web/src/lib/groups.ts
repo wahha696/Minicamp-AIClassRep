@@ -62,6 +62,76 @@ export function groupsToChange(groups: GroupDTO[], enabled: boolean): GroupDTO[]
   return groups.filter((g) => g.enabled !== enabled);
 }
 
+/** 要改的一个群开关 */
+export interface GroupChange {
+  group: GroupDTO;
+  enabled: boolean;
+}
+
+/** 把「这些群要改成 enabled」变成改动列表 */
+export function toChanges(groups: GroupDTO[], enabled: boolean): GroupChange[] {
+  return groups.map((group) => ({ group, enabled }));
+}
+
+/** 撤销：把刚才的改动反过来 */
+export function reverseChanges(changes: GroupChange[]): GroupChange[] {
+  return changes.map((c) => ({ group: c.group, enabled: !c.enabled }));
+}
+
+/** 群管理预设：用户存下来的「只监听这几个群」 */
+export interface GroupPreset {
+  name: string;
+  ids: string[]; // 监听中的群号
+}
+
+const PRESETS_KEY = 'classrep.groupPresets';
+
+export function loadPresets(): GroupPreset[] {
+  try {
+    const raw: unknown = JSON.parse(localStorage.getItem(PRESETS_KEY) ?? '[]');
+    if (!Array.isArray(raw)) return [];
+    return raw.filter(
+      (p): p is GroupPreset =>
+        typeof p?.name === 'string' && Array.isArray(p?.ids) && p.ids.every((x: unknown) => typeof x === 'string'),
+    );
+  } catch {
+    return [];
+  }
+}
+
+export function savePresets(presets: GroupPreset[]): void {
+  try {
+    localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
+  } catch {
+    // 存不了（隐私模式等）就算了，本次页面里仍然可用
+  }
+}
+
+/** 当前监听中的群号（按列表顺序） */
+export function enabledIds(groups: GroupDTO[]): string[] {
+  return groups.filter((g) => g.enabled).map((g) => g.group_id);
+}
+
+/** 新增预设；同名的直接覆盖（位置不变） */
+export function upsertPreset(presets: GroupPreset[], preset: GroupPreset): GroupPreset[] {
+  const i = presets.findIndex((p) => p.name === preset.name);
+  if (i < 0) return [...presets, preset];
+  return presets.map((p, j) => (j === i ? preset : p));
+}
+
+/** 套用预设：预设里的群开启，其他群（包括存预设之后新出现的群）全部关闭；只返回需要改的 */
+export function presetChanges(groups: GroupDTO[], preset: GroupPreset): GroupChange[] {
+  const on = new Set(preset.ids);
+  return groups
+    .filter((g) => g.enabled !== on.has(g.group_id))
+    .map((group) => ({ group, enabled: on.has(group.group_id) }));
+}
+
+/** 当前开关状态是否正好就是这个预设 */
+export function matchesPreset(groups: GroupDTO[], preset: GroupPreset): boolean {
+  return presetChanges(groups, preset).length === 0;
+}
+
 /** 按每批 size 个并发执行，返回失败的数量（一个失败不影响其他） */
 export async function runInBatches<T>(items: T[], size: number, fn: (item: T) => Promise<unknown>): Promise<number> {
   let failed = 0;

@@ -1,6 +1,18 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { GroupDTO } from '../api/types';
-import { filterGroups, groupsToChange, runInBatches } from './groups';
+import {
+  enabledIds,
+  filterGroups,
+  groupsToChange,
+  loadPresets,
+  matchesPreset,
+  presetChanges,
+  reverseChanges,
+  runInBatches,
+  savePresets,
+  toChanges,
+  upsertPreset,
+} from './groups';
 
 const g = (group_id: string, name: string): GroupDTO => ({ group_id, name, enabled: true, message_count: 0, event_count: 0 });
 const list = [
@@ -68,5 +80,69 @@ describe('一键全开 / 全关', () => {
     });
     expect(failed).toBe(1);
     expect(done.sort()).toEqual([1, 2, 4, 5]);
+  });
+
+  it('撤销就是把改动反过来', () => {
+    const changes = toChanges(mixed, false);
+    expect(reverseChanges(changes).map((c) => c.enabled)).toEqual([true, true, true]);
+  });
+});
+
+describe('群管理预设', () => {
+  const groups = [g('1', 'a'), { ...g('2', 'b'), enabled: false }, g('3', 'c'), { ...g('4', 'd'), enabled: false }];
+
+  it('记下当前监听中的群', () => {
+    expect(enabledIds(groups)).toEqual(['1', '3']);
+  });
+
+  it('套用预设：预设里的开，其他的关，只返回需要改的', () => {
+    const changes = presetChanges(groups, { name: '重要', ids: ['2', '3'] });
+    expect(changes.map((c) => [c.group.group_id, c.enabled])).toEqual([
+      ['1', false],
+      ['2', true],
+    ]);
+  });
+
+  it('预设里已经不存在的群直接忽略；存预设后新出现的群会被关掉', () => {
+    const changes = presetChanges(groups, { name: '旧', ids: ['1', '3', 'gone'] });
+    expect(changes).toEqual([]);
+    const withNew = [...groups, g('5', 'new')];
+    expect(presetChanges(withNew, { name: '旧', ids: ['1', '3'] }).map((c) => c.group.group_id)).toEqual(['5']);
+  });
+
+  it('判断当前是不是某个预设', () => {
+    expect(matchesPreset(groups, { name: 'x', ids: ['3', '1'] })).toBe(true);
+    expect(matchesPreset(groups, { name: 'y', ids: ['1'] })).toBe(false);
+  });
+
+  it('同名预设覆盖且位置不变，不同名追加', () => {
+    const list = [
+      { name: 'A', ids: ['1'] },
+      { name: 'B', ids: ['2'] },
+    ];
+    expect(upsertPreset(list, { name: 'A', ids: ['3'] })).toEqual([
+      { name: 'A', ids: ['3'] },
+      { name: 'B', ids: ['2'] },
+    ]);
+    expect(upsertPreset(list, { name: 'C', ids: [] }).map((p) => p.name)).toEqual(['A', 'B', 'C']);
+  });
+
+  it('存到 localStorage 再读回来；坏数据读成空列表', () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+    });
+    try {
+      expect(loadPresets()).toEqual([]);
+      savePresets([{ name: '重要', ids: ['1', '3'] }]);
+      expect(loadPresets()).toEqual([{ name: '重要', ids: ['1', '3'] }]);
+      store.set('classrep.groupPresets', '{坏的');
+      expect(loadPresets()).toEqual([]);
+      store.set('classrep.groupPresets', JSON.stringify([{ name: 1 }, { name: 'ok', ids: ['9'] }]));
+      expect(loadPresets()).toEqual([{ name: 'ok', ids: ['9'] }]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
