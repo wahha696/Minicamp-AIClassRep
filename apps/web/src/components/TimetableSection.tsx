@@ -1,8 +1,9 @@
-// 设置页里的「课表」一栏（FR-13，原 /timetable 页）：导入教务系统 xls 课表 → 预览网格 + warnings → 确认保存。
-// 解析在浏览器里做（SheetJS 按需动态加载，不进首屏包），原始文件不上传服务器。
-// 已有课表时可「重新导入」「清空」（二次确认，默认焦点在取消）。
+// 设置页里的「课表」一栏（FR-13，原 /timetable 页）：
+// ① 从中南教务系统一键导入（csujwc 直连，校园网）：学号/密码 → 验证码 → 服务端拉课表；
+// ② xls 文件导入：浏览器端解析（SheetJS 按需动态加载，不进首屏包），原始文件不上传服务器。
+// 两种来源都进「预览网格 + warnings → 确认保存」流程；已有课表时可「清空」（二次确认）。
 import { useRef, useState } from 'react';
-import { clearTimetable, getTimetable, saveTimetable } from '../api/client';
+import { clearTimetable, csuFetchCourses, csuStartImport, getTimetable, saveTimetable } from '../api/client';
 import type { CourseDTO } from '../api/types';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useToast } from '../components/Toast';
@@ -46,6 +47,16 @@ export default function TimetableSection() {
   const [saving, setSaving] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [clearing, setClearing] = useState(false);
+
+  // 教务系统(csujwc)直连导入状态:学号/密码只在本组件内存里,保存前即清空
+  const [csuOpen, setCsuOpen] = useState(false);
+  const [csuUser, setCsuUser] = useState('');
+  const [csuPass, setCsuPass] = useState('');
+  const [csuSession, setCsuSession] = useState(''); // 服务端挂起会话(验证码绑定)
+  const [csuCaptcha, setCsuCaptcha] = useState(''); // 验证码图片 data URL
+  const [csuCode, setCsuCode] = useState('');
+  const [csuBusy, setCsuBusy] = useState<'' | 'captcha' | 'fetch'>('');
+  const [csuErr, setCsuErr] = useState('');
 
   const saved = data ?? null;
   const hasSaved = (saved?.courses.length ?? 0) > 0;
@@ -103,6 +114,62 @@ export default function TimetableSection() {
     }
   }
 
+  /** 第一步:拿验证码(服务端同时建立教务网会话,密钥留在服务端内存) */
+  async function onCsuCaptcha() {
+    if (!csuUser.trim() || !csuPass) {
+      setCsuErr('先填学号和密码');
+      return;
+    }
+    setCsuBusy('captcha');
+    setCsuErr('');
+    try {
+      const started = await csuStartImport(csuUser.trim(), csuPass);
+      setCsuSession(started.session_id);
+      setCsuCaptcha(started.captcha);
+      setCsuCode('');
+    } catch (e) {
+      setCsuSession('');
+      setCsuCaptcha('');
+      setCsuErr(e instanceof Error ? e.message : '获取验证码失败');
+    } finally {
+      setCsuBusy('');
+    }
+  }
+
+  /** 第二步:验证码(如需)+ 完成 CAS 登录 + 拉课表解析,进「预览 → 确认保存」流程(与文件导入一致) */
+  async function onCsuFetch() {
+    if (!csuSession || (csuCaptcha && !csuCode.trim())) {
+      setCsuErr('先获取验证码,再输入图片里的字符');
+      return;
+    }
+    setCsuBusy('fetch');
+    setCsuErr('');
+    try {
+      const parsed = await csuFetchCourses(csuSession, csuCode.trim());
+      setDraft(parsed);
+      setSemesterStart(saved?.semester_start || DEFAULT_SEMESTER_START);
+      // 账号密码用完即清,不留在界面上
+      setCsuPass('');
+      setCsuSession('');
+      setCsuCaptcha('');
+      setCsuCode('');
+      setCsuOpen(false);
+      if (parsed.courses.length === 0) {
+        toast('教务系统里没解析出课程,看看 warnings', 'error');
+      } else {
+        toast(`已从教务系统拉到 ${parsed.courses.length} 个课次,核对后保存`);
+      }
+    } catch (e) {
+      // 验证码是一次性的:失败后这次会话就作废,要重新获取
+      setCsuSession('');
+      setCsuCaptcha('');
+      setCsuCode('');
+      setCsuErr(e instanceof Error ? e.message : '导入失败');
+    } finally {
+      setCsuBusy('');
+    }
+  }
+
   // 预览网格：把解析出的课程全部塞进去（不按周数过滤，便于人工核对）
   const previewDays = Array.from({ length: 7 }, (_, i) => ({
     from: PREVIEW_MONDAY + i * DAY,
@@ -114,8 +181,133 @@ export default function TimetableSection() {
     <section id="timetable">
       <h2 className="text-lg font-semibold text-slate-900">课表</h2>
       <p className="mt-1 text-sm text-slate-500">
-        从教务系统导出的课表（xls / xlsx），在浏览器里解析后直接保存——原始文件不会上传。
+        两种导入:① 电脑连着校园网时,用教务系统学号一键拉取(下面);② 教务系统导出的 xls 文件(浏览器本地解析,不上传)。
       </p>
+
+      {/* 教务系统(csujwc)直连导入 */}
+      <div className="mt-3 rounded-xl border border-slate-200 bg-white p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-slate-700">从中南大学教务系统一键导入</p>
+            <p className="mt-1 text-xs text-slate-400">
+              用统一身份认证的学号和密码(信息门户那套)→ 看图输验证码(需要时) → 自动拉课表。密码只用于本次登录,不保存。
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setCsuOpen((v) => !v);
+              setCsuErr('');
+            }}
+            className="shrink-0 rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50"
+          >
+            {csuOpen ? '收起' : '使用教务账号导入'}
+          </button>
+        </div>
+
+        {csuOpen && (
+          <div className="mt-3 space-y-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="flex items-center gap-2 text-sm text-slate-600">
+                学号
+                <input
+                  type="text"
+                  value={csuUser}
+                  autoComplete="off"
+                  onChange={(e) => {
+                    setCsuUser(e.target.value);
+                    setCsuErr('');
+                  }}
+                  className="w-40 rounded-lg border border-slate-200 px-2 py-1.5 text-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                />
+              </label>
+              <label className="flex items-center gap-2 text-sm text-slate-600">
+                密码
+                <input
+                  type="password"
+                  value={csuPass}
+                  autoComplete="off"
+                  onChange={(e) => {
+                    setCsuPass(e.target.value);
+                    setCsuErr('');
+                  }}
+                  className="w-40 rounded-lg border border-slate-200 px-2 py-1.5 text-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                />
+              </label>
+              <button
+                type="button"
+                onClick={() => void onCsuCaptcha()}
+                disabled={csuBusy !== '' || !csuUser.trim() || !csuPass}
+                className="rounded-lg bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-60"
+              >
+                {csuBusy === 'captcha' ? '获取中…' : '下一步'}
+              </button>
+            </div>
+
+            {csuSession && !csuCaptcha && (
+              <div className="flex flex-wrap items-center gap-3">
+                <p className="text-xs text-slate-500">本次登录不需要验证码,直接点「登录并导入」。</p>
+                <button
+                  type="button"
+                  onClick={() => void onCsuFetch()}
+                  disabled={csuBusy !== ''}
+                  className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-60"
+                >
+                  {csuBusy === 'fetch' ? '导入中…' : '登录并导入'}
+                </button>
+              </div>
+            )}
+
+            {csuSession && csuCaptcha && (
+              <div className="flex flex-wrap items-center gap-3">
+                <img
+                  src={csuCaptcha}
+                  alt="统一身份认证验证码"
+                  className="h-10 rounded-lg border border-slate-200 bg-white"
+                />
+                <button
+                  type="button"
+                  onClick={() => void onCsuCaptcha()}
+                  disabled={csuBusy !== ''}
+                  className="text-xs text-slate-500 underline hover:text-slate-700 disabled:opacity-60"
+                >
+                  换一张
+                </button>
+                <label className="flex items-center gap-2 text-sm text-slate-600">
+                  验证码
+                  <input
+                    type="text"
+                    value={csuCode}
+                    maxLength={10}
+                    autoComplete="off"
+                    onChange={(e) => {
+                      setCsuCode(e.target.value);
+                      setCsuErr('');
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') void onCsuFetch();
+                    }}
+                    className="w-24 rounded-lg border border-slate-200 px-2 py-1.5 text-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void onCsuFetch()}
+                  disabled={csuBusy !== '' || !csuCode.trim()}
+                  className="rounded-lg bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-60"
+                >
+                  {csuBusy === 'fetch' ? '导入中…' : '登录并导入'}
+                </button>
+              </div>
+            )}
+
+            {csuErr && <p className="text-xs text-rose-600">{csuErr}</p>}
+            <p className="text-xs text-slate-400">
+              拉取后同样先预览、填「第一周周一」再保存;验证码错了点「换一张」重来即可;多次密码错误后统一身份认证会强制要求验证码。
+            </p>
+          </div>
+        )}
+      </div>
 
       {/* 当前课表概况 */}
       {!loading && hasSaved && !draft && (
