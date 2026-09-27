@@ -491,13 +491,13 @@ export default function Pet() {
     if (hidden) return;
     let t: ReturnType<typeof setTimeout> | undefined;
     const onScroll = () => {
-      if (t) window.clearTimeout(t);
-      t = window.setTimeout(nudgeToBlank, 500);
+      if (t) clearTimeout(t);
+      t = setTimeout(nudgeToBlank, 500);
     };
     window.addEventListener('scroll', onScroll, { passive: true });
     return () => {
       window.removeEventListener('scroll', onScroll);
-      if (t) window.clearTimeout(t);
+      if (t) clearTimeout(t);
     };
   }, [hidden, nudgeToBlank]);
 
