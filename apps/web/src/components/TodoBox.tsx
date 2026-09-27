@@ -1,6 +1,7 @@
 // 今日页的待办框（FR-15）：群待办 + 手动待办混排，按等级降序。
 // 勾上先弹「是否确认完成」（可勾「下次不再提醒」），确认后完成（群待办 PATCH events，手动待办 PATCH todos），Toast 带「撤销」。
 // 「+」展开输入行回车添加手动待办；群待办点标题开 EventDrawer，手动待办点标题就地编辑。
+// 超过 8 条时只显示前 8 条（等级最高的），底部箭头展开 / 收起其余。
 import { useCallback, useState } from 'react';
 import { createTodo, patchEvent, patchTodo } from '../api/client';
 import type { EventStatus, Level, TodosDTO } from '../api/types';
@@ -29,6 +30,9 @@ type Row = {
   status: EventStatus; // event 行勾选前的状态，撤销时恢复（待确认的不能撤销成进行中）；手动待办固定 'active'
   created_at: number;
 };
+
+/** 待办框默认最多列出几条，多的折叠 */
+export const TODO_FOLD_LIMIT = 8;
 
 function toRows(data: TodosDTO): Row[] {
   const rows: Row[] = [
@@ -69,7 +73,19 @@ export default function TodoBox({ data, loading, onChanged, onOpenEvent }: Props
   const [dontAskAgain, setDontAskAgain] = useState(false);
   const cancelConfirm = useCallback(() => setConfirming(null), []);
 
+  const [expanded, setExpanded] = useState(false);
+
   const rows = data ? toRows(data) : [];
+  const hiddenCount = Math.max(0, rows.length - TODO_FOLD_LIMIT);
+  // 正在编辑 / 确认的行被折叠进去时也保持可见，免得输入框突然消失
+  const visibleRows = expanded
+    ? rows
+    : rows.filter(
+        (row, i) =>
+          i < TODO_FOLD_LIMIT ||
+          (row.kind === 'manual' && editingId === row.id) ||
+          (confirming !== null && confirming.kind === row.kind && confirming.id === row.id),
+      );
 
   async function check(row: Row) {
     const key = `${row.kind}-${row.id}`;
@@ -192,7 +208,7 @@ export default function TodoBox({ data, loading, onChanged, onOpenEvent }: Props
         <p className="px-4 py-6 text-center text-sm text-slate-400">没有待办</p>
       ) : (
         <ul className="divide-y divide-slate-50">
-          {rows.map((row) => {
+          {visibleRows.map((row) => {
             const lv = levelStyle(row.type, row.level);
             const key = `${row.kind}-${row.id}`;
             const editing = row.kind === 'manual' && editingId === row.id;
@@ -246,6 +262,28 @@ export default function TodoBox({ data, loading, onChanged, onOpenEvent }: Props
             );
           })}
         </ul>
+      )}
+
+      {hiddenCount > 0 && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          title={expanded ? '收起' : `展开其余 ${hiddenCount} 条`}
+          className="flex w-full items-center justify-center gap-1 rounded-b-xl border-t border-slate-100 py-1.5 text-xs text-slate-400 hover:bg-slate-50 hover:text-slate-600"
+        >
+          {expanded ? '收起' : `还有 ${hiddenCount} 条`}
+          <svg
+            viewBox="0 0 24 24"
+            className={`h-4 w-4 transition-transform ${expanded ? 'rotate-180' : ''}`}
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            aria-hidden
+          >
+            <path d="m6 9 6 6 6-6" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
       )}
 
       <ConfirmDialog
