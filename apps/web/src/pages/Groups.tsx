@@ -204,121 +204,184 @@ export default function Groups() {
       )}
 
       {data && data.length > 0 && (
-        <div className="relative mt-6">
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={2}
-            strokeLinecap="round"
-            className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
-            aria-hidden
-          >
-            <circle cx="11" cy="11" r="7" />
-            <path d="m20 20-3.5-3.5" />
-          </svg>
-          <input
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="搜索群名或群号，打几个字就行，如「高数班」"
-            aria-label="搜索群"
-            className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
-          />
-        </div>
-      )}
-
-      {shown && shown.length > 0 && (
-        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-sm">
-          <span className="text-slate-500">
-            {query.trim() ? `找到 ${shown.length} 个群` : `共 ${shown.length} 个群`}，监听中{' '}
-            {shown.filter((g) => pending[g.group_id] ?? g.enabled).length} 个
-          </span>
-          <div className="flex flex-wrap gap-2">
-            {lastBulk && (
-              <button
-                type="button"
-                onClick={() => void undo(lastBulk)}
-                disabled={busy !== null}
-                title="恢复到刚才那次批量操作之前的选择"
-                className="rounded-lg border border-amber-200 px-3 py-1.5 text-amber-700 hover:bg-amber-50 disabled:opacity-60"
+        <div className="mt-6 flex flex-col gap-4 lg:flex-row lg:items-start lg:gap-6">
+          <div className="min-w-0 flex-1">
+            <div className="relative">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                strokeLinecap="round"
+                className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+                aria-hidden
               >
-                {busy === 'undo' ? '撤销中…' : '↶ 撤销刚才的操作'}
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => void onBulk(true)}
-              disabled={busy !== null}
-              className="rounded-lg border border-emerald-200 px-3 py-1.5 text-emerald-700 hover:bg-emerald-50 disabled:opacity-60"
-            >
-              {busy === 'on' ? '开启中…' : query.trim() ? '全部开启（搜索结果）' : '一键全部开启'}
-            </button>
-            <button
-              type="button"
-              onClick={() => void onBulk(false)}
-              disabled={busy !== null}
-              className="rounded-lg border border-slate-300 px-3 py-1.5 text-slate-600 hover:bg-slate-50 disabled:opacity-60"
-            >
-              {busy === 'off' ? '关闭中…' : query.trim() ? '全部关闭（搜索结果）' : '一键全部关闭'}
-            </button>
-          </div>
-        </div>
-      )}
+                <circle cx="11" cy="11" r="7" />
+                <path d="m20 20-3.5-3.5" />
+              </svg>
+              <input
+                type="search"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="搜索群名或群号，打几个字就行，如「高数班」"
+                aria-label="搜索群"
+                className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+              />
+            </div>
 
-      {data && data.length > 0 && (
-        <div className="mt-3 rounded-xl border border-slate-200 bg-white px-4 py-3">
-          <div className="flex flex-wrap items-center gap-2 text-sm">
-            <span className="mr-1 font-medium text-slate-700" title="把选好的监听群存起来，误点一键全开/全关后一点就能恢复">
-              预设
-            </span>
-            {presets.length === 0 && presetName === null && (
-              <span className="text-slate-400">选好要监听的群后存成预设，误点一键全开 / 全关也能一键恢复</span>
-            )}
-            {presets.map((p) => {
-              const active = matchesPreset(data, p);
-              const count = data.filter((g) => p.ids.includes(g.group_id)).length;
-              return (
-                <span
-                  key={p.name}
-                  className={`inline-flex items-center overflow-hidden rounded-full border ${
-                    active ? 'border-blue-300 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-600'
-                  }`}
-                >
-                  <button
-                    type="button"
-                    onClick={() => void onApplyPreset(p)}
-                    disabled={busy !== null}
-                    title={active ? '当前就是这个预设' : `只监听这 ${count} 个群，其他群全部关闭`}
-                    className="py-1 pl-3 pr-1.5 hover:bg-slate-50 disabled:opacity-60"
-                  >
-                    {active && '✓ '}
-                    {busy === `preset:${p.name}` ? '切换中…' : p.name}
-                    <span className="ml-1 text-xs opacity-60">{count}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onDeletePreset(p)}
-                    aria-label={`删除预设「${p.name}」`}
-                    title="删除预设（不会改动群的开关）"
-                    className="py-1 pl-1 pr-2.5 text-slate-400 hover:text-rose-600"
-                  >
-                    ×
-                  </button>
+            {shown && shown.length > 0 && (
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-sm">
+                <span className="text-slate-500">
+                  {query.trim() ? `找到 ${shown.length} 个群` : `共 ${shown.length} 个群`}，监听中{' '}
+                  {shown.filter((g) => pending[g.group_id] ?? g.enabled).length} 个
                 </span>
-              );
-            })}
+                <div className="flex flex-wrap gap-2">
+                  {lastBulk && (
+                    <button
+                      type="button"
+                      onClick={() => void undo(lastBulk)}
+                      disabled={busy !== null}
+                      title="恢复到刚才那次批量操作之前的选择"
+                      className="rounded-lg border border-amber-200 px-3 py-1.5 text-amber-700 hover:bg-amber-50 disabled:opacity-60"
+                    >
+                      {busy === 'undo' ? '撤销中…' : '↶ 撤销刚才的操作'}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => void onBulk(true)}
+                    disabled={busy !== null}
+                    className="rounded-lg border border-emerald-200 px-3 py-1.5 text-emerald-700 hover:bg-emerald-50 disabled:opacity-60"
+                  >
+                    {busy === 'on' ? '开启中…' : query.trim() ? '全部开启（搜索结果）' : '一键全部开启'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void onBulk(false)}
+                    disabled={busy !== null}
+                    className="rounded-lg border border-slate-300 px-3 py-1.5 text-slate-600 hover:bg-slate-50 disabled:opacity-60"
+                  >
+                    {busy === 'off' ? '关闭中…' : query.trim() ? '全部关闭（搜索结果）' : '一键全部关闭'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {shown && data!.length > 0 && shown.length === 0 && (
+              <div className="mt-4 rounded-xl border border-dashed border-slate-300 bg-white px-6 py-10 text-center text-sm text-slate-500">
+                没有找到和「{query.trim()}」相关的群
+              </div>
+            )}
+
+            {shown && shown.length > 0 && (
+              <ul className="mt-4 divide-y divide-slate-100 overflow-hidden rounded-xl border border-slate-200 bg-white">
+                {shown.map((g) => {
+                  const enabled = pending[g.group_id] ?? g.enabled;
+                  const empty = g.message_count === 0 && g.event_count === 0;
+                  return (
+                    <li key={g.group_id} className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3">
+                      <div className="min-w-0 flex-1">
+                        <div className={`truncate font-medium ${enabled ? 'text-slate-900' : 'text-slate-400'}`} title={g.name}>
+                          {g.name}
+                        </div>
+                        <div className="mt-0.5 text-xs text-slate-400">
+                          {g.message_count} 条消息 · {g.event_count} 个日程
+                          {!enabled && ' · 已关闭监听'}
+                        </div>
+                      </div>
+
+                      {courseNames.length > 0 && (
+                        <select
+                          aria-label={`「${g.name}」对应课程`}
+                          value={g.course_name ?? ''}
+                          onChange={(e) => void onCourseChange(g, e.target.value)}
+                          className="rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-600 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                        >
+                          <option value="">自动（AI 判断）</option>
+                          {courseNames.map((n) => (
+                            <option key={n} value={n}>{n}</option>
+                          ))}
+                        </select>
+                      )}
+
+                      <Switch
+                        checked={enabled}
+                        disabled={g.group_id in pending}
+                        label={`监听「${g.name}」`}
+                        onChange={(v) => void onToggle(g, v)}
+                      />
+
+                      <button
+                        type="button"
+                        onClick={() => setToDelete(g)}
+                        disabled={empty}
+                        className="rounded-lg border border-rose-200 px-3 py-1.5 text-sm text-rose-600 hover:bg-rose-50 disabled:border-slate-200 disabled:text-slate-300 disabled:hover:bg-transparent"
+                      >
+                        删除本群数据
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+
+          {/* 右侧边栏：预设（手机上排在列表上面） */}
+          <aside className="order-first rounded-xl border border-slate-200 bg-white p-4 lg:sticky lg:top-20 lg:order-last lg:w-64 lg:shrink-0">
+            <h2 className="font-semibold text-slate-900">预设</h2>
+            <p className="mt-1 text-xs leading-relaxed text-slate-500">
+              选好要监听的群后存成预设；误点一键全开 / 全关，点一下预设就能恢复
+            </p>
+
+            {presets.length > 0 && (
+              <ul className="mt-3 space-y-1.5">
+                {presets.map((p) => {
+                  const active = matchesPreset(data, p);
+                  const count = data.filter((g) => p.ids.includes(g.group_id)).length;
+                  return (
+                    <li
+                      key={p.name}
+                      className={`flex items-center overflow-hidden rounded-lg border text-sm ${
+                        active ? 'border-blue-300 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-700'
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => void onApplyPreset(p)}
+                        disabled={busy !== null}
+                        title={active ? '当前就是这个预设' : `只监听这 ${count} 个群，其他群全部关闭`}
+                        className="flex min-w-0 flex-1 items-center gap-1.5 px-3 py-2 text-left hover:bg-slate-50 disabled:opacity-60"
+                      >
+                        <span className="w-3 shrink-0">{active && '✓'}</span>
+                        <span className="truncate">{busy === `preset:${p.name}` ? '切换中…' : p.name}</span>
+                        <span className="ml-auto shrink-0 text-xs opacity-60">{count} 个群</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onDeletePreset(p)}
+                        aria-label={`删除预设「${p.name}」`}
+                        title="删除预设（不会改动群的开关）"
+                        className="px-2.5 py-2 text-slate-400 hover:text-rose-600"
+                      >
+                        ×
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+
             {presetName === null ? (
               <button
                 type="button"
                 onClick={() => setPresetName(`预设 ${presets.length + 1}`)}
-                className="rounded-full border border-dashed border-slate-300 px-3 py-1 text-slate-500 hover:border-blue-300 hover:text-blue-600"
+                className="mt-3 w-full rounded-lg border border-dashed border-slate-300 px-3 py-2 text-sm text-slate-500 hover:border-blue-300 hover:text-blue-600"
               >
                 ＋ 把当前选择存为预设
               </button>
             ) : (
               <form
-                className="flex items-center gap-2"
+                className="mt-3 space-y-2"
                 onSubmit={(e) => {
                   e.preventDefault();
                   onSavePreset();
@@ -333,76 +396,20 @@ export default function Groups() {
                   maxLength={20}
                   aria-label="预设名字"
                   placeholder="如「重要的群」"
-                  className="w-36 rounded-lg border border-slate-200 px-2 py-1 text-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                  className="w-full rounded-lg border border-slate-200 px-2 py-1.5 text-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
                 />
-                <button type="submit" className="rounded-lg bg-blue-600 px-3 py-1 text-white hover:bg-blue-700">
-                  保存（{enabledIds(data).length} 个群）
-                </button>
-                <button type="button" onClick={() => setPresetName(null)} className="px-1 text-slate-500 hover:text-slate-700">
-                  取消
-                </button>
+                <div className="flex gap-2 text-sm">
+                  <button type="submit" className="flex-1 rounded-lg bg-blue-600 px-3 py-1.5 text-white hover:bg-blue-700">
+                    保存（{enabledIds(data).length} 个群）
+                  </button>
+                  <button type="button" onClick={() => setPresetName(null)} className="px-2 text-slate-500 hover:text-slate-700">
+                    取消
+                  </button>
+                </div>
               </form>
             )}
-          </div>
+          </aside>
         </div>
-      )}
-
-      {shown && data!.length > 0 && shown.length === 0 && (
-        <div className="mt-4 rounded-xl border border-dashed border-slate-300 bg-white px-6 py-10 text-center text-sm text-slate-500">
-          没有找到和「{query.trim()}」相关的群
-        </div>
-      )}
-
-      {shown && shown.length > 0 && (
-        <ul className="mt-4 divide-y divide-slate-100 overflow-hidden rounded-xl border border-slate-200 bg-white">
-          {shown.map((g) => {
-            const enabled = pending[g.group_id] ?? g.enabled;
-            const empty = g.message_count === 0 && g.event_count === 0;
-            return (
-              <li key={g.group_id} className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3">
-                <div className="min-w-0 flex-1">
-                  <div className={`truncate font-medium ${enabled ? 'text-slate-900' : 'text-slate-400'}`} title={g.name}>
-                    {g.name}
-                  </div>
-                  <div className="mt-0.5 text-xs text-slate-400">
-                    {g.message_count} 条消息 · {g.event_count} 个日程
-                    {!enabled && ' · 已关闭监听'}
-                  </div>
-                </div>
-
-                {courseNames.length > 0 && (
-                  <select
-                    aria-label={`「${g.name}」对应课程`}
-                    value={g.course_name ?? ''}
-                    onChange={(e) => void onCourseChange(g, e.target.value)}
-                    className="rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-600 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                  >
-                    <option value="">自动（AI 判断）</option>
-                    {courseNames.map((n) => (
-                      <option key={n} value={n}>{n}</option>
-                    ))}
-                  </select>
-                )}
-
-                <Switch
-                  checked={enabled}
-                  disabled={g.group_id in pending}
-                  label={`监听「${g.name}」`}
-                  onChange={(v) => void onToggle(g, v)}
-                />
-
-                <button
-                  type="button"
-                  onClick={() => setToDelete(g)}
-                  disabled={empty}
-                  className="rounded-lg border border-rose-200 px-3 py-1.5 text-sm text-rose-600 hover:bg-rose-50 disabled:border-slate-200 disabled:text-slate-300 disabled:hover:bg-transparent"
-                >
-                  删除本群数据
-                </button>
-              </li>
-            );
-          })}
-        </ul>
       )}
 
       <ConfirmDialog
