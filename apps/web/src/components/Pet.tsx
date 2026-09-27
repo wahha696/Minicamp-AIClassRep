@@ -26,6 +26,8 @@
 // - PET-14 避让主体内容：桌宠只在页面空白处活动与停留——「顶栏 + 居中内容列」算主体，
 //   散步只挑空白点；拖拽落地/窗口变化/页面滚动后若压到内容，自动挪到最近的空白处；
 //   对话框/右键菜单/设置面板打开期间完全站住，不做任何自主移动（陪人说话要专心）。
+// - PET-14b 路径避让：散步的沿途也必须空白（每 16px 采样一次），只在同一片空白连通区里
+//   走动，绝不从日历/待办等内容上面横穿过去；已经被压在内容上时按「逃脱」处理，直线去最近的空白处。
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -115,6 +117,18 @@ function overlapsBox(a: Box, b: Box, margin: number): boolean {
 function isBlankSpot(px: number, py: number, boxes: Box[]): boolean {
   const pet = petBoxAt(px, py);
   return !boxes.some((b) => overlapsBox(pet, b, AVOID_MARGIN));
+}
+
+/** PET-14b：从 (fx, fy) 直线走到 (tx, ty) 的沿途是否全程空白。
+ *  只查终点会把「从右侧空白带横穿整个内容列走过去」放行——桌宠会当着你的面从日历/待办上踩过去；
+ *  这里沿线每 16px 采样一次，保证起点和终点在同一片空白连通区里才放行。 */
+function walkPathIsBlank(fx: number, fy: number, tx: number, ty: number, boxes: Box[]): boolean {
+  const steps = Math.max(1, Math.ceil(Math.hypot(tx - fx, ty - fy) / 16));
+  for (let i = 1; i <= steps; i++) {
+    const k = i / steps;
+    if (!isBlankSpot(fx + (tx - fx) * k, fy + (ty - fy) * k, boxes)) return false;
+  }
+  return true;
 }
 
 /** 网格扫描：离 (px, py) 最近的空白落点；整页都塞不下时返回 null（那就原地待着） */
@@ -321,15 +335,17 @@ export default function Pet() {
   }, [setX, setY]);
   function stroll() {
     // PET-10：全页面随机挑一个点，尽量离当前位置远一点，走起来才像散步；
-    // PET-14：只挑空白区的点（不压到顶栏和居中内容列），整页都放不下就原地待着
+    // PET-14：只挑空白区的点（不压到顶栏和居中内容列），整页都放不下就原地待着；
+    // PET-14b：沿途也必须空白——只在同一片空白连通区里散步，绝不从内容上面横穿过去
     const [xlo, xhi] = xRange();
     const [ylo, yhi] = yRange();
     const boxes = contentBoxes();
     let target: [number, number] | null = null;
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < 60; i++) {
       const tx = xlo + Math.random() * (xhi - xlo);
       const ty = ylo + Math.random() * (yhi - ylo);
       if (!isBlankSpot(tx, ty, boxes)) continue;
+      if (!walkPathIsBlank(xRef.current, yRef.current, tx, ty, boxes)) continue;
       target = [tx, ty];
       if (Math.hypot(tx - xRef.current, ty - yRef.current) > 120) break;
     }
