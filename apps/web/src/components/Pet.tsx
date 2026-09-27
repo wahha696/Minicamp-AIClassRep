@@ -23,6 +23,11 @@
 // - PET-13 自定义形象与说话风格：右键「换形象」打开设置面板；图片压成 256px dataURL 存
 //   localStorage（classrep.pet.img），说话风格（classrep.pet.style）随对话发给后端改 LLM 人设；
 //   两者的初始/默认项都是奶龙，可一键恢复。规则引擎的固定话术不受风格影响。
+// - PET-14 避让主体内容：桌宠只在页面空白处活动与停留——「顶栏 + 居中内容列」算主体，
+//   散步只挑空白点；拖拽落地/窗口变化/页面滚动后若压到内容，自动挪到最近的空白处；
+//   对话框/右键菜单/设置面板打开期间完全站住，不做任何自主移动（陪人说话要专心）。
+// - PET-14b 路径避让：散步的沿途也必须空白（每 16px 采样一次），只在同一片空白连通区里
+//   走动，绝不从日历/待办等内容上面横穿过去；已经被压在内容上时按「逃脱」处理，直线去最近的空白处。
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -72,6 +77,79 @@ function yRange(): [number, number] {
   return [0, Math.max(0, window.innerHeight - PET_H - 8)];
 }
 
+// ===== PET-14 避让主体内容：只把「顶栏 + 居中内容列」当障碍，其余都算空白 =====
+const AVOID_MARGIN = 12; // 与主体内容保持的最小间距(px)
+const BLANK_STEP = 24;   // 找「最近空白点」时的扫描网格(px)
+
+/** 一个矩形（视口坐标） */
+interface Box {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
+/** 收集页面主体区域：顶栏（含连接黄条）与居中内容列，桌宠活动时要避开 */
+function contentBoxes(): Box[] {
+  if (typeof document === 'undefined') return [];
+  const boxes: Box[] = [];
+  for (const el of document.querySelectorAll<HTMLElement>('header, main')) {
+    const r = el.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) boxes.push({ left: r.left, right: r.right, top: r.top, bottom: r.bottom });
+  }
+  return boxes;
+}
+
+/** 桌宠本体落在 (px, py) 时的矩形（与 x/y 状态同坐标系：y 从页面底边起算） */
+function petBoxAt(px: number, py: number): Box {
+  const vh = typeof window === 'undefined' ? 800 : window.innerHeight;
+  return { left: px, right: px + SIZE, top: vh - py - PET_H, bottom: vh - py };
+}
+
+function overlapsBox(a: Box, b: Box, margin: number): boolean {
+  return (
+    a.left < b.right + margin && a.right > b.left - margin &&
+    a.top < b.bottom + margin && a.bottom > b.top - margin
+  );
+}
+
+/** (px, py) 是否为空白处（不压到任何主体内容） */
+function isBlankSpot(px: number, py: number, boxes: Box[]): boolean {
+  const pet = petBoxAt(px, py);
+  return !boxes.some((b) => overlapsBox(pet, b, AVOID_MARGIN));
+}
+
+/** PET-14b：从 (fx, fy) 直线走到 (tx, ty) 的沿途是否全程空白。
+ *  只查终点会把「从右侧空白带横穿整个内容列走过去」放行——桌宠会当着你的面从日历/待办上踩过去；
+ *  这里沿线每 16px 采样一次，保证起点和终点在同一片空白连通区里才放行。 */
+function walkPathIsBlank(fx: number, fy: number, tx: number, ty: number, boxes: Box[]): boolean {
+  const steps = Math.max(1, Math.ceil(Math.hypot(tx - fx, ty - fy) / 16));
+  for (let i = 1; i <= steps; i++) {
+    const k = i / steps;
+    if (!isBlankSpot(fx + (tx - fx) * k, fy + (ty - fy) * k, boxes)) return false;
+  }
+  return true;
+}
+
+/** 网格扫描：离 (px, py) 最近的空白落点；整页都塞不下时返回 null（那就原地待着） */
+function closestBlankSpot(px: number, py: number, boxes: Box[]): [number, number] | null {
+  const [xlo, xhi] = xRange();
+  const [ylo, yhi] = yRange();
+  let best: [number, number] | null = null;
+  let bestD = Infinity;
+  for (let gx = xlo; gx <= xhi; gx += BLANK_STEP) {
+    for (let gy = ylo; gy <= yhi; gy += BLANK_STEP) {
+      if (!isBlankSpot(gx, gy, boxes)) continue;
+      const d = (gx - px) * (gx - px) + (gy - py) * (gy - py);
+      if (d < bestD) {
+        bestD = d;
+        best = [gx, gy];
+      }
+    }
+  }
+  return best;
+}
+
 export default function Pet() {
   // ===== 位置与姿态 =====
   const [x, setX] = useState<number>(() => {
@@ -109,6 +187,8 @@ export default function Pet() {
   const phaseRef = useRef(phase); phaseRef.current = phase;
   const menuRef = useRef(menuOpen); menuRef.current = menuOpen;
   const chatOpenRef = useRef(chatOpen); chatOpenRef.current = chatOpen;
+  const settingsOpenRef = useRef(settingsOpen); settingsOpenRef.current = settingsOpen;
+  const hiddenRef = useRef(hidden); hiddenRef.current = hidden;
   const msgsRef = useRef(msgs); msgsRef.current = msgs;
   const todayRef = useRef(data); todayRef.current = data;
   const connRef = useRef(conn); connRef.current = conn;
@@ -154,7 +234,16 @@ export default function Pet() {
   function replaceMsg(id: number, text: string) {
     setMsgs((ms) => ms.map((m) => (m.id === id ? { ...m, text } : m)));
   }
+  /** 立即站定：走到一半的散步直接停在目标点（PET-14：对话/面板打开时不许再动） */
+  function stopMoving() {
+    if (phaseRef.current !== 'walk') return;
+    phaseRef.current = 'idle';
+    setPhase('idle');
+    writeStore(STORE_X, String(Math.round(xRef.current)));
+    writeStore(STORE_Y, String(Math.round(yRef.current)));
+  }
   function openChat() {
+    stopMoving(); // PET-14：对话打开期间桌宠完全站住
     if (speechTimer.current) clearTimeout(speechTimer.current);
     setSpeech(null);
     setMenuOpen(false);
@@ -245,18 +334,35 @@ export default function Pet() {
     }, dur * 1000 + 100);
   }, [setX, setY]);
   function stroll() {
-    // PET-10：全页面随机挑一个点，尽量离当前位置远一点，走起来才像散步
+    // PET-10：全页面随机挑一个点，尽量离当前位置远一点，走起来才像散步；
+    // PET-14：只挑空白区的点（不压到顶栏和居中内容列），整页都放不下就原地待着；
+    // PET-14b：沿途也必须空白——只在同一片空白连通区里散步，绝不从内容上面横穿过去
     const [xlo, xhi] = xRange();
     const [ylo, yhi] = yRange();
-    let tx = xRef.current;
-    let ty = yRef.current;
-    for (let i = 0; i < 5; i++) {
-      tx = xlo + Math.random() * (xhi - xlo);
-      ty = ylo + Math.random() * (yhi - ylo);
+    const boxes = contentBoxes();
+    let target: [number, number] | null = null;
+    for (let i = 0; i < 60; i++) {
+      const tx = xlo + Math.random() * (xhi - xlo);
+      const ty = ylo + Math.random() * (yhi - ylo);
+      if (!isBlankSpot(tx, ty, boxes)) continue;
+      if (!walkPathIsBlank(xRef.current, yRef.current, tx, ty, boxes)) continue;
+      target = [tx, ty];
       if (Math.hypot(tx - xRef.current, ty - yRef.current) > 120) break;
     }
-    walkTo(tx, ty);
+    if (target) walkTo(target[0], target[1]);
   }
+  /** PET-14：当前落点若压到主体内容，悄悄挪到最近的空白处；返回是否真的挪动了 */
+  const nudgeToBlank = useCallback((): boolean => {
+    if (phaseRef.current !== 'idle' || hiddenRef.current || sleepingRef.current) return false;
+    if (menuRef.current || chatOpenRef.current || settingsOpenRef.current) return false;
+    if (typeof document !== 'undefined' && document.hidden) return false;
+    const boxes = contentBoxes();
+    if (isBlankSpot(xRef.current, yRef.current, boxes)) return false;
+    const spot = closestBlankSpot(xRef.current, yRef.current, boxes);
+    if (!spot) return false;
+    walkTo(spot[0], spot[1]);
+    return true;
+  }, [walkTo]);
   function hide() {
     setHidden(true);
     writeStore(STORE_HIDDEN, '1');
@@ -269,11 +375,11 @@ export default function Pet() {
     speak(`${petGreeting(new Date().getHours())}！${data.summary}`, 6500);
   }, [data, speak]);
 
-  // 30s 心跳（临期提醒的节拍，也顺带让「睡觉」状态随时间翻转）
+  // 30s 心跳（临期提醒的节拍，也顺带让「睡觉」状态随时间翻转，并做一次避让检查）
   useEffect(() => {
-    const t = window.setInterval(() => setNowTick(Date.now()), 30_000);
+    const t = window.setInterval(() => { setNowTick(Date.now()); nudgeToBlank(); }, 30_000);
     return () => window.clearInterval(t);
-  }, []);
+  }, [nudgeToBlank]);
 
   // PET-8a 新事件播报：对比两次轮询的事件 id，出现新的 active 事件就说一句
   useEffect(() => {
@@ -334,7 +440,8 @@ export default function Pet() {
     return () => { alive = false; if (t) clearTimeout(t); };
   }, [hidden]);
 
-  // 随机活动：PET-11，6~12s 一次概率触发——散步（全页随机点）为主，偶尔原地跳一下
+  // 随机活动：PET-11，6~12s 一次概率触发——散步（空白区随机点）为主，偶尔原地跳一下；
+  // PET-14：对话框/菜单/设置面板开着时完全不动，陪用户说话要专心
   useEffect(() => {
     if (hidden) return;
     let alive = true;
@@ -342,7 +449,10 @@ export default function Pet() {
     const loop = () => {
       t = setTimeout(() => {
         if (!alive) return;
-        if (!document.hidden && phaseRef.current === 'idle' && !menuRef.current && !sleepingRef.current) {
+        if (
+          !document.hidden && phaseRef.current === 'idle' &&
+          !menuRef.current && !chatOpenRef.current && !settingsOpenRef.current && !sleepingRef.current
+        ) {
           const roll = Math.random();
           if (roll < 0.6) stroll();
           else if (roll < 0.72) playAnim('hop', 640);
@@ -359,12 +469,37 @@ export default function Pet() {
     const onResize = () => {
       const [xlo, xhi] = xRange();
       const [ylo, yhi] = yRange();
-      setX(clamp(xRef.current, xlo, xhi));
-      setY(clamp(yRef.current, ylo, yhi));
+      const cx = clamp(xRef.current, xlo, xhi);
+      const cy = clamp(yRef.current, ylo, yhi);
+      xRef.current = cx; // 同步 ref，让紧随其后的避让检查读到新值
+      yRef.current = cy;
+      setX(cx);
+      setY(cy);
+      nudgeToBlank(); // PET-14：窗口变化后别停在主体内容上
     };
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
-  }, [setX, setY]);
+  }, [setX, setY, nudgeToBlank]);
+
+  // PET-14：初始存档位置若压在主体内容上，开场先挪到最近的空白处
+  useEffect(() => {
+    nudgeToBlank();
+  }, [nudgeToBlank]);
+
+  // PET-14：页面滚动后，主体内容可能正好移到桌宠身下——停顿半秒就自动挪开
+  useEffect(() => {
+    if (hidden) return;
+    let t: ReturnType<typeof setTimeout> | undefined;
+    const onScroll = () => {
+      if (t) window.clearTimeout(t);
+      t = window.setTimeout(nudgeToBlank, 500);
+    };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      window.removeEventListener('scroll', onScroll);
+      if (t) window.clearTimeout(t);
+    };
+  }, [hidden, nudgeToBlank]);
 
   // 右键菜单点外面就关
   useEffect(() => {
@@ -417,9 +552,12 @@ export default function Pet() {
     }
     // 松手落地：压扁回弹一下，位置记住（PET-10 全页坐标）
     setPhase('idle');
+    phaseRef.current = 'idle'; // 让紧随其后的避让检查立刻生效
     writeStore(STORE_X, String(Math.round(xRef.current)));
     writeStore(STORE_Y, String(Math.round(yRef.current)));
     playAnim('land', 470);
+    // PET-14：落点压到主体内容上时，自己挪到最近的空白处，不挡页面正文
+    if (nudgeToBlank()) speak('这里挡到内容啦，我挪个位置~', 3200);
   }
 
   // ===== 收起状态：右下角一个半透明小按钮召回 =====
@@ -473,7 +611,7 @@ export default function Pet() {
         onPointerMove={onBodyPointerMove}
         onPointerUp={(e) => endDrag(e, true)}
         onPointerCancel={(e) => endDrag(e, false)}
-        onContextMenu={(e) => { e.preventDefault(); setMenuOpen((v) => !v); }}
+        onContextMenu={(e) => { e.preventDefault(); stopMoving(); setMenuOpen((v) => !v); }}
       >
         {/* 翻面：素材整体左右镜像（面朝走路方向） */}
         <div
@@ -511,7 +649,7 @@ export default function Pet() {
                 { label: '去本周', act: () => { setMenuOpen(false); nav('/week'); } },
                 { label: '去群管理', act: () => { setMenuOpen(false); nav('/groups'); } },
                 { divider: true },
-                { label: '换形象…', act: () => { setMenuOpen(false); setSettingsOpen(true); } },
+                { label: '换形象…', act: () => { setMenuOpen(false); stopMoving(); setSettingsOpen(true); } },
                 { label: '收起桌宠', act: () => { setMenuOpen(false); hide(); } },
               ].map((item, i) =>
                 item.divider ? (
