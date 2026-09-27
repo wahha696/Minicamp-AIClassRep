@@ -51,7 +51,24 @@ export function writeNapcatConfig(napcatDir: string = NAPCAT_DIR): void {
   webui.disableWebUI = true;
   writeFileSync(join(cfgDir, 'webui.json'), JSON.stringify(webui, null, 2), 'utf8');
 
-  // 3) loadNapCat.js：pathToFileURL，中文/空格路径安全（bat 版的字符串拼 file:/// 不可靠）
+  // 3) loadNapCat.js：pathToFileURL，中文/空格路径安全（bat 版的字符串拼 file:/// 不可靠）。
+  //    快速登录补丁（需求文档 §10-3）：NapCat 4.18.28 的 boot main 不会把 spawn 参数里的
+  //    `-q <uin>` 转发进 QQ.exe 命令行（真机实测，A7-2），而 napcat.mjs 是从 QQ 进程的
+  //    process.argv 读 -q/--qq 的。本加载器在 QQ 进程里、napcat.mjs 之前运行，这里直接把
+  //    data/settings.json 里记住的 uin 注入 argv，让快速登录真正生效；读不到就原样走二维码。
   const entry = pathToFileURL(join(napcatDir, 'napcat.mjs')).href;
-  writeFileSync(join(napcatDir, 'loadNapCat.js'), `(async () => {await import("${entry}")})()`, 'utf8');
+  const loader = [
+    '(async () => {',
+    '  try {',
+    '    const { readFileSync } = await import("node:fs");',
+    '    const { fileURLToPath } = await import("node:url");',
+    '    const { join, dirname } = await import("node:path");',
+    '    const p = join(dirname(fileURLToPath(import.meta.url)), "..", "data", "settings.json");',
+    '    const uin = JSON.parse(readFileSync(p, "utf8")).uin;',
+    '    if (uin && !process.argv.some((a) => a === "-q" || a === "--qq")) process.argv.push("-q", String(uin));',
+    '  } catch { /* 没有 settings.json 就走 NapCat 自己的流程（出二维码） */ }',
+    `  await import("${entry}");`,
+    '})()',
+  ].join('\n');
+  writeFileSync(join(napcatDir, 'loadNapCat.js'), loader, 'utf8');
 }
