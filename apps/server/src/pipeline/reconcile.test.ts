@@ -204,6 +204,43 @@ describe('create', () => {
   });
 });
 
+describe('历史补齐：旧消息晚于新消息进流水线', () => {
+  /** 造一条比已有消息都早的消息 */
+  const oldMsg = (text: string): Message => ({ ...msg(text), sent_at: T0 - 5 * DAY });
+
+  it('旧消息指向的已有事件是更新消息建的 → 只追加来源，不把字段改回旧的', () => {
+    const id = create({ start_at: T0 + DAY, location: 'B201' }, '改到周三 B201');
+    const old = oldMsg('周二 A301 小测');
+    applyEvents(G, [ev(old, { action: 'update', update_of: id, start_at: T0, location: 'A301' })], [old]);
+    expect(events()[0]).toMatchObject({ start_at: T0 + DAY, location: 'B201', version: 1 });
+    expect(sources(id)).toHaveLength(2);
+  });
+
+  it('旧消息的取消不会取消更新消息建的事件', () => {
+    const id = create();
+    const old = oldMsg('小测取消');
+    applyEvents(G, [ev(old, { action: 'cancel', update_of: id })], [old]);
+    expect(events()[0]).toMatchObject({ status: 'active' });
+  });
+
+  it('同名不同日（差超过 1 天）的旧消息 → 另建事件，不合并', () => {
+    create({ title: '组会', type: 'activity', start_at: T0 + 2 * DAY });
+    const old = oldMsg('周一开组会');
+    applyEvents(G, [ev(old, { title: '组会', type: 'activity', start_at: T0 - 4 * DAY })], [old]);
+    expect(events()).toHaveLength(2);
+    expect(events()[0]).toMatchObject({ start_at: T0 + 2 * DAY, version: 1 });
+  });
+
+  it('同名同日的旧消息 → 视为同一件事，只追加来源', () => {
+    const id = create();
+    const old = oldMsg('明天小测');
+    applyEvents(G, [ev(old, { start_at: T0 + 3600_000 })], [old]);
+    expect(events()).toHaveLength(1);
+    expect(events()[0]).toMatchObject({ start_at: T0, version: 1 });
+    expect(sources(id)).toHaveLength(2);
+  });
+});
+
 describe('事务', () => {
   it('中途出错整批回滚', () => {
     const m = msg('小测');

@@ -56,7 +56,7 @@ export default function Timetable() {
     try {
       const parsed = await parseFile(file);
       setDraft(parsed);
-      setSemesterStart(saved?.semester_start || DEFAULT_SEMESTER_START);
+      setSemesterStart(parsed.semesterStart || saved?.semester_start || DEFAULT_SEMESTER_START);
       if (parsed.courses.length === 0) {
         toast('没解析出课程，看看 warnings', 'error');
       }

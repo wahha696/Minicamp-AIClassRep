@@ -132,17 +132,35 @@ describe('syncHistory 翻页', () => {
     expect(callActionMock).not.toHaveBeenCalled();
   });
 
-  it('同一时刻只跑一个 sync：并发第二次返回同一个 Promise', async () => {
+  it('同一时刻只跑一个 sync：并发第二次天数不更大时返回同一个 Promise', async () => {
     seedGroup();
     let resolveFirst: (v: unknown) => void = () => {};
     callActionMock.mockImplementationOnce(
       () => new Promise((r) => { resolveFirst = r; }),
     );
     const p1 = syncHistory(7);
-    const p2 = syncHistory(30);
+    const p2 = syncHistory(1);
     resolveFirst({ messages: [] });
     const [r1, r2] = await Promise.all([p1, p2]);
     expect(r1).toEqual(r2); // 同一个结果
     expect(callActionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('正在补 7 天时点「30 天」：等前一次结束后再按 30 天补一次，不会被 7 天的结果顶替', async () => {
+    seedGroup();
+    let resolveFirst: (v: unknown) => void = () => {};
+    // 第一次（7 天）：一页就翻到窗口外，停；第二次（30 天）：从头翻，第二页多出 20 天前那条
+    callActionMock
+      .mockImplementationOnce(() => new Promise((r) => { resolveFirst = r; }))
+      .mockResolvedValueOnce({ messages: page([1, NOW - DAY], [3, NOW - 8 * DAY]) })
+      .mockResolvedValueOnce({ messages: page([2, NOW - 20 * DAY]) })
+      .mockResolvedValue({ messages: [] });
+    const p1 = syncHistory(7);
+    const p2 = syncHistory(30);
+    resolveFirst({ messages: page([1, NOW - DAY], [3, NOW - 8 * DAY]) });
+    const [r1, r2] = await Promise.all([p1, p2]);
+    expect(r1.messages).toBe(1);
+    expect(r2.messages).toBe(3); // 7 天那次的 1 条 + 30 天补出来的 8 天前、20 天前 2 条
+    expect(msgCount()).toBe(3);
   });
 });

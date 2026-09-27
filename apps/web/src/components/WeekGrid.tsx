@@ -1,7 +1,7 @@
 // 本周页「按课表」形态（D3 / FR-14）：7 列（周一…周日）× 5 行（两节一块）。
 // 课程作格子灰色背景（课名 + 教室），事件按 blockOf(落位时间) 落格、levelStyle 着色、DDL 角标；
 // 跨多块的事件只落在开始那块。手机横向滚动、左列 sticky，页面本身不出横向滚动条。
-import type { CourseDTO, EventDTO } from '../api/types';
+import type { CourseDTO } from '../api/types';
 import { isUpdated, levelStyle, typeMeta } from '../lib/eventMeta';
 import { groupBySlot } from '../lib/slots';
 import { hhmm, weekdayDate } from '../lib/time';
@@ -80,7 +80,7 @@ function Cell({
           <SlotStack
             key={g.key ?? g.rep.id}
             group={g}
-            render={(e) => <EventChip item={itemOf.get(e.id)!} />}
+            render={(e) => <EventChip item={itemOf.get(e.id)!} onClick={() => onPick(e.id)} />}
             onPick={onPick}
           />
         ))}

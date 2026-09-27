@@ -170,8 +170,54 @@ describe('extractEvents', () => {
   it('网络错误 → []，llm=error', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { client } = fakeClient(new Error('ECONNRESET'));
-    await expect(extractEvents(input([msg('m1', '小测')]), client)).resolves.toEqual([]);
+    const status = { llmFailed: false };
+    await expect(extractEvents(input([msg('m1', '小测')]), client, status)).resolves.toEqual([]);
     expect(llmStats.llm).toBe('error');
+    expect(status.llmFailed).toBe(true);
+  });
+
+  it('截断拆批后半连不上 → 整批 [] 并标记 llmFailed（留着整批重试，前半结果不落库）', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const create = vi
+      .fn()
+      .mockResolvedValueOnce({ choices: [{ message: { content: '{"events": [' }, finish_reason: 'length' }] })
+      .mockResolvedValueOnce({
+        choices: [{ message: { content: JSON.stringify({ events: [ev({ source_message_ids: ['m1'] })] }) }, finish_reason: 'stop' }],
+      })
+      .mockRejectedValueOnce(new Error('ECONNRESET'));
+    const client = { chat: { completions: { create } } } as unknown as LlmClient;
+    const status = { llmFailed: false };
+    const out = await extractEvents(input([msg('m1', '明天小测'), msg('m2', '周五交作业')]), client, status);
+    expect(out).toEqual([]);
+    expect(status.llmFailed).toBe(true);
+  });
+
+  it('输出被截断（finish_reason=length）→ 对半拆开分别重跑，结果合并', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const replies = [
+      { content: '{"events": [{"action": "cre', finish_reason: 'length' },
+      { content: JSON.stringify({ events: [ev({ source_message_ids: ['m1'] })] }), finish_reason: 'stop' },
+      { content: JSON.stringify({ events: [ev({ title: '作业', type: 'assignment', source_message_ids: ['m2'] })] }), finish_reason: 'stop' },
+    ];
+    const create = vi.fn(async () => {
+      const r = replies.shift()!;
+      return { choices: [{ message: { content: r.content }, finish_reason: r.finish_reason }] };
+    });
+    const client = { chat: { completions: { create } } } as unknown as LlmClient;
+    const out = await extractEvents(input([msg('m1', '明天小测'), msg('m2', '周五交作业')]), client);
+    expect(create).toHaveBeenCalledTimes(3);
+    expect(out.map((e) => e.title)).toEqual(['高数小测', '作业']);
+    const second = create.mock.calls[2] as unknown as [{ messages: { content: string }[] }];
+    expect(second[0].messages.at(-1)?.content).toContain('周五交作业');
+  });
+
+  it('补拉的旧消息：日历从最早消息的前一周开始列，并提示按发送时间换算', async () => {
+    const { client, create } = fakeClient(JSON.stringify({ events: [] }));
+    await extractEvents(input([msg('m1', '明天小测', 20 * 24 * 60)]), client);
+    const call = create.mock.calls[0] as unknown as [{ messages: { content: string }[] }];
+    expect(call[0].messages[0]!.content).toContain('09-06(日)'); // 20 天前 = 09-06，所在周的前一周
+    expect(call[0].messages[0]!.content).toContain('本周：09-21(一)');
+    expect(call[0].messages[1]!.content).toContain('补拉回来的历史消息');
   });
 
   it('没有候选消息不调用', async () => {

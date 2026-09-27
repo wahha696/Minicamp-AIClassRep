@@ -1,9 +1,11 @@
 // 顶栏「刷新」按钮（FR-16）：点开菜单选 1 / 7 / 30 天，往前补拉群历史消息。
-// 补拉后读 health.pending：>0 时按钮旁显示「整理中 N」，归零时 Toast「整理完了」。
+// 补拉后轮询 health.pending：按钮旁显示本次补回的消息还剩几条没整理（「整理中 N」），归零时 Toast「整理完了」；
+// 超时 / 没配 AI / 连续读不到 health 时停止跟踪（判定见 lib/syncTrack.ts）。
 // QQ 不在线禁用；局域网只读访问（写接口 403）整颗按钮不渲染。
 import { useEffect, useRef, useState } from 'react';
 import { getHealth, syncNow } from '../api/client';
 import { toastError } from '../lib/errors';
+import { type SyncTrack, trackStep } from '../lib/syncTrack';
 import { useConnectStatus } from './ConnectStatus';
 import { useToast } from './Toast';
 
@@ -24,8 +26,9 @@ export default function SyncButton() {
   const toast = useToast();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [pending, setPending] = useState(0); // 本次补拉后还在整理的消息数
-  const [tracking, setTracking] = useState(false);
+  const [pending, setPending] = useState(0); // 本次补回的消息还没整理完的条数
+  const [track, setTrack] = useState<Omit<SyncTrack, 'fails'> | null>(null);
+  const tracking = track !== null;
   const rootRef = useRef<HTMLDivElement>(null);
 
   const online = conn?.state === 'online';
@@ -47,41 +50,48 @@ export default function SyncButton() {
     };
   }, [open]);
 
-  // 补拉后轮询 pending 直到归零
+  // 补拉后轮询 pending 直到本次补回的归零（或超时 / 没配 AI / 读不到 health）
   useEffect(() => {
-    if (!tracking) return;
+    if (!track) return;
     let alive = true;
-    const timer = setInterval(() => {
+    let fails = 0;
+    const poll = () => {
       getHealth()
+        .then((h) => h, () => null)
         .then((h) => {
           if (!alive) return;
-          setPending(h.pending);
-          if (h.pending === 0) {
-            setTracking(false);
-            toast('整理完了');
+          fails = h === null ? fails + 1 : 0;
+          const step = trackStep({ ...track, fails }, h, Date.now());
+          if (step.kind === 'progress') {
+            if (step.left >= 0) setPending(step.left);
+            return;
           }
-        })
-        .catch(() => {});
-    }, 3_000);
-    void getHealth()
-      .then((h) => {
-        if (alive) setPending(h.pending);
-      })
-      .catch(() => {});
+          setTrack(null);
+          setPending(0);
+          toast(step.kind === 'done' ? '整理完了' : step.message);
+        });
+    };
+    const timer = setInterval(poll, 3_000);
     return () => {
       alive = false;
       clearInterval(timer);
     };
-  }, [tracking, toast]);
+  }, [track, toast]);
 
   async function onPick(days: 1 | 7 | 30) {
     setOpen(false);
     setBusy(true);
     try {
+      // 补拉前的 pending 作基线：群里本来就在排队的消息不算进「整理中」
+      const base = await getHealth().then((h) => h.pending, () => 0);
       const res = await syncNow(days);
+      if (res.messages === 0) {
+        toast('没有漏掉的消息');
+        return;
+      }
       toast(`补回 ${res.messages} 条消息，正在整理…`);
       setPending(res.messages);
-      setTracking(true);
+      setTrack({ total: res.messages, base, startedAt: Date.now() });
     } catch (e) {
       toastError(toast, e);
     } finally {

@@ -21,7 +21,7 @@ export const STATUS_TEXT: Record<EventStatus, string> = {
 
 /**
  * 有变更记录（被改期/改地点/取消过）→ 卡片显示「已按最新通知更新」。
- * 列表接口不带 history；version 只在流水线写 event_history 时 +1（手动 PATCH 不改 version），所以 version>1 即有变更记录。
+ * 列表接口不带 history；version 只在流水线按新消息改事件时 +1（手动调级只写 history、不改 version），所以 version>1 即被群通知改过。
  */
 export function isUpdated(e: Pick<EventDTO, 'version'>): boolean {
   return e.version > 1;

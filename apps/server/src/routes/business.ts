@@ -142,7 +142,7 @@ function getEventById(id: number): EventDTO | null {
   return row === undefined ? null : toEventDTO(row);
 }
 
-/** 详情 = 事件 + sources（时间升序）+ history（version 升序）；GET 详情与 PATCH 共用 */
+/** 详情 = 事件 + sources（时间升序）+ history（version、id 升序）；GET 详情与 PATCH 共用 */
 function getEventDetail(id: number): EventDetailDTO | null {
   const event = getEventById(id);
   if (event === null) return null;
@@ -155,7 +155,7 @@ function getEventDetail(id: number): EventDetailDTO | null {
 
   const historyRows = db
     .prepare(
-      'SELECT version, changed_fields, source_message_id, changed_at FROM event_history WHERE event_id = ? ORDER BY version',
+      'SELECT version, changed_fields, source_message_id, changed_at FROM event_history WHERE event_id = ? ORDER BY version, id',
     )
     .all(id) as unknown as {
     version: number;
@@ -192,14 +192,15 @@ function applyManualLevel(row: EventRow, level: number | null, now: number): voi
       : row.level;
 
   if (level !== row.level) {
-    const version = row.version + 1;
+    // 手动调级不升 version：version>1 表示「按群里新通知改过」，卡片据此显示「已按最新通知更新」。
+    // 仍写一条 history（沿用当前 version、source_message_id 为 NULL），详情页按 id 排序展示。
     db.prepare(
-      'UPDATE events SET level = ?, level_locked = 1, version = ?, updated_at = ? WHERE id = ?',
-    ).run(level, version, now, row.id);
+      'UPDATE events SET level = ?, level_locked = 1, updated_at = ? WHERE id = ?',
+    ).run(level, now, row.id);
     db.prepare(
       `INSERT INTO event_history (event_id, version, changed_fields, source_message_id, changed_at)
        VALUES (?, ?, ?, NULL, ?)`,
-    ).run(row.id, version, JSON.stringify({ level: { from: row.level, to: level } }), now);
+    ).run(row.id, row.version, JSON.stringify({ level: { from: row.level, to: level } }), now);
   } else {
     db.prepare('UPDATE events SET level_locked = 1, updated_at = ? WHERE id = ?').run(now, row.id);
   }

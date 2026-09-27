@@ -125,6 +125,19 @@ describe('ingestMessages', () => {
     expect(countMessages()).toBe(1);
   });
 
+  it('已是某个事件来源的消息不再入库（老版本清理删了原文、没留 message_seen）', () => {
+    freshDb();
+    db.prepare(
+      'INSERT INTO event_sources (event_id, message_id, sender_name, text, sent_at) VALUES (1, ?, ?, ?, ?)',
+    ).run('old-1', '张老师', '周五交作业', Date.now() - 20 * 86_400_000);
+    const res = ingestMessages(
+      [msg('old-1', 'g1', '周五交作业'), msg('old-2', 'g1', '收到')],
+      'history',
+    );
+    expect(res).toEqual({ inserted: 1 });
+    expect(db.prepare('SELECT message_id FROM messages').all()).toEqual([{ message_id: 'old-2' }]);
+  });
+
   it('空批次不报错、不改库', () => {
     freshDb();
     expect(ingestMessages([], 'onebot')).toEqual({ inserted: 0 });

@@ -374,7 +374,7 @@ export const mockApi: Api = {
         const from = e.level;
         e.level = patch.level;
         e.level_locked = true;
-        e.version += 1;
+        // 与后端一致：手动调级不升 version，只追加一条 history
         e.history = [
           ...e.history,
           {

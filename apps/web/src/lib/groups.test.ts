@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { GroupDTO } from '../api/types';
 import { filterGroups, groupsToChange, runInBatches } from './groups';
 
-const g = (group_id: string, name: string): GroupDTO => ({ group_id, name, enabled: true, message_count: 0, event_count: 0 });
+const g = (group_id: string, name: string): GroupDTO => ({ group_id, name, enabled: true, message_count: 0, event_count: 0, course_name: null });
 const list = [
   g('123456', '高数(2)班'),
   g('789012', 'Java 课程群'),

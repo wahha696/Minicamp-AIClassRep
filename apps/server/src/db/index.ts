@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS event_sources (
   sent_at     INTEGER NOT NULL,
   PRIMARY KEY (event_id, message_id)
 );
+-- ingest 按 message_id 查「这条消息是否已经变成过事件」（老版本清理没留 message_seen）
+CREATE INDEX IF NOT EXISTS idx_event_sources_message ON event_sources(message_id);
 CREATE TABLE IF NOT EXISTS event_history (
   id                INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id          INTEGER NOT NULL,

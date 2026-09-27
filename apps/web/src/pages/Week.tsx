@@ -1,9 +1,10 @@
 // 本周页 /week（D3，FR-7.2 + FR-14）：固定周一到周日 7 天，可翻上周 / 下周 / 回到本周。
 // 两种形态：「按时间」沿用纵向列表（套 SlotStack 折叠）；「按课表」是 7×5 网格（WeekGrid），
 // 课程灰底、事件落格。形态选择存 localStorage。只有截止时间的事件显示「DDL」徽标。
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { exportIcsUrl, getEvents, getTimetable } from '../api/client';
+import type { EventDTO } from '../api/types';
 import EventDrawer from '../components/EventDrawer';
 import SlotStack from '../components/SlotStack';
 import WeekGrid from '../components/WeekGrid';
@@ -86,14 +87,32 @@ export default function Week() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const timetable = usePolling(getTimetable, 60_000);
 
-  const { data, error, loading, refresh } = usePolling(
-    useCallback(() => {
-      const { from, to } = weekRange(monday);
-      return getEvents(from, to);
-    }, [monday]),
+  // 按周缓存（内存，页面内有效）：翻回看过的周立即显示，后台再刷新；同时预取前后各一周
+  const cacheRef = useRef(new Map<number, EventDTO[]>());
+  const [, bump] = useState(0);
+  const fetchWeek = useCallback(async (m: number) => {
+    const { from, to } = weekRange(m);
+    const events = await getEvents(from, to);
+    cacheRef.current.set(m, events);
+    return events;
+  }, []);
+
+  const { error, loading: firstLoading, refresh } = usePolling(
+    useCallback(() => fetchWeek(monday), [fetchWeek, monday]),
     10_000,
   );
+  // 翻周后立即拉新一周（usePolling 只在定时器到点时才用新的 fn），并预取相邻周
+  useEffect(() => {
+    void refresh();
+    for (const m of [monday - WEEK_MS, monday + WEEK_MS]) {
+      if (!cacheRef.current.has(m)) {
+        fetchWeek(m).then(() => bump((n) => n + 1), () => {});
+      }
+    }
+  }, [monday, refresh, fetchWeek]);
 
+  const data = cacheRef.current.get(monday);
+  const loading = firstLoading || data === undefined;
   const days = useMemo(() => groupByDay(data ?? [], monday), [data, monday]);
   const { from, to } = weekRange(monday);
   const total = days.reduce((n, d) => n + d.items.length, 0);

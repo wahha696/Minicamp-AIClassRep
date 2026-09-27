@@ -451,7 +451,7 @@ describe('PATCH /api/events/:id', () => {
     });
   });
 
-  it('手动设级：level+locked+version+history，记一条 level_feedback（ai_level=调整前的值）', async () => {
+  it('手动设级：level+locked+history（不升 version），记一条 level_feedback（ai_level=调整前的值）', async () => {
     const app = freshApp();
     addGroup('g1', '高数(2)班');
     const id = addEvent({ title: '大物实验报告' }); // 默认 level=2, unlocked
@@ -461,7 +461,8 @@ describe('PATCH /api/events/:id', () => {
     const event = body as EventDetailDTO;
     expect(event.level).toBe(4);
     expect(event.level_locked).toBe(true);
-    expect(event.version).toBe(2);
+    expect(event.version).toBe(1); // 不升版本，否则卡片会误显示「已按最新通知更新」
+    expect(event.history.at(-1)?.source_message_id).toBeNull();
     const levelChange = event.history.at(-1)?.changed_fields['level'] as { from: number; to: number };
     expect(levelChange).toEqual({ from: 2, to: 4 });
 

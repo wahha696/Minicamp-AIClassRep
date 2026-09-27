@@ -13,8 +13,8 @@ export function PinIcon({ className }: { className?: string }) {
       className={className ?? 'h-3 w-3'}
       fill="currentColor"
       aria-hidden
-      title="等级已手动锁定"
     >
+      <title>等级已手动锁定</title>
       <path d="M14.5 3.5 20.5 9.5l-1.4 1.4-.7-.1-4.3 4.3v3.4l-1.4 1.4-3.5-3.5-4.3 4.2-1.4-1.4 4.2-4.3-3.5-3.5 1.4-1.4h3.4l4.3-4.3-.1-.7 1.4-1.4Z" />
     </svg>
   );

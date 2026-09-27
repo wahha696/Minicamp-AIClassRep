@@ -1,5 +1,6 @@
 // LLM 提取（FR-4）：把一批候选消息交给 LLM，拿回结构化的事件（新建 / 改期 / 取消）。
 // 任何失败都只返回 []、不抛异常——调度器照样把消息置为已处理，避免死循环（FR-5.4）。
+// 例外是「AI 连不上」：通过 status.llmFailed 告诉调用方，这批留着稍后重试。
 import OpenAI from 'openai';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 import { z } from 'zod';
@@ -163,28 +164,41 @@ function fmtEvent(e: ActiveEventBrief): string {
 
 const DAY = 86400_000;
 
-/** 上周到下下周的日历（每周从周一开始），让 LLM 查表而不是自己推算星期 */
-function calendar(now: number): string {
-  const d = new Date(now + TZ_OFFSET);
-  const today = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
-  const monday = today - ((d.getUTCDay() + 6) % 7) * DAY;
-  const labels = ['上周', '本周', '下周', '下下周'];
-  return labels
-    .map((label, w) => {
-      const days = Array.from({ length: 7 }, (_, i) => {
-        const x = new Date(monday + (w - 1) * 7 * DAY + i * DAY);
-        return `${pad(x.getUTCMonth() + 1)}-${pad(x.getUTCDate())}(${WEEKDAY[x.getUTCDay()]})`;
-      });
-      return `${label}：${days.join(' ')}`;
-    })
-    .join('\n');
+/**
+ * 日历（每周从周一开始），让 LLM 查表而不是自己推算星期。
+ * 默认上周到下下周；本批有更早的消息（历史补齐）时，从最早那条消息的上一周开始列，最多 8 周。
+ */
+function calendar(now: number, earliest = now): string {
+  const mondayUtc = (ts: number) => {
+    const d = new Date(ts + TZ_OFFSET);
+    const day = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+    return day - ((d.getUTCDay() + 6) % 7) * DAY;
+  };
+  const thisMonday = mondayUtc(now);
+  const start = Math.max(Math.min(mondayUtc(earliest), thisMonday) - 7 * DAY, thisMonday - 5 * 7 * DAY);
+  const weeks = Math.round((thisMonday - start) / (7 * DAY)) + 3; // 到下下周为止
+  const label = (w: number) => {
+    const off = Math.round((start + w * 7 * DAY - thisMonday) / (7 * DAY));
+    if (off === -1) return '上周';
+    if (off === 0) return '本周';
+    if (off === 1) return '下周';
+    if (off === 2) return '下下周';
+    return `${-off} 周前`;
+  };
+  return Array.from({ length: weeks }, (_, w) => {
+    const days = Array.from({ length: 7 }, (_, i) => {
+      const x = new Date(start + w * 7 * DAY + i * DAY);
+      return `${pad(x.getUTCMonth() + 1)}-${pad(x.getUTCDate())}(${WEEKDAY[x.getUTCDay()]})`;
+    });
+    return `${label(w)}：${days.join(' ')}`;
+  }).join('\n');
 }
 
-export function buildSystemPrompt(now: number): string {
+export function buildSystemPrompt(now: number, earliest = now): string {
   return `你是大学班级群里的「AI 课代表」，负责从群消息里找出需要同学行动或到场的事项。
 当前时间：${fmtShanghai(now)}（Asia/Shanghai）。
 日历（${new Date(now + TZ_OFFSET).getUTCFullYear()} 年，每周从周一开始，「本周」指当前时间所在的周）：
-${calendar(now)}
+${calendar(now, earliest)}
 
 规则：
 1. 只提取需要学生行动或到场的事项：考试/小测、作业与提交截止、开会、活动、需要照做的通知（选课、填表、缴费等）。**只要说定了具体时间（或日期）要去做的事，不管内容是什么都算**，包括聚餐、吃饭、出游、打球、开黑等约定（type 用 activity），比如「周二早上 6:00 去餐馆吃饭」「周六晚 7 点北门聚餐」。不算的只有：没有定下时间的随口提议或询问（「晚上约饭吗」「有人开黑吗」「有人拼外卖吗」）、闲聊、吐槽、二手买卖、失物招领。没有 @ 任何人的通知视为对全体同学的通知，照常提取；[at] 表示 @全体成员 或 @了我，同样照常提取。
@@ -275,6 +289,13 @@ export function buildUserPrompt(input: ExtractInput): string {
   );
   const timetable = timetableSection(input);
   if (timetable) parts.push(timetable);
+  const earliest = input.candidates[0]?.sent_at ?? input.now;
+  if (input.now - earliest > 3600_000) {
+    parts.push(
+      '注意：下面有些新消息是补拉回来的历史消息，发送时间明显早于当前时间。相对时间一律按各自的发送时间换算；' +
+        '已有事件可能是根据更晚的消息建立的——旧消息和已有事件说的是同一件事时不要输出，说的是别的事（哪怕标题相近、日期不同）照常 create。',
+    );
+  }
   if (input.context.length) {
     parts.push('之前的消息（仅供理解上下文，不要从这里提取事项）：\n' + input.context.map(fmtMsg).join('\n'));
   }
@@ -306,9 +327,15 @@ function getClient(): LlmClient {
   return defaultClient;
 }
 
+/** 单次调用的结果标记。按调用传，不看全局计数——多个群并发时别的群失败不会连累这一批。 */
+export interface ExtractStatus {
+  llmFailed: boolean; // AI 没调通（网络 / 鉴权等），不是输出格式问题
+}
+
 export async function extractEvents(
   input: ExtractInput,
   client: LlmClient | undefined = undefined,
+  status: ExtractStatus = { llmFailed: false },
 ): Promise<ExtractedEvent[]> {
   if (input.candidates.length === 0) return [];
   if (!client && !getLlmConfig().apiKey) {
@@ -316,15 +343,42 @@ export async function extractEvents(
     return [];
   }
   const llm = client ?? getClient();
+  const r = await extractOnce(input, llm, status);
+  if (r !== 'truncated') return r;
+  // 输出被 max_tokens 截断（一批事项太多，历史补齐时常见）：对半拆开各跑一次，而不是整批丢掉
+  if (input.candidates.length <= 1) return [];
+  const mid = Math.ceil(input.candidates.length / 2);
+  const head = input.candidates.slice(0, mid);
+  const tail = input.candidates.slice(mid);
+  console.warn(`[extract] 输出被截断，拆成 ${head.length} + ${tail.length} 条重试`);
+  const a = await extractEvents({ ...input, candidates: head }, llm, status);
+  if (status.llmFailed) return []; // 前半就连不上了，整批留着重试
+  const b = await extractEvents(
+    { ...input, candidates: tail, context: [...input.context, ...head].slice(-Math.max(input.context.length, 10)) },
+    llm,
+    status,
+  );
+  if (status.llmFailed) return []; // 前半的结果也不要：整批重试时会再提取一次，避免重复
+  return [...a, ...b];
+}
+
+/** 调一次（格式不合法时带着错误再试一次）。输出被截断时返回 'truncated'。 */
+async function extractOnce(
+  input: ExtractInput,
+  llm: LlmClient,
+  status: ExtractStatus,
+): Promise<ExtractedEvent[] | 'truncated'> {
   const validIds = new Set(input.candidates.map((m) => m.message_id));
   const prefs = preferenceSection();
+  const earliest = input.candidates[0]?.sent_at ?? input.now;
   const messages: ChatCompletionMessageParam[] = [
-    { role: 'system', content: buildSystemPrompt(input.now) + (prefs ? `\n\n${prefs}` : '') },
+    { role: 'system', content: buildSystemPrompt(input.now, earliest) + (prefs ? `\n\n${prefs}` : '') },
     { role: 'user', content: buildUserPrompt(input) },
   ];
 
   for (let attempt = 0; attempt < 2; attempt++) {
     let raw: string;
+    let truncated = false;
     try {
       llmStats.called++;
       const t0 = Date.now();
@@ -336,10 +390,12 @@ export async function extractEvents(
         max_tokens: 4096,
       });
       raw = res.choices[0]?.message.content?.trim() ?? '';
+      truncated = res.choices[0]?.finish_reason === 'length';
       llmStats.lastMs = Date.now() - t0;
     } catch (e) {
       llmStats.llm = 'error';
       llmStats.failed++;
+      status.llmFailed = true;
       console.warn('[extract] LLM 调用失败：', (e as Error).message);
       return [];
     }
@@ -347,6 +403,7 @@ export async function extractEvents(
 
     const r = raw ? parseExtraction(raw, validIds) : ({ ok: false, error: '输出为空' } as const);
     if (r.ok) return r.events;
+    if (truncated) return 'truncated';
 
     console.warn(`[extract] 第 ${attempt + 1} 次输出不合法：${r.error}`);
     messages.push(

@@ -1,6 +1,7 @@
 // 课表解析（FR-13）：附录 A 的脱敏样例 + 变体用例；blockOf / weekOf 与后端同组用例。
 import { describe, expect, it } from 'vitest';
 import fixture from './__fixtures__/timetable-rows.json';
+import fixture2 from './__fixtures__/timetable-rows-2.json';
 import { blockOf, parseTimetable, parseWeeks, weekOf } from './timetable';
 
 const sh = (date: string, hhmm = '00:00') => Date.parse(`${date}T${hhmm}:00+08:00`);
@@ -103,6 +104,43 @@ describe('parseTimetable 变体', () => {
   });
 });
 
+describe('parseTimetable（形式二：行=星期、列=节次）', () => {
+  const { courses, warnings, semesterStart } = parseTimetable(fixture2 as string[][]);
+  const key = (c: { name: string; weekday: number; block: number; location: string; weeks: number[] }) =>
+    JSON.stringify([c.name, c.weekday, c.block, c.location, c.weeks]);
+
+  it('与形式一解析出同样的 13 个课次（除了没有教师）', () => {
+    expect(warnings).toEqual([]);
+    const f1 = parseTimetable(fixture as string[][]).courses;
+    expect(courses.map(key).sort()).toEqual(f1.map(key).sort());
+    expect(courses.every((c) => c.teacher === '')).toBe(true);
+  });
+
+  it('体育空教室行 → location 为空串；「8,12周(8学时)」', () => {
+    expect(courses.find((c) => c.name === '体育（三）')).toMatchObject({ weekday: 2, block: 3, location: '' });
+    expect(courses.find((c) => c.name === '形势与政策')?.weeks).toEqual([8, 12]);
+  });
+
+  it('从底部校历推出第 1 周周一', () => {
+    expect(semesterStart).toBe('2026-09-07');
+  });
+
+  it('一格多门课 + 11–12 节有课警告', () => {
+    const rows = [
+      ['', '1－2', '', '', '', '11－12', '', '', '', '备注'],
+      ['星期三', '\n课A\n1-8周(16学时)\nA101\n某班\n课B\n9-16周(16学时)\n\n某班\n', '', '', '', '\n晚课\n1-16周\nX1\n', '', '', '', '随便'],
+    ];
+    const r = parseTimetable(rows);
+    expect(r.courses.map((c) => [c.name, c.location, c.weeks.length, c.weekday, c.block])).toEqual([
+      ['课A', 'A101', 8, 3, 1],
+      ['课B', '', 8, 3, 1],
+    ]);
+    expect(r.warnings).toHaveLength(1);
+    expect(r.warnings[0]).toContain('晚课');
+    expect(r.semesterStart).toBeUndefined();
+  });
+});
+
 describe('parseWeeks', () => {
   it.each([
     ['3-16[周]', [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]],
@@ -110,6 +148,9 @@ describe('parseWeeks', () => {
     ['1-15单[周]', [1, 3, 5, 7, 9, 11, 13, 15]],
     ['2-16双[周]', [2, 4, 6, 8, 10, 12, 14, 16]],
     ['3[周]', [3]],
+    ['3-6周(32学时)', [3, 4, 5, 6]],
+    ['8,12周(8学时)', [8, 12]],
+    ['1-5单周', [1, 3, 5]],
     ['5-3[周]', null], // 倒序区间
     ['abc[周]', null],
     ['', null],

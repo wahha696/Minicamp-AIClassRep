@@ -14,6 +14,7 @@ vi.mock('openai', () => ({
 }));
 
 import {
+  invalidatePreferenceSummary,
   memoryEnabled,
   preferenceRules,
   schedulePreferenceSummary,
@@ -99,6 +100,20 @@ describe('summarize', () => {
     await summarize();
     expect(rules().map((r) => r.text)).toEqual(['旧规则']);
     expect(llmStats.failed).toBe(before);
+  });
+
+  it('总结等 AI 期间用户删了规则 / 清空 → 这次结果丢掉，不把删掉的规则写回来', async () => {
+    addFeedback();
+    let release!: () => void;
+    createMock.mockImplementationOnce(
+      () => new Promise((r) => (release = () => r(reply({ rules: [{ text: '刚被删的规则', level: 4, feedback_ids: [] }] })))),
+    );
+    const running = summarize();
+    await vi.waitFor(() => expect(createMock).toHaveBeenCalled());
+    invalidatePreferenceSummary(); // 路由里删规则 / 清空时会调
+    release();
+    await running;
+    expect(rules()).toHaveLength(0);
   });
 
   it('AI 返回非法 JSON → 保留旧规则', async () => {
