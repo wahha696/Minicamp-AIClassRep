@@ -1,5 +1,5 @@
 // 群管理页 /groups（D6，FR-10 + FR-13）：群名、消息数、事件数、对应课程下拉、监听开关、删除本群数据。
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { deleteGroupData, getGroups, getTimetable, patchGroup } from '../api/client';
 import type { GroupDTO } from '../api/types';
 import ConfirmDialog from '../components/ConfirmDialog';
@@ -10,12 +10,14 @@ import {
   enabledIds,
   filterGroups,
   groupsToChange,
+  keepOrder,
   loadPresets,
   matchesPreset,
   presetChanges,
   reverseChanges,
   runInBatches,
   savePresets,
+  sortEnabledFirst,
   toChanges,
   upsertPreset,
   type GroupChange,
@@ -31,7 +33,11 @@ export default function Groups() {
   const [toDelete, setToDelete] = useState<GroupDTO | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [query, setQuery] = useState('');
-  const shown = data ? filterGroups(data, query) : null;
+  // 进页面拿到第一份数据时排一次：监听中的群在前。之后拨开关不挪位置，刷新页面才重新排
+  const orderRef = useRef<string[] | null>(null);
+  if (data && orderRef.current === null) orderRef.current = sortEnabledFirst(data).map((g) => g.group_id);
+  const ordered = data && orderRef.current ? keepOrder(data, orderRef.current) : null;
+  const shown = ordered ? filterGroups(ordered, query) : null;
   // 正在批量改：'on' 全开 / 'off' 全关 / 'undo' 撤销 / 'preset:名字' 套用预设
   const [busy, setBusy] = useState<string | null>(null);
   // 最近一次批量操作（一键全开/全关、套用预设），用来「撤销」；单独拨一个开关后就不能再撤销了

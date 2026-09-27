@@ -114,6 +114,8 @@ export function bannerFor(status: ConnectStatusDTO | undefined, pathname: string
 // ===== 路由守卫
 
 export const SKIP_CONNECT_KEY = 'skipConnect';
+/** 值为 '1'：勾选待办时不再弹「是否确认完成」 */
+export const SKIP_DONE_CONFIRM_KEY = 'skipTodoDoneConfirm';
 
 /** localStorage 读写（隐私模式 / 禁用站点数据时会抛错）：读失败当没有，写失败静默忽略 */
 export function readFlag(key: string): string | null {

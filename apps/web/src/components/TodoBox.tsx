@@ -1,11 +1,13 @@
 // 今日页的待办框（FR-15）：群待办 + 手动待办混排，按等级降序。
-// 勾上即完成（群待办 PATCH events，手动待办 PATCH todos），Toast 带「撤销」。
+// 勾上先弹「是否确认完成」（可勾「下次不再提醒」），确认后完成（群待办 PATCH events，手动待办 PATCH todos），Toast 带「撤销」。
 // 「+」展开输入行回车添加手动待办；群待办点标题开 EventDrawer，手动待办点标题就地编辑。
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { createTodo, patchEvent, patchTodo } from '../api/client';
 import type { EventStatus, Level, TodosDTO } from '../api/types';
 import { toastError } from '../lib/errors';
 import { LEVEL_LABEL, levelStyle } from '../lib/eventMeta';
+import { SKIP_DONE_CONFIRM_KEY, readFlag, writeFlag } from '../lib/status';
+import ConfirmDialog from './ConfirmDialog';
 import { useToast } from './Toast';
 
 interface Props {
@@ -62,6 +64,10 @@ export default function TodoBox({ data, loading, onChanged, onOpenEvent }: Props
   const [busyId, setBusyId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState('');
+  // 等待确认完成的那一行；非 null 时弹窗打开，这一行的勾先显示为已勾
+  const [confirming, setConfirming] = useState<Row | null>(null);
+  const [dontAskAgain, setDontAskAgain] = useState(false);
+  const cancelConfirm = useCallback(() => setConfirming(null), []);
 
   const rows = data ? toRows(data) : [];
 
@@ -91,6 +97,24 @@ export default function TodoBox({ data, loading, onChanged, onOpenEvent }: Props
     } finally {
       setBusyId(null);
     }
+  }
+
+  /** 点勾：没关提醒就先弹确认，关了就直接完成 */
+  function onCheck(row: Row) {
+    if (readFlag(SKIP_DONE_CONFIRM_KEY) === '1') {
+      void check(row);
+      return;
+    }
+    setDontAskAgain(false);
+    setConfirming(row);
+  }
+
+  function onConfirmDone() {
+    if (!confirming) return;
+    if (dontAskAgain) writeFlag(SKIP_DONE_CONFIRM_KEY, '1'); // 点「否」时不记，免得误勾后再也不提醒
+    const row = confirming;
+    setConfirming(null);
+    void check(row);
   }
 
   async function addManual() {
@@ -176,9 +200,9 @@ export default function TodoBox({ data, loading, onChanged, onOpenEvent }: Props
               <li key={key} className="flex items-center gap-2.5 px-4 py-2.5">
                 <input
                   type="checkbox"
-                  checked={false}
+                  checked={confirming !== null && `${confirming.kind}-${confirming.id}` === key}
                   disabled={busyId === key}
-                  onChange={() => void check(row)}
+                  onChange={() => onCheck(row)}
                   aria-label={`完成「${row.title}」`}
                   className="h-4 w-4 shrink-0 cursor-pointer rounded border-slate-300 accent-slate-700"
                 />
@@ -223,6 +247,28 @@ export default function TodoBox({ data, loading, onChanged, onOpenEvent }: Props
           })}
         </ul>
       )}
+
+      <ConfirmDialog
+        open={confirming !== null}
+        title="是否确认完成？"
+        confirmText="是"
+        cancelText="否"
+        onConfirm={onConfirmDone}
+        onCancel={cancelConfirm}
+        footer={
+          <label className="flex cursor-pointer items-center gap-1.5 text-xs text-slate-500">
+            <input
+              type="checkbox"
+              checked={dontAskAgain}
+              onChange={(e) => setDontAskAgain(e.target.checked)}
+              className="h-3.5 w-3.5 accent-slate-700"
+            />
+            下次不再提醒
+          </label>
+        }
+      >
+        「{confirming?.title}」完成后会从待办里移走。
+      </ConfirmDialog>
     </section>
   );
 }

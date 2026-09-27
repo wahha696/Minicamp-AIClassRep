@@ -57,6 +57,26 @@ export function filterGroups(groups: GroupDTO[], query: string): GroupDTO[] {
   return scored.map((x) => x.g);
 }
 
+/** 监听中的群排前面，同一类里保持原顺序（稳定排序） */
+export function sortEnabledFirst(groups: GroupDTO[]): GroupDTO[] {
+  return groups
+    .map((g, i) => ({ g, i }))
+    .sort((a, b) => Number(b.g.enabled) - Number(a.g.enabled) || a.i - b.i)
+    .map((x) => x.g);
+}
+
+/**
+ * 按之前记下的群号顺序排列；order 里没有的群（后来新出现的）排在最后、保持原顺序。
+ * 群管理页只在进页面时排一次序，之后拨开关、轮询都不挪位置，免得行在鼠标底下跳走。
+ */
+export function keepOrder(groups: GroupDTO[], order: string[]): GroupDTO[] {
+  const pos = new Map(order.map((id, i) => [id, i]));
+  return groups
+    .map((g, i) => ({ g, i, p: pos.get(g.group_id) ?? order.length + i }))
+    .sort((a, b) => a.p - b.p)
+    .map((x) => x.g);
+}
+
 /** 一键全开 / 全关：列表里状态和目标不一样、需要改的群 */
 export function groupsToChange(groups: GroupDTO[], enabled: boolean): GroupDTO[] {
   return groups.filter((g) => g.enabled !== enabled);
