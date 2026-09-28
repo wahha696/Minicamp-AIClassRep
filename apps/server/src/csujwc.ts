@@ -434,7 +434,16 @@ export async function csuFetchCourses(
         if (!isLoginPage(h) && /id=["']kbtable["']/.test(h)) {
           foundTable = true;
           const structured = parseTimetableHtml(h);
-          if (structured && (structured.courses.length || structured.items?.length)) { parsedResult = structured; break; }
+          if (structured && (structured.courses.length || structured.items?.length)) {
+            if (!structured.courses.length) {
+              // 找到课表页但 0 门课：留存页面供离线诊断(与 dumpPage 同目录,含课表内容)
+              dumpPage('csu-kb-parsed-empty.html', h);
+              console.warn(
+                `[csujwc] 课表页解析出 ${structured.items?.length ?? 0} 个片段、0 门课,页面已存 data/logs/csu-kb-parsed-empty.html`,
+              );
+            }
+            parsedResult = structured; break;
+          }
           const parsed = parseKbtable(h);
           const courses = toCourseDTOs(parsed.raw, parsed.warnings);
           console.log(`[csujwc] 课表解析:有效排课 ${courses.length} 项,提示 ${parsed.warnings.length} 条`);
