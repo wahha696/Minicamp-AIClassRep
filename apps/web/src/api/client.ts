@@ -73,8 +73,10 @@ export interface Api {
   createTodo(todo: { title: string; note?: string; level?: Level }): Promise<TodoDTO>;
   patchTodo(id: number, patch: { title?: string; note?: string; level?: Level; done?: boolean }): Promise<TodoDTO>;
   getTimetable(): Promise<TimetableDTO>;
-  saveTimetable(t: TimetableDTO): Promise<TimetableDTO>;
-  clearTimetable(): Promise<{ ok: true }>;
+  saveTimetable(t: import('../../../../shared/timetable').TimetableSaveRequest): Promise<TimetableDTO>;
+  getTimetableVersions(): Promise<import('../../../../shared/timetable').TimetableVersion[]>;
+  restoreTimetable(id:number, revision:number): Promise<TimetableDTO>;
+  clearTimetable(expectedRevision?:number): Promise<{ ok: true }>;
   /** 中南教务系统直连导入:第一步拿验证码(内联展示);第二步带验证码拉课次(不落库) */
   csuStartImport(user: string, password: string): Promise<CsuImportStartDTO>;
   csuFetchCourses(sessionId: string, captcha: string): Promise<CsuImportResultDTO>;
@@ -159,7 +161,9 @@ const realApi: Api = {
   patchTodo: (id, patch) => request('PATCH', `/api/todos/${id}`, patch),
   getTimetable: () => request('GET', '/api/timetable'),
   saveTimetable: (t) => request('PUT', '/api/timetable', t),
-  clearTimetable: () => request('DELETE', '/api/timetable'),
+  clearTimetable: (expected_revision) => request('DELETE', '/api/timetable', {expected_revision}),
+  getTimetableVersions: () => request('GET', '/api/timetable/versions'),
+  restoreTimetable: (id, revision) => request('POST', `/api/timetable/restore/${id}`, {expected_revision:revision}),
   csuStartImport: (user, password) => request('POST', '/api/timetable/csu/start', { user, password }),
   csuFetchCourses: (sessionId, captcha) =>
     request('POST', '/api/timetable/csu/fetch', { session_id: sessionId, captcha }),
@@ -208,6 +212,8 @@ export const {
   patchTodo,
   getTimetable,
   saveTimetable,
+  getTimetableVersions,
+  restoreTimetable,
   clearTimetable,
   csuStartImport,
   csuFetchCourses,

@@ -264,6 +264,11 @@ function migrateToV3(): void {
 
 /** 老库自动升级：补列 + 版本化迁移（D3）。在 db.exec(SCHEMA) 之后调用。 */
 function migrate(): void {
+  ensureColumn('courses', 'details', "details TEXT NOT NULL DEFAULT '{}'");
+  db.exec(`CREATE TABLE IF NOT EXISTS timetable_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL,
+    reason TEXT NOT NULL, snapshot TEXT NOT NULL
+  )`);
   ensureColumn('events', 'level', 'level INTEGER NOT NULL DEFAULT 2');
   ensureColumn('events', 'level_locked', 'level_locked INTEGER NOT NULL DEFAULT 0');
   ensureColumn('groups', 'course_name', 'course_name TEXT');

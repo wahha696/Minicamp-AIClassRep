@@ -4,6 +4,7 @@
 //   localStorage.mockConnectState = 'waiting_qr'   // 任一 ConnectState，默认 online
 //   localStorage.mockFirstRun = '1'                // 模拟首次使用（守卫拦到 /connect）
 import type { Api } from './client';
+import { normalizeCourses, reconcileCourses, type TimetableVersion } from '../../../../shared/timetable';
 import { ApiError } from './error';
 import { isTodo } from '../lib/todo';
 import type {
@@ -295,6 +296,14 @@ const mockTimetable: TimetableDTO = {
   ],
 };
 
+mockTimetable.courses=normalizeCourses(mockTimetable.courses);
+mockTimetable.revision=0;
+const timetableHistory:TimetableVersion[]=[];
+let timetableVersionId=0;
+function snapshotTimetable(reason:string) {
+  timetableHistory.unshift({id:++timetableVersionId,created_at:Date.now(),reason,timetable:structuredClone(mockTimetable)});
+  timetableHistory.splice(20);
+}
 function range(a: number, b: number): number[] {
   return Array.from({ length: b - a + 1 }, (_, i) => a + i);
 }
@@ -657,14 +666,30 @@ export const mockApi: Api = {
   },
 
   saveTimetable(t) {
-    mockTimetable.semester_start = t.semester_start;
-    mockTimetable.courses = t.courses as CourseDTO[];
+    if(t.expected_revision!==undefined && t.expected_revision!==mockTimetable.revision)return fail('课表已更新，请重新载入',409);
+    const courses=reconcileCourses(mockTimetable.courses,t.courses,t.mode??'replace').courses;
+    snapshotTimetable('保存课表');
+    Object.assign(mockTimetable, t, {courses,revision:(mockTimetable.revision??0)+1});
     return delay(structuredClone(mockTimetable));
   },
 
-  clearTimetable() {
+  clearTimetable(expectedRevision) {
+    if(expectedRevision!==undefined&&expectedRevision!==mockTimetable.revision)return fail('课表已更新，请重新载入',409);
+    snapshotTimetable('清空课表');
     mockTimetable.courses = [];
+    mockTimetable.exceptions=[];
+    mockTimetable.import_items=[];
+    mockTimetable.revision=(mockTimetable.revision??0)+1;
     return delay({ ok: true as const });
+  },
+  getTimetableVersions() { return delay(timetableHistory); },
+  restoreTimetable(id,revision) {
+    if(revision!==mockTimetable.revision)return fail('课表已更新，请重新载入',409);
+    const version=timetableHistory.find(v=>v.id===id);
+    if(!version)return fail('版本不存在',404);
+    snapshotTimetable('恢复版本');
+    Object.assign(mockTimetable,structuredClone(version.timetable),{revision:revision+1});
+    return delay(mockTimetable);
   },
 
   // 教务系统直连导入:假的验证码图 + 复用 mockTimetable 的课程

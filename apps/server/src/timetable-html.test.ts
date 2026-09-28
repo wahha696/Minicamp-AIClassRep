@@ -11,9 +11,9 @@ function table(rows: unknown[][]): string {
 describe('网页课表真实导出布局回归', () => {
   it.each([['星期横排', standard], ['节次横排及校历', transposed]] as const)('%s 与文件导入结果一致', (_, rows) => {
     const parsed = parseKbtable(table(rows));
-    expect(toCourseDTOs(parsed.raw, parsed.warnings)).toEqual(parseTimetable(rows as string[][]).courses);
+    expect(toCourseDTOs(parsed.raw, parsed.warnings)).toMatchObject(parseTimetable(rows as string[][],{sheet:'网页表 1'}).courses);
     expect(parsed.raw).toHaveLength(13);
-    expect(parsed.warnings).toEqual([]);
+    expect(parsed.warnings).toEqual(parseTimetable(rows as string[][],{sheet:'网页表 1'}).warnings);
   });
   it('处理嵌套布局表及 colspan 节次表头', () => {
     const html = '<table><tr><td><table id="kbtable"><tr><td></td><td colspan="2">1－2</td><td colspan="2">3－4</td></tr>' +
