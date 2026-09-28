@@ -3,12 +3,35 @@ import standard from '../../web/src/lib/__fixtures__/timetable-rows.json';
 import transposed from '../../web/src/lib/__fixtures__/timetable-rows-2.json';
 import { parseTimetable } from '../../../shared/timetable-import.js';
 import { parseKbtable, parseSectionLabel, toCourseDTOs } from './csujwc.js';
+import { parseTimetableHtml } from './timetable-html.js';
+import { parseWeeks } from '../../../shared/timetable-import.js';
 
 const escape = (v: unknown) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
 function table(rows: unknown[][]): string {
   return '<table id="kbtable">' + rows.map(row => '<tr>' + row.map(cell => `<td>${escape(cell)}</td>`).join('') + '</tr>').join('') + '</table>';
 }
 describe('网页课表真实导出布局回归', () => {
+  it.each(['3-16(周)', '3-16（周）', '3-16[周]'])('识别网页周次 %s', text => {
+    expect(parseWeeks(text)).toEqual(Array.from({ length: 14 }, (_, i) => i + 3));
+  });
+  it('配对简版与隐藏详情只导入一次，保留教师及同名不同天排课', () => {
+    const course = (id: string, location: string) =>
+      `<div id="${id}-1" class="kbcontent1">课程甲<br><font title="周次(节次)">3-16(周)</font><br>${location}<br></div>` +
+      `<div id="${id}-2" class="kbcontent" style="display: none;">课程甲<br><font title="老师">教师甲</font><br><font title="周次(节次)">3-16(周)</font><br>${location}<br></div>`;
+    const p = parseTimetableHtml('<table id="kbtable"><tr><th></th><th>星期日</th><th>星期一</th><th>星期二</th></tr>' +
+      `<tr><td>5－6</td><td></td><td>${course('one', 'A101')}</td><td>${course('two', '')}</td></tr></table>`)!;
+    expect(p.courses).toHaveLength(2);
+    expect(p.courses).toMatchObject([
+      { name: '课程甲', teacher: '教师甲', location: 'A101', weekday: 1, start_period: 5, end_period: 6 },
+      { name: '课程甲', teacher: '教师甲', location: '', weekday: 2, start_period: 5, end_period: 6 },
+    ]);
+    expect(p.items?.every(i => i.status === 'parsed')).toBe(true);
+    expect(p.warnings).toEqual([]);
+  });
+  it('只有简版时保留课程，不凭空填教师', () => {
+    const p = parseTimetableHtml('<table><tr><th></th><th>星期日</th><th>星期一</th></tr><tr><td>1-2</td><td></td><td><div class="kbcontent1" id="solo-1">课程甲<br>1-2(周)<br>A101<br></div></td></tr></table>')!;
+    expect(p.courses).toMatchObject([{ name: '课程甲', teacher: '', location: 'A101', weeks: [1, 2] }]);
+  });
   it.each([['星期横排', standard], ['节次横排及校历', transposed]] as const)('%s 与文件导入结果一致', (_, rows) => {
     const parsed = parseKbtable(table(rows));
     expect(toCourseDTOs(parsed.raw, parsed.warnings)).toMatchObject(parseTimetable(rows as string[][],{sheet:'网页表 1'}).courses);

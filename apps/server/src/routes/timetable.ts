@@ -275,6 +275,7 @@ export function registerTimetableRoutes(app: Hono): void {
     } catch (e) {
       const status = e instanceof CsuError ? 502 : 500;
       const message = e instanceof Error ? e.message : '教务系统导入失败';
+      console.warn(`[csujwc] fetch 失败:${message}`);
       return c.json({ error: message }, status);
     }
   });

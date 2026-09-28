@@ -26,6 +26,25 @@ const course: CourseDTO = {
 const monday = dateStamp('2026-09-07');
 const days = Array.from({ length: 7 }, (_, i) => ({ from: monday + i * 86400000, isToday: false }));
 describe('课程可以访问，而不只是数组返回成功', () => {
+  it('集中展示待处理事项，定位展开原文，补课自动展开编辑，忽略后更新计数', () => {
+    const parsed = parseTimetable([['', '周一', '周二'], ['1-2', '课程A\n张老师\n1[周]\nA101', '待补课程原文']]);
+    render(<TimetableEditor parsed={parsed} saved={null} onSaved={() => {}} onCancel={() => {}} />);
+    expect(screen.getByRole('region', { name: '待处理事项' })).toBeTruthy();
+    expect(screen.getByText('还有 1 项需要手动处理')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '去处理第 1 项' }));
+    const source = document.activeElement!.closest('details')!;
+    expect(source.open).toBe(true);
+    expect(source.parentElement!.closest('details')!.open).toBe(true);
+    expect(source.textContent).toContain('待补课程原文');
+    fireEvent.click(source.querySelector('button')!);
+    const form = document.activeElement!.closest('details')!;
+    expect(form.open).toBe(true);
+    expect(form.querySelector('input')?.value).toBe('待补课程原文');
+    fireEvent.click(screen.getByRole('button', { name: '去处理第 1 项' }));
+    fireEvent.click(Array.from(source.querySelectorAll('button')).find(b => b.textContent?.includes('明确忽略'))!);
+    expect(screen.queryByRole('region', { name: '待处理事项' })).toBeNull();
+    expect(screen.getByText('待处理事项已清空，核对课表后即可保存。')).toBeTruthy();
+  });
   it('同格两门均可见，连堂完整跨行，全天列表不重复计数，可点击展开教师和地点', () => {
     const courses = [course, { ...course, id: 'b', name: '同格另一门' }];
     const { container } = render(

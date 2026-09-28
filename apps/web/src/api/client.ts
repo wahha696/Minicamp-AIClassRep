@@ -143,18 +143,21 @@ async function ensureAccountEpoch(): Promise<string> {
 }
 
 async function request<T>(method: string, path: string, body?: unknown, timeoutMs = 10_000): Promise<T> {
+  // 本地写接口要求 JSON，包括退出登录、重连等无参数操作。
+  const isWrite = !['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase());
+  const payload = body === undefined && isWrite ? {} : body;
   let res: Response;
   const scoped = isAccountDataPath(path);
   const epoch = scoped ? await ensureAccountEpoch() : undefined;
   try {
     const headers: Record<string, string> = {};
-    // 本机写接口的 CSRF 闸门要求 JSON；即使没有 body（重启/退出/清空）也必须声明。
-    if (body !== undefined || (method !== 'GET' && method !== 'HEAD')) headers['Content-Type'] = 'application/json';
+    // 本机写接口的 CSRF 闸门要求 JSON；即使调用方没有参数也发送空对象。
+    if (payload !== undefined) headers['Content-Type'] = 'application/json';
     if (epoch !== undefined) headers['X-ClassRep-Account-Epoch'] = epoch;
     res = await fetch(path, {
       method,
       headers: Object.keys(headers).length === 0 ? undefined : headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: payload === undefined ? undefined : JSON.stringify(payload),
       signal: AbortSignal.timeout(timeoutMs), // B14：后端卡住时超时兜底，轮询不会永久停摆
     });
   } catch {

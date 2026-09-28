@@ -472,6 +472,7 @@ export async function csuFetchCourses(
 
     let parsedResult: ParsedTimetable | null = null;
     let foundTable = false;
+    let lastKbHtml = ''; // 最后一个 #kbtable 页面原文,解析失败时留诊断快照
     for (const url of [...new Set(candidates)]) {
       if (tried.has(url)) continue;
       tried.add(url);
@@ -480,8 +481,24 @@ export async function csuFetchCourses(
         const h = Session.decode(res);
         if (!isLoginPage(h) && /id=["']kbtable["']/.test(h)) {
           foundTable = true;
+          lastKbHtml = h;
           const structured = parseTimetableHtml(h);
-          if (structured && (structured.courses.length || structured.items?.length)) { parsedResult = structured; break; }
+          if (structured && (structured.courses.length || structured.items?.length)) {
+            if (!structured.courses.length) {
+              // 找到课表页但 0 门课：留存页面供离线诊断(与 dumpPage 同目录,含课表内容)
+              dumpPage('csu-kb-parsed-empty.html', h);
+              console.warn(
+                `[csujwc] 课表页解析出 ${structured.items?.length ?? 0} 个片段、0 门课,页面已存 data/logs/csu-kb-parsed-empty.html`,
+              );
+            }
+            if (structured.courses.length) {
+              parsedResult = structured;
+              break;
+            }
+            // 保留待确认内容，但不要让第一个零课程页面阻止其他候选。
+            parsedResult ??= structured;
+            continue;
+          }
           const parsed = parseKbtable(h);
           const courses = toCourseDTOs(parsed.raw, parsed.warnings);
           console.log(`[csujwc] 课表解析:有效排课 ${courses.length} 项,提示 ${parsed.warnings.length} 条`);
@@ -496,7 +513,8 @@ export async function csuFetchCourses(
       }
     }
     if (!parsedResult && foundTable) {
-      throw new CsuError('已进入教务课表页面,但未识别到有效课程。可能是页面布局不兼容或当前学期没有排课;本次未导入,不会覆盖已有课表');
+      dumpPage('csu-kb-unparsed.html', lastKbHtml);
+      throw new CsuError('已进入教务课表页面,但未识别到有效课程。可能是页面布局不兼容或当前学期没有排课;页面已存 data/logs/csu-kb-unparsed.html;本次未导入,不会覆盖已有课表');
     }
     if (!parsedResult) {
       const title = dumpPage('csu-kb-dump.html', landHtml);

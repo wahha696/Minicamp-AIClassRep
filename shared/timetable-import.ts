@@ -270,7 +270,7 @@ function semesterStartFromCalendar(rows: string[][]): string | undefined {
   return new Date(sunday + DAY).toISOString().slice(0, 10);
 }
 
-const WEEKS_RE = /\[周\]|^(?:第)?\d[\d,，－\-–—\s单双]*周/;
+const WEEKS_RE = /[\[（(]周[\]）)]|^(?:第)?\d[\d,，－\-–—\s单双]*周/;
 
 /** 一个格子可能有多门课：以「周次行」（含 [周] 的行）为锚点切段 */
 function parseCell(
@@ -350,6 +350,7 @@ function parseCell(
 /** 「3-16」「8,12」「1-15单」「1-16双」（可带「[周]」或「周(32学时)」后缀）→ 周次数组；解析不了返回 null */
 export function parseWeeks(text: string): number[] | null {
   const body = text
+    .replace(/[（(]周[）)]/g, '[周]')
     .replace(/周[（(](单|双)(?:周)?[）)]$/, '$1周')
     .replace('[周]', '')
     .replace(/周\s*([(（][^)）]*[)）])?$/, '')
