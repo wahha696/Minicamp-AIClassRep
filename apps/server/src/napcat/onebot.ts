@@ -243,7 +243,79 @@ export function handleOnebotMessage(text: string): void {
       return;
     }
     ingestMessages([m], 'onebot');
+    // 合并转发段：漫游窗口之外的聊天记录只能靠它补——用户「多选→合并转发」进监听群，
+    // 这里异步展开成节点消息入库（去重靠 message_id / message_seen，重复转发无副作用）
+    for (const resId of forwardResIds(obj.message)) expandForward(resId, m.group_id);
   }
+}
+
+// ===== 合并转发展开 =====
+
+/** 正在展开的 res_id：同一转发被反复收到时不去重复拉 */
+const expandingForwards = new Set<string>();
+
+/** 消息段数组里的 forward res_id（data.id；个别实现叫 res_id） */
+export function forwardResIds(segments: unknown): string[] {
+  if (!Array.isArray(segments)) return [];
+  const ids: string[] = [];
+  for (const seg of segments) {
+    if (seg === null || typeof seg !== 'object' || Array.isArray(seg)) continue;
+    const s = seg as Json;
+    if (str(s.type) !== 'forward') continue;
+    const data = (s.data !== null && typeof s.data === 'object' && !Array.isArray(s.data) ? s.data : {}) as Json;
+    const id = str(data.id) || str(data.res_id);
+    if (id !== '') ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * get_forward_msg 把 res_id 展开成节点消息，按 source='forward' 入库。
+ * 节点优先用原 message_id（和实时流/历史拉到的同一条能对上去重）；
+ * 没有的给稳定合成 id，同一条转发重复展开不会重复入库。
+ * 嵌套转发（转发里套转发）不再递归，渲染为 [转发]。
+ */
+export function expandForward(resId: string, groupId: string): void {
+  if (expandingForwards.has(resId)) return;
+  expandingForwards.add(resId);
+  void (async () => {
+    try {
+      const data = await callAction<unknown>('get_forward_msg', { id: resId });
+      const nodes = Array.isArray(data)
+        ? data
+        : Array.isArray((data as Json)?.messages)
+          ? ((data as Json).messages as unknown[])
+          : [];
+      const msgs: Message[] = [];
+      for (let i = 0; i < nodes.length; i++) {
+        const node = nodes[i];
+        if (node === null || typeof node !== 'object' || Array.isArray(node)) continue;
+        const n = node as Json;
+        const segs = n.content ?? n.message;
+        const text = typeof segs === 'string' ? segs : segmentsToText(segs);
+        if (text === '') continue;
+        const sender = (n.sender !== null && typeof n.sender === 'object' && !Array.isArray(n.sender) ? n.sender : {}) as Json;
+        const timeSec = typeof n.time === 'number' ? n.time : Number(str(n.time)) || 0;
+        const nid = str(n.message_id);
+        msgs.push({
+          message_id: nid !== '' ? nid : `fwd-${resId}-${i}`,
+          group_id: groupId,
+          group_name: getGroupNameCached(groupId),
+          sender_name: str(sender.card) || str(sender.nickname) || '未知',
+          text,
+          sent_at: timeSec * 1000,
+        });
+      }
+      if (msgs.length > 0) {
+        const { inserted } = ingestMessages(msgs, 'forward');
+        console.log(`[onebot] 合并转发已展开：res_id=${resId} 节点=${msgs.length} 新入库=${inserted}`);
+      }
+    } catch (e) {
+      console.warn(`[onebot] 合并转发展开失败（res_id=${resId}）：`, e);
+    } finally {
+      expandingForwards.delete(resId);
+    }
+  })();
 }
 
 /** 切库期间攒下的消息上限：满了丢最旧的（登录刚完成的窗口期极短，历史补齐会兜回来） */

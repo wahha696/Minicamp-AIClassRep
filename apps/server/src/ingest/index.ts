@@ -15,7 +15,7 @@ interface GroupRow {
 
 /** 新发现的群默认是否开启（D6）：QQ 来源默认关闭，等用户在群管理里勾选；demo/import 默认开启 */
 function defaultEnabled(source: MessageSource): number {
-  return source === 'onebot' || source === 'history' ? 0 : 1;
+  return source === 'onebot' || source === 'history' || source === 'forward' ? 0 : 1;
 }
 
 function loadGroups(): Map<string, GroupRow> {

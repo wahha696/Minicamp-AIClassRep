@@ -1,16 +1,18 @@
 // 历史补齐（FR-2 + FR-16）。主人是 A（分工 A6）。
 // 对 enabled=1 且 adapter='onebot' 的群逐个翻页 get_group_msg_history：
-//   第一页不带 message_seq（拉最新 200 条）；之后每页 message_seq = 上一页最早一条的 message_id。
+//   第一页不带 message_seq（拉最新 200 条）；之后每页 message_seq = 上一页最早一条的 message_id，
+//   且必须带 reverse_order=true——不带时 NapCat 会返回锚点「之后」的消息（向前），
+//   翻一圈全是旧 id 被误判成「已补完」，实际只拉到一页（真机验证：21h → 修正后回到 13 天）。
 // 停止条件（任一满足）：本页最早一条早于 now−days / 本页没有新 id / 本页为空或报错 / 已翻 30 页。
 // 只入库 sent_at ≥ now−days 的消息；入库去重同时看 messages 和 message_seen（见 ingest/index.ts）。
 import { db, dbGeneration, onAccountSwitch } from '../db/index.js';
 import { ingestMessages } from './index.js';
-import { callAction, getGroupNameCached, isMentionOther, toMessage } from '../napcat/onebot.js';
+import { callAction, getGroupNameCached, isMentionOther, segmentsToText, toMessage } from '../napcat/onebot.js';
 import type { Message } from '../types.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const PAGE_SIZE = 200;
-const MAX_PAGES = 30;
+const MAX_PAGES = 60;
 
 /** R03：一群一次补齐的结果（写进 group_sync，前端能报告「哪群补到哪 / 为什么没补全」） */
 type GroupFetch = {
@@ -79,7 +81,10 @@ async function doSync(days: number): Promise<SyncResult> {
     try {
       const r = await fetchGroupHistory(groupId, since);
       if (dbGeneration() !== gen) break;
-      const { inserted } = ingestMessages(r.msgs, 'history');
+      // 精华消息独立于漫游窗口（班委常把通知设精华）：顺带拉一遍，一起去重入库
+      const ess = await fetchGroupEssence(groupId, since);
+      if (dbGeneration() !== gen) break;
+      const { inserted } = ingestMessages([...r.msgs, ...ess], 'history');
       groups += 1;
       messages += inserted;
       if (!r.complete) failures += 1;
@@ -130,7 +135,10 @@ async function fetchGroupHistory(groupId: string, since: number): Promise<GroupF
 
   for (let page = 0; page < MAX_PAGES; page++) {
     const params: Record<string, unknown> = { group_id: Number(groupId), count: PAGE_SIZE };
-    if (seq !== undefined) params.message_seq = seq;
+    if (seq !== undefined) {
+      params.message_seq = seq;
+      params.reverse_order = true; // NapCat：不传返回锚点之后的消息，向后翻页必须传 true
+    }
 
     let items: unknown[] | undefined;
     // 单页失败重试一次（群多时限流/抖动常见）：第二次再失败才算 page_error
@@ -199,6 +207,41 @@ async function fetchGroupHistory(groupId: string, since: number): Promise<GroupF
   }
   if (!complete && reason === 'ok') reason = 'page_cap'; // 跑满 MAX_PAGES 还没到头
   return { msgs: out, oldestAt, complete, reason };
+}
+
+/**
+ * 群精华消息。NapCat get_essence_msg_list 返回真实 message_id，
+ * 和实时流/漫游拉到的同一条天然去重；失败返回空（精华是补充通道，不拖垮主同步）。
+ */
+async function fetchGroupEssence(groupId: string, since: number): Promise<Message[]> {
+  try {
+    const data = await callAction<unknown>('get_essence_msg_list', { group_id: Number(groupId) });
+    const items = Array.isArray(data) ? data : [];
+    const out: Message[] = [];
+    for (const it of items) {
+      if (it === null || typeof it !== 'object' || Array.isArray(it)) continue;
+      const o = it as Record<string, unknown>;
+      const timeSec = Number(o.sender_time ?? o.time ?? 0);
+      const sentAt = timeSec * 1000;
+      if (!Number.isFinite(sentAt) || sentAt <= 0 || sentAt < since) continue;
+      const mid = String(o.message_id ?? '');
+      if (mid === '') continue;
+      const segs = o.content ?? o.message;
+      const text = typeof segs === 'string' ? segs : segmentsToText(segs);
+      if (text === '') continue;
+      out.push({
+        message_id: mid,
+        group_id: groupId,
+        group_name: getGroupNameCached(groupId),
+        sender_name: String(o.sender_nick ?? o.sender_name ?? '未知'),
+        text,
+        sent_at: sentAt,
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }
 
 /** NapCat 返回形态兜底：data 本身是数组，或 { messages: [...] } */

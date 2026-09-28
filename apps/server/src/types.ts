@@ -8,7 +8,7 @@ export type EventStatus = 'active' | 'cancelled' | 'done' | 'pending_confirm';
 export type Level = 1 | 2 | 3 | 4;
 export type ConnectState =
   | 'qq_conflict' | 'error' | 'kicked' | 'online' | 'waiting_qr' | 'reconnecting' | 'starting';
-export type MessageSource = 'onebot' | 'history' | 'demo' | 'import';
+export type MessageSource = 'onebot' | 'history' | 'demo' | 'import' | 'forward';
 
 /** 所有来源最终都转成它再入库 */
 export interface Message {
