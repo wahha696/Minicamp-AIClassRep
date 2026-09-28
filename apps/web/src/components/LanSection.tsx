@@ -79,6 +79,11 @@ export default function LanSection() {
 
       {data?.enabled && (
         <div className="mt-4">
+          {data.account_rebind_required && (
+            <p className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              旧链接已失效（重启或换号后需重新签发）。点下方「换新链接」生成新链接。
+            </p>
+          )}
           {data.urls.map((u) => (
             <div key={u} className="flex items-center gap-2">
               <code className="min-w-0 flex-1 truncate rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-700">{u}</code>

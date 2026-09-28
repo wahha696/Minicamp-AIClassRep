@@ -267,6 +267,8 @@ export interface LanSettingsDTO {
   enabled: boolean;
   /** 开关状态和实际监听不一致 = 重启后端才生效 */
   restart_required: boolean;
+  /** 开关还开着但链接绑定已失效（重启/换号后），需要重新签发 */
+  account_rebind_required: boolean;
   /** 手机扫码/复制打开的完整链接（带 token） */
   urls: string[];
 }

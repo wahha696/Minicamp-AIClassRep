@@ -1017,6 +1017,7 @@ function lanDto(): LanSettingsDTO {
     enabled: mockLanEnabled,
     // 开了之后要重启后端才开始监听局域网（与后端一致）
     restart_required: mockLanEnabled,
+    account_rebind_required: false,
     urls: mockLanEnabled ? [`http://192.168.1.23:8000/?token=mock-token-${lanSeq}`] : [],
   };
 }
