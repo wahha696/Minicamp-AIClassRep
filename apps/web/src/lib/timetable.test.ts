@@ -167,7 +167,7 @@ describe('blockOf / weekOf（与后端同组用例）', () => {
     ['12:30', 2],
     ['13:59', 2],
     ['17:50', 4],
-    ['21:00', 5],
+    ['21:00', 6],
   ] as const)('%s → 块 %i', (hhmm, want) => {
     expect(blockOf(sh('2026-09-23', hhmm))).toBe(want);
   });

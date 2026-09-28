@@ -165,10 +165,10 @@ describe('db 建表', () => {
       expect(tableNames()).toContain(t);
     }
     const courseCols = (db.prepare('PRAGMA table_info(courses)').all() as { name: string }[]).map((c) => c.name);
-    expect(courseCols).toContain('start_section');
-    expect(courseCols).toContain('end_section');
+    expect(courseCols).toContain('block');   // PR#31：block 做排序提示
+    expect(courseCols).toContain('details'); // 精确节次等在 details JSON
     const kv = db.prepare("SELECT value FROM kv WHERE key = 'schema_version'").get() as { value: string };
-    expect(kv.value).toBe('3');
+    expect(kv.value).toBe('4');
   });
 
   it('文件库的 journal_mode 是 WAL', () => {

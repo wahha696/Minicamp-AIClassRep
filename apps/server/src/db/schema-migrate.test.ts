@@ -80,16 +80,46 @@ describe('schema 迁移（v1 → v2）', () => {
     expect(seen).toEqual([{ group_id: '', message_id: 'old-seen' }]); // 老记录记 group_id=''
     insertMsg('g2', 'm1'); // 同 id 跨群不再冲突
     expect(count('messages')).toBe(2);
-    // v3：courses 是节次范围列，group_sync 也建出来了
+    // v4：courses 是 PR#31 形状（block + details），group_sync 也建出来了
     const courseCols = (db.prepare('PRAGMA table_info(courses)').all() as { name: string }[]).map((c) => c.name);
-    expect(courseCols).toContain('start_section');
-    expect(courseCols).toContain('end_section');
-    expect(courseCols).not.toContain('block');
+    expect(courseCols).toContain('block');
+    expect(courseCols).toContain('details');
     const v = db.prepare("SELECT value FROM kv WHERE key = 'schema_version'").get() as { value: string };
-    expect(v.value).toBe('3');
+    expect(v.value).toBe('4');
   });
 
-  it('v2 老库的 block 课表迁成 start/end 节次（block b → 第 2b-1~2b 节）', () => {
+  it('v3 过渡库（start_section/end_section）重建回 block+details，节次写进 details', () => {
+    const dir = tempDir();
+    const file = join(dir, 'accounts', '10003', 'classrep.db');
+    mkdirSync(dirname(file), { recursive: true });
+    const old = new DatabaseSync(file);
+    // v3 形状：复合主键 + 节次范围课表 + schema_version=3
+    old.exec(`
+      CREATE TABLE groups (group_id TEXT PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, adapter TEXT NOT NULL, created_at INTEGER NOT NULL);
+      CREATE TABLE messages (
+        message_id TEXT NOT NULL, group_id TEXT NOT NULL, sender_name TEXT NOT NULL, text TEXT NOT NULL,
+        sent_at INTEGER NOT NULL, source TEXT NOT NULL, processed INTEGER NOT NULL DEFAULT 0,
+        filtered_out INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+        PRIMARY KEY (group_id, message_id));
+      CREATE TABLE message_seen (group_id TEXT NOT NULL DEFAULT '', message_id TEXT NOT NULL, sent_at INTEGER NOT NULL, PRIMARY KEY (group_id, message_id));
+      CREATE TABLE courses (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, teacher TEXT NOT NULL DEFAULT '', location TEXT NOT NULL DEFAULT '', weekday INTEGER NOT NULL, start_section INTEGER NOT NULL, end_section INTEGER NOT NULL, weeks TEXT NOT NULL);
+      CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      INSERT INTO kv (key, value) VALUES ('schema_version', '3');
+      INSERT INTO courses (name, teacher, location, weekday, start_section, end_section, weeks) VALUES ('高数', '张老师', 'A301', 1, 5, 8, '[1,2,3]');
+    `);
+    old.close();
+
+    openDb(file); // v3 → v4
+
+    const c = db.prepare('SELECT name, block, details FROM courses').get() as Record<string, unknown>;
+    expect(c).toMatchObject({ name: '高数', block: 3 }); // (5+1)/2=3
+    expect(JSON.parse(String(c.details))).toMatchObject({ start_period: 5, end_period: 8 });
+    const cols = (db.prepare('PRAGMA table_info(courses)').all() as { name: string }[]).map((x) => x.name);
+    expect(cols).not.toContain('start_section');
+    expect(cols).not.toContain('end_section');
+  });
+
+  it('v2 老库的 block 课表补 details 列（不用重建，block 原样保留）', () => {
     const dir = tempDir();
     const file = join(dir, 'accounts', '10002', 'classrep.db');
     mkdirSync(dirname(file), { recursive: true });
@@ -110,12 +140,10 @@ describe('schema 迁移（v1 → v2）', () => {
     `);
     old.close();
 
-    openDb(file); // v2 → v3
+    openDb(file); // v2 → v4（block 保留，只补 details）
 
-    const c = db.prepare('SELECT name, start_section, end_section FROM courses').get() as Record<string, unknown>;
-    expect(c).toMatchObject({ name: '高数', start_section: 5, end_section: 6 }); // block3 → 5-6 节
-    const cols = (db.prepare('PRAGMA table_info(courses)').all() as { name: string }[]).map((x) => x.name);
-    expect(cols).not.toContain('block');
+    const c = db.prepare('SELECT name, block, details FROM courses').get() as Record<string, unknown>;
+    expect(c).toMatchObject({ name: '高数', block: 3, details: '{}' });
   });
 });
 

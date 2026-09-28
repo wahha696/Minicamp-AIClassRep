@@ -272,7 +272,7 @@ describe('提示词附加段', () => {
           teacher: '彭丽华(副教授)',
           location: 'B座312',
           weekday: 2,
-          start: 3, end: 4,
+          block: 2, start_period: 3, end_period: 4,
           weeks: [1, 2, 3, 4],
         },
       ],
@@ -299,7 +299,7 @@ describe('提示词附加段', () => {
     saveTimetable({
       semester_start: '2026-09-07',
       courses: [
-        { name: '大学物理', teacher: '', location: 'A101', weekday: 3, start: 1, end: 2, weeks: [1, 2, 3, 4, 5, 6, 7, 8] },
+        { name: '大学物理', teacher: '', location: 'A101', weekday: 3, block: 1, start_period: 1, end_period: 2, weeks: [1, 2, 3, 4, 5, 6, 7, 8] },
       ],
     });
     // 最早一条 21 天前（第 0/1 周附近），最晚一条 10 分钟前（第 3 周）；第 4 周的课也要列出来

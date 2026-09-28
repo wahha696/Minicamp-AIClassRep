@@ -15,22 +15,23 @@ import {
 const DAY_MS = 86400_000;
 const TZ = 8 * 3600_000; // Asia/Shanghai 固定 +8
 
-/** 5 个节次块（两节一块），分钟数从当天 0:00 起。前端有一份同款拷贝（web/src/lib/timetable.ts）。 */
+/** 6 个节次块（两节一块，含晚课 11–12 节），分钟数从当天 0:00 起。前端有一份同款拷贝（web/src/lib/timetable.ts）。 */
 export const CLASS_BLOCKS: ReadonlyArray<{ block: number; startMin: number; endMin: number }> = [
   { block: 1, startMin: 8 * 60, endMin: 9 * 60 + 40 }, // 1–2 节 08:00–09:40
   { block: 2, startMin: 10 * 60, endMin: 11 * 60 + 40 }, // 3–4 节 10:00–11:40
   { block: 3, startMin: 14 * 60, endMin: 15 * 60 + 40 }, // 5–6 节 14:00–15:40
   { block: 4, startMin: 16 * 60, endMin: 17 * 60 + 40 }, // 7–8 节 16:00–17:40
   { block: 5, startMin: 19 * 60, endMin: 20 * 60 + 40 }, // 9–10 节 19:00–20:40
+  { block: 6, startMin: 20 * 60 + 50, endMin: 22 * 60 + 30 }, // 11–12 节 20:50–22:30
 ];
 
 /** 归块：当天时刻 t 属于「开始时间 ≤ t 的最后一块」；比第 1 块开始还早的归第 1 块。 */
-export function blockOf(ts: number): 1 | 2 | 3 | 4 | 5 {
+export function blockOf(ts: number): 1 | 2 | 3 | 4 | 5 | 6 {
   const d = new Date(ts + TZ);
   const mins = d.getUTCHours() * 60 + d.getUTCMinutes();
-  let block: 1 | 2 | 3 | 4 | 5 = 1;
+  let block: 1 | 2 | 3 | 4 | 5 | 6 = 1;
   for (const b of CLASS_BLOCKS) {
-    if (b.startMin <= mins) block = b.block as 1 | 2 | 3 | 4 | 5;
+    if (b.startMin <= mins) block = b.block as 1 | 2 | 3 | 4 | 5 | 6;
   }
   return block;
 }

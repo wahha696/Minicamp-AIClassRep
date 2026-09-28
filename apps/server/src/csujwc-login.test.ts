@@ -74,7 +74,7 @@ describe('CAS 登录请求与错误归因', () => {
       .mockResolvedValueOnce(html('<table id="kbtable"><tr><td></td><td>1－2</td><td>3－4</td></tr><tr><td>星期四</td><td></td><td>课程甲<br>1-16周(32学时)<br>A101<br>某班</td></tr><tr><td>校历</td><td>2026-9</td><td>第1周</td></tr></table>'));
     const s = await csuBeginImport('000000', 'test-password');
     const result = await csuFetchCourses(s.session_id, '');
-    expect(result.courses).toMatchObject([{ name: '课程甲', weekday: 4, start: 3, end: 4 }]);
+    expect(result.courses).toMatchObject([{ name: '课程甲', weekday: 4, start_period: 3, end_period: 4 }]);
     expect(result.warnings).toEqual([]);
   });
 
