@@ -444,7 +444,13 @@ export async function csuFetchCourses(
                 `[csujwc] 课表页解析出 ${structured.items?.length ?? 0} 个片段、0 门课,页面已存 data/logs/csu-kb-parsed-empty.html`,
               );
             }
-            parsedResult = structured; break;
+            if (structured.courses.length) {
+              parsedResult = structured;
+              break;
+            }
+            // 保留待确认内容，但不要让第一个零课程页面阻止其他候选。
+            parsedResult ??= structured;
+            continue;
           }
           const parsed = parseKbtable(h);
           const courses = toCourseDTOs(parsed.raw, parsed.warnings);

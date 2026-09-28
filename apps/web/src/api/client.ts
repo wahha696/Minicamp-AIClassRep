@@ -93,12 +93,15 @@ export interface Api {
 export const isMock = import.meta.env.VITE_MOCK === '1';
 
 async function request<T>(method: string, path: string, body?: unknown, timeoutMs = 10_000): Promise<T> {
+  // 本地写接口要求 JSON，包括退出登录、重连等无参数操作。
+  const isWrite = !['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase());
+  const payload = body === undefined && isWrite ? {} : body;
   let res: Response;
   try {
     res = await fetch(path, {
       method,
-      headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      headers: payload === undefined ? undefined : { 'Content-Type': 'application/json' },
+      body: payload === undefined ? undefined : JSON.stringify(payload),
       signal: AbortSignal.timeout(timeoutMs), // B14：后端卡住时超时兜底，轮询不会永久停摆
     });
   } catch {

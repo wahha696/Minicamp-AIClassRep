@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import { saveTimetable } from '../api/client';
 import {
   DEFAULT_BELLS,
@@ -19,11 +19,22 @@ import WeekGrid from './WeekGrid';
 
 const input = 'min-w-0 rounded border border-slate-300 bg-white p-1.5 text-sm';
 const button = 'rounded border border-slate-300 px-3 py-1.5 text-sm disabled:opacity-40';
+function revealEditor(id: string) {
+  const target = document.getElementById(id);
+  if (!target) return;
+  for (let el: HTMLElement | null = target; el; el = el.parentElement) {
+    if (el instanceof HTMLDetailsElement) el.open = true;
+  }
+  target.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  target.querySelector<HTMLElement>('summary')?.focus({ preventScroll: true });
+}
 function CourseForm({
+  domId,
   course,
   onChange,
   onRemove,
 }: {
+  domId: string;
   course: CourseDTO;
   onChange: (c: CourseDTO) => void;
   onRemove: () => void;
@@ -32,7 +43,7 @@ function CourseForm({
   const [a, b] = periods(course);
   const change = (v: Partial<CourseDTO>) => onChange({ ...course, ...v, user_modified: true });
   return (
-    <details className="rounded border p-3">
+    <details id={domId} className="scroll-mt-24 rounded border p-3 focus-within:ring-2 focus-within:ring-indigo-300">
       <summary className="cursor-pointer break-words text-sm">
         {course.name} · 周{'一二三四五六日'[course.weekday - 1]} · {a}–{b} 节 · {course.weeks.join(',')} 周
         {course.user_modified && ' · 人工修改'}
@@ -131,22 +142,25 @@ function CourseForm({
 }
 
 function SourceItem({
+  domId,
   item,
   onResolve,
   onManual,
 }: {
+  domId: string;
   item: ImportItem;
   onResolve: (ignore: boolean, reason: string) => void;
   onManual: () => void;
 }) {
   const [reason, setReason] = useState(item.message ?? '');
   return (
-    <details className="rounded border p-2 text-sm" open={item.status === 'pending'}>
+    <details id={domId} className={`scroll-mt-24 rounded border p-3 text-sm focus-within:ring-2 focus-within:ring-indigo-300 ${item.status === 'pending' ? 'border-amber-400 bg-amber-50' : 'border-slate-200'}`} open={item.status === 'pending'}>
       <summary className="cursor-pointer">
         {item.sheet} R{item.row}C{item.column} ·{' '}
         {item.status === 'pending' ? '待确认' : item.status === 'ignored' ? '已明确忽略' : '已核对'} ·{' '}
         {item.course_ids.length} 条规则
       </summary>
+      {item.status === 'pending' && item.message && <p className="mt-2 font-medium text-amber-900">{item.message}</p>}
       <pre className="my-2 whitespace-pre-wrap break-words rounded bg-slate-50 p-2 text-xs">{item.raw}</pre>
       <label className="grid gap-1 text-xs">
         核对备注 / 忽略理由
@@ -186,6 +200,11 @@ export default function TimetableEditor({
 }) {
   const [courses, setCourses] = useState(() => normalizeCourses(parsed.courses));
   const [items, setItems] = useState(parsed.items ?? []);
+  const editorId = useId();
+  const [jumpCourse, setJumpCourse] = useState('');
+  useEffect(() => {
+    if (jumpCourse) revealEditor(`${editorId}-course-${jumpCourse}`);
+  }, [jumpCourse, editorId]);
   const [start, setStart] = useState(parsed.semesterStart || saved?.semester_start || '');
   const [config, setConfig] = useState({
     term_name: saved?.term_name ?? '',
@@ -202,7 +221,8 @@ export default function TimetableEditor({
   const [error, setError] = useState(''),
     [saving, setSaving] = useState(false);
   const diff = useMemo(() => reconcileCourses(saved?.courses ?? [], courses, mode), [saved, courses, mode]);
-  const pending = items.filter((i) => i.status === 'pending').length;
+  const pendingItems = items.filter((i) => i.status === 'pending');
+  const pending = pendingItems.length;
   const termMismatch = mode === 'merge' && !!saved?.courses.length && start !== saved.semester_start;
   const loss =
     mode === 'replace' &&
@@ -241,6 +261,7 @@ export default function TimetableEditor({
           x.id === item.id ? { ...x, status: 'pending', course_ids: [...x.course_ids, id] } : x,
         ),
       );
+    setJumpCourse(id);
   };
   const remove = (id: string) => {
     setCourses((cs) => cs.filter((c) => c.id !== id));
@@ -297,6 +318,26 @@ export default function TimetableEditor({
       <p className="text-xs text-slate-500">
         原始内容保留在对账记录中。未知格式必须手动补全或写明忽略理由，不能带着待确认项覆盖课表。
       </p>
+      {pending > 0 ? (
+        <section aria-label="待处理事项" className="rounded-xl border-2 border-amber-400 bg-amber-50 p-4">
+          <h3 className="font-semibold text-amber-950">还有 {pending} 项需要手动处理</h3>
+          <p className="mt-1 text-sm text-amber-900">处理完以下内容后才能保存。可以补全课程，或说明理由后明确忽略。</p>
+          <ul className="mt-3 space-y-2">
+            {pendingItems.map((item, index) => (
+              <li key={item.id} className="flex flex-wrap items-start justify-between gap-3 rounded-lg bg-white p-3">
+                <div className="min-w-0 flex-1">
+                  <p className="break-words font-medium text-slate-900">{index + 1}. {item.raw.split('\n').find(s => s.trim()) || '未识别内容'}</p>
+                  <p className="mt-1 text-sm text-amber-900">{item.message || '请核对原文并补全课程信息'}</p>
+                  <p className="mt-1 text-xs text-slate-500">{item.sheet} · 第 {item.row} 行，第 {item.column} 列</p>
+                </div>
+                <button className={`${button} bg-amber-900 text-white`} onClick={() => revealEditor(`${editorId}-source-${item.id}`)}>去处理第 {index + 1} 项</button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : items.length > 0 && (
+        <p role="status" className="rounded-lg bg-emerald-50 p-3 text-sm text-emerald-800">待处理事项已清空，核对课表后即可保存。</p>
+      )}
       <div className="grid gap-3 sm:grid-cols-3">
         <label className="grid text-sm">
           第一周周一
@@ -371,6 +412,7 @@ export default function TimetableEditor({
           {items.map((item) => (
             <SourceItem
               key={item.id}
+              domId={`${editorId}-source-${item.id}`}
               item={item}
               onManual={() => add(item)}
               onResolve={(ignore, reason) => {
@@ -396,7 +438,8 @@ export default function TimetableEditor({
       </details>
       {!!parsed.warnings.length && (
         <details>
-          <summary className="cursor-pointer text-amber-800">解析提示（{parsed.warnings.length}）</summary>
+          <summary className="cursor-pointer text-slate-500">原始解析记录（{parsed.warnings.length}）</summary>
+          <p className="my-2 text-xs text-slate-500">这是导入时的记录，处理后仍保留；当前需处理内容以上方“待处理事项”为准。</p>
           <ul className="list-inside list-disc text-xs">
             {parsed.warnings.map((w, i) => (
               <li key={i}>{w}</li>
@@ -410,6 +453,7 @@ export default function TimetableEditor({
           {courses.map((course) => (
             <CourseForm
               key={course.id}
+              domId={`${editorId}-course-${course.id}`}
               course={course}
               onChange={(next) => setCourses((cs) => cs.map((c) => (c.id === next.id ? next : c)))}
               onRemove={() => remove(course.id!)}
@@ -580,6 +624,7 @@ export default function TimetableEditor({
         </p>
       )}
       <div className="flex gap-2">
+        {pending > 0 && <button className={`${button} border-amber-400 text-amber-900`} onClick={() => revealEditor(`${editorId}-source-${pendingItems[0]!.id}`)}>还有 {pending} 项待处理，点击定位</button>}
         <button
           className={`${button} bg-slate-900 text-white`}
           disabled={

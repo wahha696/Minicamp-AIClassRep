@@ -18,6 +18,15 @@ export function parseTimetableHtml(html: string): ParsedTimetable | null {
         const rowspan = Math.min(100, Math.max(1, Number($(cell).attr('rowspan')) || 1));
         const copy = $(cell).clone();
         copy.find('table,script,style').remove();
+        // 同一排课有简版和隐藏详情版，按页面的配对 id 只保留详情。
+        // 不能按课程名称去重：同名的不同排课必须保留。
+        copy.find('.kbcontent1').each((_, brief) => {
+          const id = $(brief).attr('id');
+          const detailId = id?.replace(/-1$/, '-2');
+          if (id && detailId !== id && copy.find('.kbcontent').toArray().some(el => $(el).attr('id') === detailId)) {
+            $(brief).remove();
+          }
+        });
         copy.find('br').replaceWith('\n');
         copy.find('div,p').append('\n');
         row[c] = copy.text().replace(/\u00a0/g, ' ').trim();
