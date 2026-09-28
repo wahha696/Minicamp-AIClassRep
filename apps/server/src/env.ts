@@ -80,6 +80,17 @@ function positiveNum(raw: string | undefined, fallback: number): number {
 }
 
 /** 从一组环境变量算出 env（纯函数，测试直接喂对象，不依赖真实 process.env / .env） */
+function parseFastjudgeMode(raw: string | undefined): 'jev' | 'local' | 'dual' {
+  const v = (raw ?? 'jev').trim().toLowerCase();
+  if (v === 'local' || v === 'dual') return v;
+  return 'jev';
+}
+
+function parseFastjudgeRoute(raw: string | undefined): 'jev' | 'local' {
+  const v = (raw ?? 'jev').trim().toLowerCase();
+  return v === 'local' ? 'local' : 'jev';
+}
+
 export function buildEnv(src: Record<string, string | undefined>) {
   return {
     LLM_BASE_URL: src.LLM_BASE_URL ?? '',
@@ -89,6 +100,16 @@ export function buildEnv(src: Record<string, string | undefined>) {
     TYPESAFE_API_KEY: src.TYPESAFE_API_KEY ?? '',
     JEV_MODEL: src.JEV_MODEL?.trim() || 'jev-latest',
     JEV_TIMEOUT_MS: positiveNum(src.JEV_TIMEOUT_MS, 3_000),
+    /** 快判后端：jev（远端）| local（本机）| dual（两边打分，路由见 FASTJUDGE_ROUTE） */
+    FASTJUDGE_MODE: parseFastjudgeMode(src.FASTJUDGE_MODE),
+    /** dual 时用哪边分数做调度路由；另一边仅记录 */
+    FASTJUDGE_ROUTE: parseFastjudgeRoute(src.FASTJUDGE_ROUTE),
+    /** 本地模型 joblib 路径；空则用 FASTJUDGE_ROOT/models/local-jev-v1.joblib */
+    LOCAL_JEV_MODEL_PATH: src.LOCAL_JEV_MODEL_PATH?.trim() || '',
+    /** classrep-fastjudge 根目录 */
+    FASTJUDGE_ROOT: src.FASTJUDGE_ROOT?.trim() || '/workspace/classrep-fastjudge',
+    /** 调 infer.py 的 Python；空则优先 FASTJUDGE_ROOT/.venv/bin/python */
+    FASTJUDGE_PYTHON: src.FASTJUDGE_PYTHON?.trim() || '',
     // B10：演示模式默认关闭（演示数据会进真实群列表），开发者要用在 .env 里显式开
     DEMO_MODE: (src.DEMO_MODE ?? 'false').trim() === 'true',
     RAW_MSG_TTL_DAYS: positiveNum(src.RAW_MSG_TTL_DAYS, 7),
