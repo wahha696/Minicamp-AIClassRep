@@ -132,17 +132,29 @@ async function fetchGroupHistory(groupId: string, since: number): Promise<GroupF
     const params: Record<string, unknown> = { group_id: Number(groupId), count: PAGE_SIZE };
     if (seq !== undefined) params.message_seq = seq;
 
-    let items: unknown[];
-    try {
-      items = extractMessages(await callAction<unknown>('get_group_msg_history', params));
-    } catch (e) {
-      // NapCat 找不到锚点时抛「消息 X 不存在」= 服务端也没有更早的记录，算补全；
-      // 其它错误（断网/超时）无法确认窗口内是否还有更早消息，按没补全报
-      const msg = e instanceof Error ? e.message : String(e);
-      complete = msg.includes('不存在');
-      if (!complete) reason = 'page_error';
-      break;
+    let items: unknown[] | undefined;
+    // 单页失败重试一次（群多时限流/抖动常见）：第二次再失败才算 page_error
+    for (let attempt = 0; attempt < 2 && items === undefined; attempt++) {
+      try {
+        items = extractMessages(await callAction<unknown>('get_group_msg_history', params));
+      } catch (e) {
+        // NapCat 找不到锚点时抛「消息 X 不存在」= 服务端也没有更早的记录，算补全；
+        // 其它错误（断网/超时/限流）无法确认窗口内是否还有更早消息，按没补全报
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg.includes('不存在')) {
+          complete = true;
+          items = undefined;
+          break;
+        }
+        if (attempt === 1) {
+          reason = 'page_error';
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 800)); // 轻退避再试一次
+      }
     }
+    if (complete && items === undefined) break; // 「不存在」到头
+    if (items === undefined) break; // 重试后仍失败
     if (items.length === 0) {
       complete = true; // 空页 = 服务端也没更早的记录了，窗口内已补全
       break;

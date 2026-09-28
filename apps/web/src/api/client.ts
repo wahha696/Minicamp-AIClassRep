@@ -90,14 +90,14 @@ export interface Api {
 
 export const isMock = import.meta.env.VITE_MOCK === '1';
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, timeoutMs = 10_000): Promise<T> {
   let res: Response;
   try {
     res = await fetch(path, {
       method,
       headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(10_000), // B14：后端卡住时 10s 超时，轮询不会永久停摆
+      signal: AbortSignal.timeout(timeoutMs), // B14：后端卡住时超时兜底，轮询不会永久停摆
     });
   } catch {
     throw new ApiError('无法连接到 ClassRep，请确认启动窗口没有关闭', 0);
@@ -143,7 +143,8 @@ const realApi: Api = {
   getFetchNapcatProgress: () => request('GET', '/api/setup/napcat'),
   listAccounts: () => request('GET', '/api/accounts'),
   deleteAccountData: (uin) => request('DELETE', `/api/accounts/${encodeURIComponent(uin)}`),
-  syncNow: (days) => request('POST', '/api/sync', days === undefined ? undefined : { days }),
+  // 历史补齐要逐群翻页，几十秒很正常（30 天档可能更久）——10s 默认超时会误报「连不上」
+  syncNow: (days) => request('POST', '/api/sync', days === undefined ? undefined : { days }, 180_000),
   getHealth: () => request('GET', '/health'),
   getLlmSettings: () => request('GET', '/api/settings/llm'),
   saveLlmSettings: (provider, apiKey) => request('PUT', '/api/settings/llm', { provider, api_key: apiKey }),

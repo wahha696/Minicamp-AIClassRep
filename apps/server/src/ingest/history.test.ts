@@ -184,14 +184,26 @@ describe('group_sync 落账（R03：补到哪/补没补全可报告）', () => {
     expect(row!.oldest_at).toBe(NOW - 20 * DAY - (NOW - 20 * DAY) % 1000); // time 是秒级
   });
 
-  it('翻页报错 → complete=0 reason=page_error，计入 failures', async () => {
+  it('翻页持续报错（重试也失败）→ complete=0 reason=page_error，计入 failures', async () => {
     seedGroup();
-    callActionMock.mockRejectedValueOnce(new Error('网络超时'));
+    callActionMock.mockRejectedValue(new Error('网络超时'));
     const res = await syncHistory(7);
     expect(res.failures).toBe(1);
+    expect(callActionMock).toHaveBeenCalledTimes(2); // 单页失败重试一次后才放弃
     const row = syncRow();
     expect(row!.complete).toBe(0);
     expect(row!.reason).toBe('page_error');
+  });
+
+  it('翻页报错重试一次成功 → 不算失败', async () => {
+    seedGroup();
+    callActionMock
+      .mockRejectedValueOnce(new Error('网络抖动'))
+      .mockResolvedValueOnce({ messages: page([101, NOW - DAY]) });
+    const res = await syncHistory(7);
+    expect(res.failures).toBe(0);
+    expect(res.messages).toBe(1);
+    expect(syncRow()!.reason).toBe('ok');
   });
 
   it('NapCat「消息不存在」= 翻到顶，算补全不是失败', async () => {
