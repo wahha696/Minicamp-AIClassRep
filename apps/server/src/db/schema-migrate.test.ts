@@ -23,7 +23,7 @@ afterAll(() => {
   }
   for (const d of tempDirs) {
     try {
-      rmSync(d, { recursive: true, force: true });
+      rmSync(d, { recursive: true, force: true, maxRetries: 8, retryDelay: 200 });
     } catch {
       // 忽略
     }
@@ -80,12 +80,15 @@ describe('schema 迁移（v1 → v2）', () => {
     expect(seen).toEqual([{ group_id: '', message_id: 'old-seen' }]); // 老记录记 group_id=''
     insertMsg('g2', 'm1'); // 同 id 跨群不再冲突
     expect(count('messages')).toBe(2);
-    // v4：courses 是 PR#31 形状（block + details），group_sync 也建出来了
+    // v6：课程仍是 PR#31 形状，并补上事件提案、人工字段锁和稳定 create 指纹
     const courseCols = (db.prepare('PRAGMA table_info(courses)').all() as { name: string }[]).map((c) => c.name);
     expect(courseCols).toContain('block');
     expect(courseCols).toContain('details');
+    expect(count('event_proposals')).toBe(0);
+    const eventCols = (db.prepare('PRAGMA table_info(events)').all() as { name: string }[]).map((c) => c.name);
+    expect(eventCols).toContain('manual_locked_fields');
     const v = db.prepare("SELECT value FROM kv WHERE key = 'schema_version'").get() as { value: string };
-    expect(v.value).toBe('4');
+    expect(v.value).toBe('6');
   });
 
   it('v3 过渡库（start_section/end_section）重建回 block+details，节次写进 details', () => {
@@ -144,6 +147,108 @@ describe('schema 迁移（v1 → v2）', () => {
 
     const c = db.prepare('SELECT name, block, details FROM courses').get() as Record<string, unknown>;
     expect(c).toMatchObject({ name: '高数', block: 3, details: '{}' });
+  });
+
+  it('v4 事件历史原列与数据保留，并新增提案表、原因列和人工字段锁', () => {
+    const dir = tempDir();
+    const file = join(dir, 'accounts', '10004', 'classrep.db');
+    mkdirSync(dirname(file), { recursive: true });
+    const old = new DatabaseSync(file);
+    old.exec(`
+      CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      INSERT INTO kv (key, value) VALUES ('schema_version', '4');
+      CREATE TABLE events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL, type TEXT NOT NULL, title TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '', start_at INTEGER, end_at INTEGER, deadline_at INTEGER,
+        location TEXT, action_required TEXT, status TEXT NOT NULL DEFAULT 'active', confidence REAL NOT NULL,
+        level INTEGER NOT NULL DEFAULT 2, level_locked INTEGER NOT NULL DEFAULT 0,
+        version INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+      CREATE TABLE event_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL, version INTEGER NOT NULL,
+        changed_fields TEXT NOT NULL, source_message_id TEXT, changed_at INTEGER NOT NULL);
+      INSERT INTO events (group_id, type, title, confidence, created_at, updated_at)
+        VALUES ('g1', 'exam', '高数小测', 0.9, 1, 1);
+      INSERT INTO event_history (event_id, version, changed_fields, source_message_id, changed_at)
+        VALUES (1, 1, '{"location":{"from":null,"to":"A301"}}', 'm-old', 1);
+    `);
+    old.close();
+
+    openDb(file);
+
+    const eventCols = (db.prepare('PRAGMA table_info(events)').all() as { name: string }[]).map((c) => c.name);
+    expect(eventCols).toContain('manual_locked_fields');
+    expect(db.prepare('SELECT manual_locked_fields FROM events WHERE id = 1').get()).toEqual({
+      manual_locked_fields: '[]',
+    });
+    expect(db.prepare('SELECT source_message_id, changed_fields FROM event_history WHERE id = 1').get()).toEqual({
+      source_message_id: 'm-old',
+      changed_fields: '{"location":{"from":null,"to":"A301"}}',
+    });
+    const proposalCols = (db.prepare('PRAGMA table_info(event_proposals)').all() as { name: string }[]).map((c) => c.name);
+    expect(proposalCols).toEqual(expect.arrayContaining([
+      'reason', 'proposed_changes', 'source_message_ids', 'event_fingerprint', 'base_version',
+    ]));
+    expect((db.prepare("SELECT value FROM kv WHERE key = 'schema_version'").get() as { value: string }).value).toBe('6');
+  });
+
+  it('v5 create 提案升级时只回填一次原始事件指纹，后续人工编辑不会改写', () => {
+    const dir = tempDir();
+    const file = join(dir, 'accounts', '10005', 'classrep.db');
+    mkdirSync(dirname(file), { recursive: true });
+    const old = new DatabaseSync(file);
+    old.exec(`
+      CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      INSERT INTO kv (key, value) VALUES ('schema_version', '5');
+      CREATE TABLE events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL, type TEXT NOT NULL, title TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '', start_at INTEGER, end_at INTEGER, deadline_at INTEGER,
+        location TEXT, action_required TEXT, status TEXT NOT NULL DEFAULT 'active', confidence REAL NOT NULL,
+        level INTEGER NOT NULL DEFAULT 2, level_locked INTEGER NOT NULL DEFAULT 0,
+        manual_locked_fields TEXT NOT NULL DEFAULT '[]', version INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+      CREATE TABLE event_proposals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL, kind TEXT NOT NULL,
+        reason TEXT NOT NULL DEFAULT 'low_confidence', proposed_changes TEXT NOT NULL,
+        source_message_ids TEXT NOT NULL DEFAULT '[]', confidence REAL NOT NULL,
+        base_version INTEGER NOT NULL, base_status TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+        created_at INTEGER NOT NULL, resolved_at INTEGER,
+        UNIQUE(event_id, kind, source_message_ids));
+      INSERT INTO events
+        (group_id, type, title, description, start_at, location, action_required, status,
+         confidence, level, created_at, updated_at)
+        VALUES ('g1', 'exam', '原始小测', '第三章', 1000, 'A301', '带计算器',
+                'pending_confirm', 0.4, 3, 1, 1);
+      INSERT INTO event_proposals
+        (event_id, kind, proposed_changes, source_message_ids, confidence, base_version,
+         base_status, status, created_at)
+        VALUES (1, 'create', '{"status":{"from":"pending_confirm","to":"active"}}',
+                '["m1"]', 0.4, 1, 'pending_confirm', 'pending', 1);
+    `);
+    old.close();
+
+    openDb(file);
+    const first = (db.prepare('SELECT event_fingerprint FROM event_proposals WHERE id = 1').get() as {
+      event_fingerprint: string;
+    }).event_fingerprint;
+    expect(JSON.parse(first)).toEqual({
+      type: 'exam',
+      title: '原始小测',
+      description: '第三章',
+      start_at: 1000,
+      end_at: null,
+      deadline_at: null,
+      location: 'A301',
+      action_required: '带计算器',
+      level: 3,
+    });
+    db.prepare("UPDATE events SET title = '人工改名', location = 'B202' WHERE id = 1").run();
+    db.close();
+
+    openDb(file);
+    expect((db.prepare('SELECT event_fingerprint FROM event_proposals WHERE id = 1').get() as {
+      event_fingerprint: string;
+    }).event_fingerprint).toBe(first);
+    expect((db.prepare("SELECT value FROM kv WHERE key = 'schema_version'").get() as { value: string }).value).toBe('6');
   });
 });
 

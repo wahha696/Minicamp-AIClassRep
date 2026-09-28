@@ -8,7 +8,8 @@ const H = 3_600_000;
 const ev = (over: Partial<EventDTO> = {}): EventDTO => ({
   id: 1, group_id: 'g', group_name: 'g', type: 'other', title: '高数小测', description: '',
   start_at: null, end_at: null, deadline_at: null, location: null, action_required: null,
-  status: 'active', confidence: 1, level: 2, level_locked: false, version: 1, created_at: 0, updated_at: 0, ...over,
+  status: 'active', confidence: 1, level: 2, level_locked: false, manual_locked_fields: [],
+  version: 1, created_at: 0, updated_at: 0, ...over,
 });
 
 describe('数值工具', () => {

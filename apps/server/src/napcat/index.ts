@@ -3,7 +3,7 @@
 //            → WS 客户端连接循环（onebot.ts，登录成功后端口才会开）。
 // stopNapcat：同步结束进程树并停掉 WS 重连（B 的 index.ts 在 SIGINT/SIGHUP/exit 时调用，必须同步）。
 // 外部 OneBot 模式（Docker，ONEBOT_WS_URL 指向远端）：不写配置、不 spawn QQ 注入，只起 WS 客户端。
-import { closeCurrentAccount, deleteAccountData } from '../accounts.js';
+import { accountControlContextMatches, logoutAccountData } from '../accounts.js';
 import { NAPCAT_DIR } from '../paths.js';
 import { newOnebotToken, writeNapcatConfig } from './config.js';
 import { clearUin, getUin, IS_WINDOWS, killTree, napcatInstalled, restart, startManager } from './manager.js';
@@ -50,13 +50,27 @@ export function stopNapcat(): void {
  * killUserQQ=true 只由「关闭电脑版 QQ 并继续」按钮传入（修复计划 S4）。
  * 外部模式没有进程可管，只复位 WS 重连。
  */
-export async function restartNapcat(opts: { killUserQQ?: boolean } = {}): Promise<void> {
+export async function restartNapcat(opts: {
+  killUserQQ?: boolean;
+  expectedAccountEpoch: string;
+  expectedUin: string | null;
+}): Promise<boolean> {
+  // 校验与 stop 同步完成；一旦接受请求，旧 WS 就不能在 restart 的 await 窗口切到别的账号。
+  const savedUin = getUin() ?? null;
+  if (
+    savedUin !== opts.expectedUin ||
+    !accountControlContextMatches(opts.expectedAccountEpoch, opts.expectedUin)
+  ) {
+    return false;
+  }
+  stopOnebotClient();
   if (!LOCAL_INJECT) {
     resetAfterRestart();
-    return;
+    return true;
   }
   await restart(opts);
   resetAfterRestart();
+  return true;
 }
 
 /**
@@ -65,26 +79,30 @@ export async function restartNapcat(opts: { killUserQQ?: boolean } = {}): Promis
  * → 本机注入模式按 restart 流程关掉采集端和 QQ 再重新拉起（不带 -q，不会快速登录）→ 页面回到扫码。
  * erase=true（「退出并删除本号数据」危险选项）：把 accounts/<uin>/ 整个删掉，无法恢复。
  */
-export async function logoutNapcat(opts: { erase?: boolean } = {}): Promise<void> {
-  const uin = getUin();
-  clearUin();
-  try {
-    if (opts.erase === true && uin !== undefined) {
-      // deleteAccountData 会先 closeCurrentAccount 再删目录
-      await deleteAccountData(uin);
-    } else {
-      await closeCurrentAccount();
-    }
-  } catch (e) {
-    // 关库失败不挡登出（下个账号 lifecycle 会再切一次）
-    console.warn('[napcat] 登出时关闭账号库失败：', e);
-  }
+export async function logoutNapcat(opts: {
+  erase?: boolean;
+  expectedAccountEpoch: string;
+  expectedUin: string;
+}): Promise<boolean | 'external_unsupported'> {
+  // OneBot 11 没有标准“退出 QQ”动作；远端服务仍保持 B 登录时，清本地再自动重连会立刻
+  // 把 B 库重建并误报退出成功。必须让用户在远端 NapCat 退出，不能执行半套破坏性操作。
+  if (EXTERNAL_ONEBOT) return 'external_unsupported';
+  const result = await logoutAccountData({
+    expectedEpoch: opts.expectedAccountEpoch,
+    expectedUin: opts.expectedUin,
+    sessionUin: getUin() ?? null,
+    erase: opts.erase === true,
+    onAccepted: stopOnebotClient,
+    clearSession: clearUin,
+  });
+  if (result === 'stale') return false;
   if (!LOCAL_INJECT) {
     resetAfterRestart();
-    return;
+    return true;
   }
   await restart();
   resetAfterRestart();
+  return true;
 }
 
 export { IS_WINDOWS };

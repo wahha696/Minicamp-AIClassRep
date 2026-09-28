@@ -6,11 +6,21 @@
 
 export type EventType = 'exam' | 'assignment' | 'meeting' | 'activity' | 'announcement' | 'other';
 export type EventStatus = 'active' | 'cancelled' | 'done' | 'pending_confirm';
+export type EventProposalKind = 'create' | 'update' | 'cancel';
+export type EventProposalReason = 'low_confidence' | 'manual_lock_conflict';
+export type EventEditableField =
+  | 'title'
+  | 'description'
+  | 'start_at'
+  | 'end_at'
+  | 'deadline_at'
+  | 'location'
+  | 'action_required';
 /** 危机等级：1 低、2 中、3 高、4 紧急 */
 export type Level = 1 | 2 | 3 | 4;
 export type ConnectState =
   | 'qq_conflict' | 'error' | 'kicked' | 'online' | 'waiting_qr' | 'reconnecting' | 'starting';
-export type MessageSource = 'onebot' | 'history' | 'demo' | 'import';
+export type MessageSource = 'onebot' | 'history' | 'demo' | 'import' | 'forward';
 
 /** 所有来源最终都转成它再入库 */
 export interface Message {
@@ -38,6 +48,7 @@ export interface EventDTO {
   confidence: number;   // 0~1
   level: Level;
   level_locked: boolean; // 用户手动设过 = true；AI 更新时不改 level
+  manual_locked_fields: EventEditableField[];
   version: number;
   created_at: number;
   updated_at: number;
@@ -57,9 +68,38 @@ export interface HistoryDTO {
   changed_at: number;
 }
 
+export interface EventProposalDTO {
+  id: number;
+  kind: EventProposalKind;
+  reason: EventProposalReason;
+  changes: Partial<Record<EventEditableField | 'level' | 'status', { from: unknown; to: unknown }>>;
+  source_message_ids: string[];
+  confidence: number;
+  base_version: number;
+  created_at: number;
+}
+
+/** PATCH /api/events/:id。version 保留通知版本；updated_at 令牌拦住多个页面的静默覆盖。 */
+export interface EventPatch {
+  expected_version?: number;
+  /** 每次事件详情或待确认提案变化都会前进的单调并发令牌。 */
+  expected_updated_at?: number;
+  status?: EventStatus;
+  level?: Level | null;
+  title?: string;
+  description?: string;
+  start_at?: number | null;
+  end_at?: number | null;
+  deadline_at?: number | null;
+  location?: string | null;
+  action_required?: string | null;
+  unlock_fields?: EventEditableField[];
+}
+
 export interface EventDetailDTO extends EventDTO {
   sources: SourceMessageDTO[];
   history: HistoryDTO[];
+  pending_proposals: EventProposalDTO[];
 }
 
 /**
@@ -124,6 +164,8 @@ export interface MemoryDTO {
 
 export interface ConnectStatusDTO {
   state: ConnectState;
+  /** 当前账号库租约；前端业务读写都带回，换号后旧页面请求会被后端拒绝。 */
+  account_epoch: string;
   uin?: string;
   nickname?: string;    // online 时登录者的 QQ 昵称（get_login_info；取不到就没有）
   since: number;        // 进入当前状态的时间
@@ -132,6 +174,12 @@ export interface ConnectStatusDTO {
   deepseek_configured?: boolean; // DeepSeek Key 是否已配置（网页或 .env）
   reason?: 'no_qq' | 'no_napcat'; // error 细分：缺 QQ 电脑版 / 缺采集端运行包（给一键下载）
   legacy_data?: boolean; // 检测到旧版单库数据被迁到 data/accounts/legacy（提示一次）
+}
+
+/** 连接控制按钮点击时冻结的账号快照；旧页面不能重启、退出或擦除后来登录的账号。 */
+export interface AccountControlContext {
+  accountEpoch: string;
+  uin: string | null;
 }
 
 /** GET/POST /api/setup/*：采集端组件一键下载（问题 3） */
@@ -219,6 +267,8 @@ export interface LanSettingsDTO {
   enabled: boolean;
   /** 开关状态和实际监听不一致 = 重启后端才生效 */
   restart_required: boolean;
+  /** 开关还开着但链接绑定已失效（重启/换号后），需要重新签发 */
+  account_rebind_required: boolean;
   /** 手机扫码/复制打开的完整链接（带 token） */
   urls: string[];
 }

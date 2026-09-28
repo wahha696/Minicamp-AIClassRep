@@ -84,6 +84,7 @@ describe('回收站：取消的事件', () => {
   it('自己取消 → 进回收站（by=manual）→ 恢复后回到日历', async () => {
     const app = freshApp();
     const id = addEvent({ start_at: FIXED_NOW + DAY });
+    db.prepare('UPDATE events SET manual_locked_fields = ? WHERE id = ?').run('["location"]', id);
 
     const detail = await patch(app, id, { status: 'cancelled' });
     // 手动改状态记一条 history，不升 version
@@ -105,6 +106,7 @@ describe('回收站：取消的事件', () => {
       expires_at: FIXED_NOW + TRASH_KEEP_MS,
     });
     expect(item!.event.title).toBe('高数小测');
+    expect(item!.event.manual_locked_fields).toEqual(['location']);
 
     const res = await restore(app, `cancel-${id}`);
     expect(res.status).toBe(200);
@@ -123,6 +125,31 @@ describe('回收站：取消的事件', () => {
     await restore(app, `cancel-${id}`);
     const row = db.prepare('SELECT status, version FROM events WHERE id = ?').get(id) as { status: string; version: number };
     expect(row).toEqual({ status: 'pending_confirm', version: 2 });
+  });
+
+  it('拒绝低置信度新增只是确认误识别，不伪装成可恢复的取消项', async () => {
+    const app = freshApp();
+    const id = addEvent({ start_at: FIXED_NOW + DAY, status: 'pending_confirm' });
+    const proposalId = Number(db.prepare(
+      `INSERT INTO event_proposals
+         (event_id, kind, reason, proposed_changes, source_message_ids, confidence,
+          base_version, base_status, status, created_at)
+       VALUES (?, 'create', 'low_confidence', ?, '["m-create"]', 0.4, 1,
+               'pending_confirm', 'pending', ?)`,
+    ).run(
+      id,
+      JSON.stringify({ status: { from: 'pending_confirm', to: 'active' } }),
+      FIXED_NOW - HOUR,
+    ).lastInsertRowid);
+
+    const resolved = await app.request(`/api/events/${id}/proposals/${proposalId}/resolve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision: 'reject', expected_version: 1 }),
+    });
+    expect(resolved.status).toBe(200);
+    expect((await resolved.json()) as EventDetailDTO).toMatchObject({ status: 'cancelled' });
+    expect(await getTrash(app)).toEqual([]);
   });
 
   it('老数据没有取消记录：按 updated_at 算时间，恢复成 active', async () => {

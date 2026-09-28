@@ -9,7 +9,7 @@ const health = (over: Partial<HealthDTO> = {}): HealthDTO => ({
   filtered_count: 0, jev_filtered_count: 0, jev_called_count: 0, llm_called_count: 0, uptime: 1, pending: 0, ...over,
 });
 const status = (state: ConnectState, over: Partial<ConnectStatusDTO> = {}): ConnectStatusDTO => ({
-  state, since: 0, first_run: false, ...over,
+  state, since: 0, first_run: false, account_epoch: 'none:1', ...over,
 });
 
 describe('状态灯', () => {

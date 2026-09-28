@@ -26,6 +26,7 @@ function ev(p: Partial<EventDTO>): EventDTO {
     confidence: 0.9,
     level: 2,
     level_locked: false,
+    manual_locked_fields: [],
     version: 1,
     created_at: 0,
     updated_at: 0,

@@ -191,6 +191,29 @@ describe('syncHistory 翻页', () => {
     expect(r2.messages).toBe(3); // 7 天那次的 1 条 + 30 天补出来的 8 天前、20 天前 2 条
     expect(msgCount()).toBe(3);
   });
+
+  it('历史请求在切库后才返回：旧响应与排队的大窗口都不能写入或在新库重跑', async () => {
+    seedGroup();
+    let resolveFirst: (v: unknown) => void = () => {};
+    callActionMock.mockImplementation((action: string) => {
+      if (action === 'get_essence_msg_list') return Promise.resolve([]);
+      return new Promise((resolve) => {
+        resolveFirst = resolve;
+      });
+    });
+    const first = syncHistory(7);
+    const queuedLargerWindow = syncHistory(30);
+    await vi.waitFor(() => expect(histCalls()).toHaveLength(1));
+
+    openDb(':memory:'); // A → B；B 故意也有同群，防止错误实现看似因为无群而通过
+    seedGroup();
+    resolveFirst({ messages: [] });
+    await Promise.all([first, queuedLargerWindow]);
+
+    expect(histCalls()).toHaveLength(1); // 30 天任务属于旧代次，不能在 B 上重新发起
+    expect(msgCount()).toBe(0);
+    expect(syncRow()).toBeUndefined();
+  });
 });
 
 describe('group_sync 落账（R03：补到哪/补没补全可报告）', () => {

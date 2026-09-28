@@ -3,15 +3,17 @@
 //   2. 本机请求（loopback）：写操作再校验 Origin（防本机其他网页 CSRF）；Origin 缺省放行
 //      （curl、sendBeacon 同源时浏览器会带 Origin，跨站一定带，所以缺省只可能是非浏览器客户端）。
 //   3. 局域网请求：只有「局域网只读」开关打开时才可能到这里（关着时服务只监听 127.0.0.1）；
-//      必须带有效 token（首次 ?token= 进来写 cookie），只读，且敏感接口（二维码/设置/连接控制）一律 403。
+//      必须带有效 token（首次 ?token= 进来写 cookie），只读，且敏感接口（二维码/设置/账号清单）一律 403。
 // 放在单独文件里是为了能直接测：index.ts 有顶层 await 和监听，import 它就会起服务。
 import { networkInterfaces } from 'node:os';
 import type { Context, MiddlewareHandler } from 'hono';
 import { getCookie, setCookie } from 'hono/cookie';
+import { accountEpoch } from './accounts.js';
 
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]']);
 export const LAN_COOKIE = 'classrep_lan';
+export const LAN_EPOCH_COOKIE = 'classrep_lan_epoch';
 
 /** @hono/node-server 会把 Node 的 req/res 挂在 c.env 上 */
 interface NodeServerEnv {
@@ -52,7 +54,7 @@ export function hostnameOf(hostHeader: string): string {
   return colon >= 0 ? h.slice(0, colon) : h;
 }
 
-/** 局域网访问里永远不开放的接口：扫码登录、AI Key、连接控制（二维码被别人扫了 = 别人的号登进采集端） */
+/** 局域网访问里永远不开放的接口：扫码登录、AI Key、账号清单等本机管理信息。 */
 export function isSensitivePath(path: string): boolean {
   return (
     path.startsWith('/api/connect/qrcode') ||
@@ -60,7 +62,9 @@ export function isSensitivePath(path: string): boolean {
     path.startsWith('/api/settings/ai') ||
     path.startsWith('/api/settings/lan') ||
     path.startsWith('/api/timetable/csu') ||
-    path.startsWith('/api/timetable/versions')
+    path.startsWith('/api/timetable/versions') ||
+    path === '/api/accounts' ||
+    path.startsWith('/api/accounts/')
   );
 }
 
@@ -80,6 +84,8 @@ export interface GuardOptions {
   lanToken: () => string | null;
   /** 本机网卡地址（测试注入） */
   lanHosts?: () => string[];
+  /** 当前账号数据代次（测试注入）；LAN cookie 必须与它一致，换号后旧会话立即失效。 */
+  accountEpoch?: () => string;
 }
 
 /**
@@ -90,6 +96,7 @@ export interface GuardOptions {
  */
 export function accessGuard(opts: GuardOptions): MiddlewareHandler {
   const lanHosts = opts.lanHosts ?? lanAddresses;
+  const currentAccountEpoch = opts.accountEpoch ?? accountEpoch;
   return async (c, next) => {
     const method = c.req.method;
     const isWrite = method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS';
@@ -121,11 +128,24 @@ export function accessGuard(opts: GuardOptions): MiddlewareHandler {
     // 3) 局域网
     const token = opts.lanToken();
     if (token === null) return c.json({ error: '未开启局域网访问' }, 403);
+    const epoch = currentAccountEpoch();
     const q = c.req.query('token');
-    if (q !== undefined && q === token) {
-      // 首次带 ?token= 进来：写 cookie，之后页面里的 fetch 自动带上
+    if (q !== undefined) {
+      // 分享 URL 里的 token 与签发 epoch 缺一不可。即使未来某处错误地复用了 token，
+      // A 账号签发的旧 URL 在切到 B 后刷新也不能按 B 的当前 epoch 重签 cookie。
+      if (q !== token || c.req.query('lan_epoch') !== epoch) {
+        return c.json({ error: '手机访问链接已失效，请在电脑上重新复制' }, 401);
+      }
+      // 首次带 ?token= 进来：同时记住账号数据代次。之后一旦换号/切库，旧会话即使仍持有 token
+      // 也不能从 /api/connect/status 取得新 epoch 后自动跟到新账号。
       setCookie(c, LAN_COOKIE, token, { httpOnly: true, sameSite: 'Strict', path: '/', maxAge: 60 * 60 * 24 * 365 });
-    } else if (getCookie(c, LAN_COOKIE) !== token) {
+      setCookie(c, LAN_EPOCH_COOKIE, epoch, {
+        httpOnly: true,
+        sameSite: 'Strict',
+        path: '/',
+        maxAge: 60 * 60 * 24 * 365,
+      });
+    } else if (getCookie(c, LAN_COOKIE) !== token || getCookie(c, LAN_EPOCH_COOKIE) !== epoch) {
       return c.json({ error: '需要电脑上「设置 → 手机访问」里的链接才能打开' }, 401);
     }
     if (isWrite) return c.json({ error: '局域网访问只读' }, 403);

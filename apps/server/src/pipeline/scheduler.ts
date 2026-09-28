@@ -8,6 +8,7 @@
 //   · 待处理的全是噪声或 Jev「确定不是」：立刻收尾（不调 LLM，只是置已处理）；
 //   · 其余（Jev 拿不准）：等 UNCERTAIN_WAIT_MS 攒一攒上下文再交给 LLM。
 // Jev 分数在攒批期间就提前打好（triage），处理批次时直接复用，不再多等一次 Jev。
+import { accountDataState } from '../accounts.js';
 import { db, dbGeneration, onAccountSwitch } from '../db/index.js';
 import type { Message } from '../types.js';
 import { type ExtractStatus, type ExtractedEvent, extractEvents } from './extract.js';
@@ -36,6 +37,8 @@ const jevScores = new Map<string, number>();
 
 /** 一个批次在各 stage 之间传递的状态 */
 export interface Batch {
+  /** 读取本批消息时所在的数据库代次；任何异步 stage 回来后先核对再写。 */
+  generation: number;
   groupId: string;
   groupName: string;
   now: number;
@@ -52,6 +55,7 @@ export type Stage = (b: Batch) => void | Promise<void>;
 const ids = (ms: Message[]) => JSON.stringify(ms.map((m) => m.message_id));
 
 const filterStage: Stage = (b) => {
+  if (dbGeneration() !== b.generation) return;
   const noise = b.messages.filter((m) => isNoise(m.text));
   b.candidates = b.messages.filter((m) => !isNoise(m.text));
   if (noise.length) {
@@ -69,6 +73,7 @@ const jevStage: Stage = async (b) => {
   if (unscored.length) {
     const t0 = Date.now();
     const scores = await scoreWithJev(unscored, b.context, b.groupName);
+    if (dbGeneration() !== b.generation) return;
     b.timing.jevMs = Date.now() - t0;
     scores?.forEach((s, i) => jevScores.set(unscored[i]!.message_id, s));
   }
@@ -97,6 +102,7 @@ const extractStage: Stage = async (b) => {
     now: b.now,
     activeEvents: listActiveEvents(b.groupId, b.now),
   }, undefined, status);
+  if (dbGeneration() !== b.generation) return;
   b.timing.llmMs = Date.now() - t0;
   if (status.llmFailed) {
     b.llmFailed = true;
@@ -107,6 +113,7 @@ const extractStage: Stage = async (b) => {
 class LlmUnavailable extends Error {}
 
 const reconcileStage: Stage = (b) => {
+  if (dbGeneration() !== b.generation) return;
   applyEvents(b.groupId, b.extracted, b.candidates);
 };
 
@@ -159,12 +166,14 @@ function contextBefore(g: PendingGroup, sentAt: number): Message[] {
 const toMessage = (g: PendingGroup) => ({ created_at: _, ...m }: Row): Message => ({ ...m, group_name: g.name });
 
 /** 处理某群最早的一批未处理消息，返回置为已处理的条数 */
-async function processBatch(g: PendingGroup): Promise<number> {
-  const gen = dbGeneration(); // 换号守卫：攒批期间切了账号，下面的读属于旧号，绝不能写进新号库
+async function processBatch(g: PendingGroup, expectedGeneration: number): Promise<number> {
+  if (quiescing || dbGeneration() !== expectedGeneration) return 0;
+  const gen = expectedGeneration; // 换号守卫：攒批期间切了账号，下面的读属于旧号，绝不能写进新号库
   const rows = pendingRows(g.group_id);
   if (rows.length === 0) return 0;
 
   const b: Batch = {
+    generation: gen,
     groupId: g.group_id,
     groupName: g.name,
     now: Date.now(),
@@ -176,12 +185,14 @@ async function processBatch(g: PendingGroup): Promise<number> {
   };
   try {
     for (const stage of stages) {
+      if (quiescing || dbGeneration() !== gen) return 0;
       await stage(b);
-      if (dbGeneration() !== gen) return 0; // 中途换号：这批按放弃处理
+      if (quiescing || dbGeneration() !== gen) return 0; // 中途换号：这批按放弃处理
     }
   } catch (e) {
     if (!b.llmFailed) console.warn(`[pipeline] 群 ${g.group_id} 这批处理出错，消息仍置为已处理：`, e);
   }
+  if (quiescing || dbGeneration() !== gen) return 0;
   if (b.llmFailed) {
     llmRetryAt = Date.now() + LLM_RETRY_MS;
     console.warn(`[pipeline] AI 连不上，群 ${g.group_id} 的 ${rows.length} 条消息 ${LLM_RETRY_MS / 1000}s 后重试`);
@@ -206,7 +217,8 @@ async function processBatch(g: PendingGroup): Promise<number> {
 const lastTriage = new Map<string, number>(); // 群 → 上次分诊时间
 
 /** 给某群还没打分的待处理候选打分（一群一次请求）。已打分的待处理消息作为上下文，零碎的补充也能看懂。 */
-async function triage(g: PendingGroup): Promise<void> {
+async function triage(g: PendingGroup, expectedGeneration: number): Promise<void> {
+  if (quiescing || dbGeneration() !== expectedGeneration) return;
   // 刷屏的群每秒都有新消息：同一个群至少隔 TRIAGE_MIN_INTERVAL_MS 才再打一次分，攒几条一起问
   const now = Date.now();
   if (now - (lastTriage.get(g.group_id) ?? 0) < TRIAGE_MIN_INTERVAL_MS) return;
@@ -219,6 +231,7 @@ async function triage(g: PendingGroup): Promise<void> {
   const unscored = candidates.slice(firstNew).filter((m) => !jevScores.has(m.message_id));
   const context = [...contextBefore(g, rows[0]!.sent_at), ...candidates.slice(0, firstNew)].slice(-CONTEXT);
   const scores = await scoreWithJev(unscored, context, g.name);
+  if (quiescing || dbGeneration() !== expectedGeneration) return;
   scores?.forEach((s, i) => jevScores.set(unscored[i]!.message_id, s));
 }
 
@@ -260,10 +273,11 @@ async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /** 开始处理某群的一批；该群已在处理中就返回那一批 */
-function launch(g: PendingGroup): Promise<number> {
+function launch(g: PendingGroup, expectedGeneration: number): Promise<number> {
+  if (quiescing || dbGeneration() !== expectedGeneration) return Promise.resolve(0);
   const running = inflight.get(g.group_id);
   if (running) return running;
-  const p = withSlot(() => processBatch(g))
+  const p = withSlot(() => processBatch(g, expectedGeneration))
     .catch((e) => {
       console.warn(`[pipeline] 群 ${g.group_id} 调度出错：`, e);
       return 0;
@@ -289,13 +303,22 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (x: T) => Promise<R
 // ---------- 入口 ----------
 
 let ticking = false;
+let quiescing = false;
+const activeEntrypoints = new Set<Promise<void>>();
+
+function trackEntrypoint(promise: Promise<void>): Promise<void> {
+  activeEntrypoints.add(promise);
+  void promise.finally(() => activeEntrypoints.delete(promise));
+  return promise;
+}
 
 /**
  * 调度器的一次检查：给攒着的消息打 Jev 分，把该处理的群交出去（不等别的群的批次跑完）。
  * 返回的 Promise 在本次交出去的批次都处理完后才 resolve。now 只给测试用。
  */
-export async function tick(now?: number): Promise<void> {
-  if (ticking || Date.now() < llmRetryAt) return; // 上一次分诊还没完 / AI 刚连不上，先歇一会
+async function tickOnce(now?: number): Promise<void> {
+  if (accountDataState() !== 'ready' || quiescing || ticking || Date.now() < llmRetryAt) return; // 上一次分诊还没完 / AI 刚连不上，先歇一会
+  const gen = dbGeneration();
   ticking = true;
   let launched: Promise<number>[] = [];
   try {
@@ -304,8 +327,11 @@ export async function tick(now?: number): Promise<void> {
     const idle = pendingGroups().filter((g) => !inflight.has(g.group_id));
     // 已经到点的不用分诊（批次里会补打分）；其余的先分诊再判断
     const early = idle.filter((g) => !(g.pending >= MIN_PENDING || t() - g.oldest >= MAX_WAIT_MS));
-    if (early.length && jevAvailable()) await mapLimit(early, GROUP_CONCURRENCY, triage);
-    launched = idle.filter((g) => isDue(g, t())).map(launch);
+    if (early.length && jevAvailable()) {
+      await mapLimit(early, GROUP_CONCURRENCY, (g) => triage(g, gen));
+    }
+    if (quiescing || dbGeneration() !== gen) return;
+    launched = idle.filter((g) => isDue(g, t())).map((g) => launch(g, gen));
   } catch (e) {
     console.warn('[pipeline] 调度出错：', e);
   } finally {
@@ -314,19 +340,33 @@ export async function tick(now?: number): Promise<void> {
   await Promise.all(launched);
 }
 
+export function tick(now?: number): Promise<void> {
+  if (accountDataState() !== 'ready' || quiescing) return Promise.resolve();
+  return trackEntrypoint(tickOnce(now));
+}
+
 /** 立即把所有群处理完（不看阈值，不看 AI 重试等待）；有批次在跑就等它结束。不抛异常。 */
-export async function runPipelineNow(): Promise<void> {
+async function runPipelineUntilIdle(): Promise<void> {
+  const gen = dbGeneration();
   try {
     for (;;) {
+      if (quiescing || dbGeneration() !== gen) return;
       await Promise.all(inflight.values());
+      if (quiescing || dbGeneration() !== gen) return;
       const groups = pendingGroups();
       if (groups.length === 0) return;
-      const done = await Promise.all(groups.map(launch));
+      const done = await Promise.all(groups.map((g) => launch(g, gen)));
+      if (quiescing || dbGeneration() !== gen) return;
       if (done.every((n) => n === 0)) return; // 置不上 processed 就别空转
     }
   } catch (e) {
     console.warn('[pipeline] 立即处理出错：', e);
   }
+}
+
+export function runPipelineNow(): Promise<void> {
+  if (accountDataState() !== 'ready' || quiescing) return Promise.resolve();
+  return trackEntrypoint(runPipelineUntilIdle());
 }
 
 let timer: ReturnType<typeof setInterval> | undefined;
@@ -348,6 +388,7 @@ onAccountSwitch(() => {
 });
 
 export function startScheduler(): void {
+  quiescing = false;
   timer ??= setInterval(() => void tick(), TICK_MS);
 }
 
@@ -363,11 +404,18 @@ export function stopScheduler(): void {
  */
 export async function quiesceScheduler(): Promise<boolean> {
   const wasRunning = timer !== undefined;
+  quiescing = true;
   stopScheduler();
   try {
-    await Promise.all(inflight.values());
+    await Promise.allSettled([...activeEntrypoints, ...inflight.values()]);
   } catch {
     // launch() 已把批次异常吞成 0，这里兜一层
   }
   return wasRunning;
+}
+
+/** 切库完成后解除静默；之前在运行才恢复定时器，手动调用仍可继续使用。 */
+export function resumeScheduler(wasRunning: boolean): void {
+  quiescing = false;
+  if (wasRunning) startScheduler();
 }

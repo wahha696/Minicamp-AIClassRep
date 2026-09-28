@@ -12,7 +12,7 @@ import { isNoise } from './filter.js';
 import { jevAvailable, scoreWithJev } from './jev.js';
 import { getPipelineStats } from './index.js';
 import { llmStats } from './stats.js';
-import { resetLlmRetry, runPipelineNow, tick } from './scheduler.js';
+import { quiesceScheduler, resetLlmRetry, resumeScheduler, runPipelineNow, tick } from './scheduler.js';
 
 vi.mock('./extract.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./extract.js')>()),
@@ -300,9 +300,55 @@ describe('tick：Jev 分数决定等多久', () => {
     expect(count('processed = 0')).toBe(0);
     expect(extract.mock.calls[0]![0].candidates).toHaveLength(2);
   });
+
+  it('静默会等待仍在 Jev 分诊的入口，迟到分数不能再改库', async () => {
+    ingestMessages(chat('demo-switching', 2, '明天考试地点有改动'), 'demo');
+    let release!: () => void;
+    jev.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        release = () => resolve([0.01, 0.02]);
+      }),
+    );
+
+    const running = tick(NOW + 500);
+    await vi.waitFor(() => expect(jev).toHaveBeenCalledOnce());
+    let quiesced = false;
+    const quiet = quiesceScheduler().then(() => {
+      quiesced = true;
+    });
+    await Promise.resolve();
+    expect(quiesced).toBe(false); // 切库必须等这个尚未登记进 inflight 的分诊入口
+
+    try {
+      release();
+      await Promise.all([running, quiet]);
+      expect(count('processed = 0')).toBe(2);
+      expect(count('filtered_out = 1')).toBe(0);
+    } finally {
+      resumeScheduler(false);
+    }
+  });
 });
 
 describe('getPipelineStats', () => {
+  it('账号数据不可公开时不查询/返回旧账号的聚合计数', () => {
+    ingestMessages(chat('demo-private', 2), 'demo');
+    db.prepare('UPDATE messages SET filtered_out = 1').run();
+    const previousCalled = llmStats.called;
+    try {
+      llmStats.called = 7;
+      expect(getPipelineStats()).toMatchObject({ filtered_count: 2, llm_called_count: 7 });
+      expect(getPipelineStats(false)).toMatchObject({
+        filtered_count: 0,
+        jev_filtered_count: 0,
+        jev_called_count: 0,
+        llm_called_count: 0,
+      });
+    } finally {
+      llmStats.called = previousCalled;
+    }
+  });
+
   it('没配 key 报 unconfigured', () => {
     const key = env.LLM_API_KEY;
     env.LLM_API_KEY = '';

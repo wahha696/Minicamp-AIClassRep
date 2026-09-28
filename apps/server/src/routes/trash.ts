@@ -7,6 +7,7 @@
 // 恢复都算「手动调整」：写一条 source_message_id 为 NULL 的 history，不升 version（同手动调级的约定）。
 import type { Hono } from 'hono';
 import { db } from '../db/index.js';
+import { parseLockedFields } from '../event-proposals.js';
 import type { EventDTO, EventStatus, EventType, Level, TrashItemDTO } from '../types.js';
 
 export const TRASH_KEEP_MS = 30 * 86400_000;
@@ -46,6 +47,7 @@ interface EventRow {
   confidence: number;
   level: number;
   level_locked: number;
+  manual_locked_fields: string;
   version: number;
   created_at: number;
   updated_at: number;
@@ -54,7 +56,8 @@ interface EventRow {
 const EVENT_COLUMNS = `
   e.id, e.group_id, g.name AS group_name, e.type, e.title, e.description,
   e.start_at, e.end_at, e.deadline_at, e.location, e.action_required,
-  e.status, e.confidence, e.level, e.level_locked, e.version, e.created_at, e.updated_at
+  e.status, e.confidence, e.level, e.level_locked, e.manual_locked_fields,
+  e.version, e.created_at, e.updated_at
 `;
 const EVENT_FROM = 'FROM events e LEFT JOIN groups g ON g.group_id = e.group_id';
 
@@ -75,6 +78,7 @@ function toEventDTO(row: EventRow): EventDTO {
     confidence: row.confidence,
     level: row.level as Level,
     level_locked: row.level_locked !== 0,
+    manual_locked_fields: parseLockedFields(row.manual_locked_fields),
     version: row.version,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -137,6 +141,13 @@ function pendingRevert(event: EventRow, changes: Changes): Partial<Record<Restor
 
 function cancelledItem(row: EventRow, now: number): TrashItemDTO | null {
   const h = lastCancelRow(row.id);
+  // “拒绝低置信度新增”只是确认这件事本来就不该进入日历，不是用户误删，不能伪装成可恢复的取消项。
+  const rejectedCreate = db.prepare(
+    `SELECT resolved_at FROM event_proposals
+      WHERE event_id = ? AND kind = 'create' AND status = 'rejected'
+      ORDER BY resolved_at DESC, id DESC LIMIT 1`,
+  ).get(row.id) as { resolved_at: number | null } | undefined;
+  if (h !== undefined && rejectedCreate?.resolved_at === h.changed_at) return null;
   const at = h?.changed_at ?? row.updated_at;
   if (at < now - TRASH_KEEP_MS) return null;
   const from = h ? parseChanges(h.changed_fields)['status']?.from : undefined;
@@ -231,7 +242,7 @@ function restoreCancelled(eventId: number, now: number): void {
   if (row.status !== 'cancelled' || !item) throw new RestoreError('这条已经不在回收站里了', 409);
   const prev = item.changes['status']?.from;
   const to: EventStatus = RESTORE_STATUSES.includes(prev as EventStatus) ? (prev as EventStatus) : 'active';
-  db.prepare('UPDATE events SET status = ?, updated_at = ? WHERE id = ?').run(to, now, row.id);
+  db.prepare('UPDATE events SET status = ?, updated_at = MAX(updated_at + 1, ?) WHERE id = ?').run(to, now, row.id);
   writeManualHistory(row, { status: { from: 'cancelled', to } }, now);
 }
 
@@ -248,7 +259,7 @@ function restoreChanged(historyId: number, now: number): void {
   const revert = pendingRevert(row, parseChanges(h.changed_fields));
   const fields = Object.keys(revert) as RestorableField[];
   const sets = fields.map((f) => `${f} = ?`).join(', ');
-  db.prepare(`UPDATE events SET ${sets}, updated_at = ? WHERE id = ?`).run(
+  db.prepare(`UPDATE events SET ${sets}, updated_at = MAX(updated_at + 1, ?) WHERE id = ?`).run(
     ...fields.map((f) => revert[f] as string | number | null),
     now,
     row.id,

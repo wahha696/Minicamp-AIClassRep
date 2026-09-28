@@ -65,6 +65,7 @@ describe('GET /api/todos', () => {
     const app = makeApp();
     const noTime = addEvent({ title: '没时间的通知', type: 'announcement', level: 1 });
     const homework = addEvent({ title: '只有开始的作业', type: 'assignment', start_at: T, level: 4 });
+    db.prepare('UPDATE events SET manual_locked_fields = ? WHERE id = ?').run('["title","unknown"]', noTime);
     addEvent({ title: '有截止的作业', type: 'assignment', deadline_at: T }); // 不是待办
     addEvent({ title: '取消了的没时间事件', status: 'cancelled' }); // 不是待办
     db.prepare("INSERT INTO todos (title, note, level, done_at, created_at) VALUES ('手动1', '', 2, NULL, ?)").run(Date.now());
@@ -74,6 +75,7 @@ describe('GET /api/todos', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as TodosDTO;
     expect(body.events.map((e) => e.id)).toEqual([homework, noTime]); // level 4 在前
+    expect(body.events.find((event) => event.id === noTime)?.manual_locked_fields).toEqual(['title']);
     expect(body.manual.map((t) => t.title)).toEqual(['手动1']);
   });
 });

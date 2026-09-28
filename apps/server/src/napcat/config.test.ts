@@ -25,7 +25,7 @@ afterEach(() => {
 
 function rmSyncQuiet(dir: string): void {
   try {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 200 });
   } catch {
     // 清理失败不影响测试结论
   }

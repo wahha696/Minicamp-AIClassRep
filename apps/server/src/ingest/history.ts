@@ -5,6 +5,7 @@
 //   翻一圈全是旧 id 被误判成「已补完」，实际只拉到一页（真机验证：21h → 修正后回到 13 天）。
 // 停止条件（任一满足）：本页最早一条早于 now−days / 本页没有新 id / 本页为空或报错 / 已翻 30 页。
 // 只入库 sent_at ≥ now−days 的消息；入库去重同时看 messages 和 message_seen（见 ingest/index.ts）。
+import { accountDataState, accountEpoch } from '../accounts.js';
 import { db, dbGeneration, onAccountSwitch } from '../db/index.js';
 import { ingestMessages } from './index.js';
 import { callAction, getGroupNameCached, isMentionOther, segmentsToText, toMessage } from '../napcat/onebot.js';
@@ -23,7 +24,27 @@ type GroupFetch = {
 };
 
 type SyncResult = { groups: number; messages: number; failures: number };
-let inflight: { days: number; promise: Promise<SyncResult> } | null = null;
+type SyncAccountContext = { generation: number; accountEpoch: string };
+let inflight: { days: number; context: SyncAccountContext; promise: Promise<SyncResult> } | null = null;
+const EMPTY_RESULT: SyncResult = { groups: 0, messages: 0, failures: 0 };
+
+/**
+ * 历史补齐不在调度器的静默队列里，网络请求跨切号后必须自己核对账号上下文。
+ * 只看 dbGeneration 不够：目标账号库挂载失败时旧连接与 generation 都会保留，
+ * 但 OneBot 会话已经属于新账号；此时继续请求会把新账号响应写进旧账号库。
+ */
+function captureSyncAccountContext(): SyncAccountContext | null {
+  if (accountDataState() !== 'ready') return null;
+  return { generation: dbGeneration(), accountEpoch: accountEpoch() };
+}
+
+function syncAccountIsCurrent(context: SyncAccountContext): boolean {
+  return (
+    accountDataState() === 'ready' &&
+    dbGeneration() === context.generation &&
+    accountEpoch() === context.accountEpoch
+  );
+}
 
 // 换号（修复计划第一节）：正在跑的同步是旧号的，让它自然结束（doSync 里有换代守卫，不会写进新库）；
 // inflight 标记清掉，新号点「同步历史」重新拉
@@ -38,11 +59,19 @@ onAccountSwitch(() => {
  * 入库完就返回，不等流水线整理完（前端用 health.pending 看进度）。
  */
 export function syncHistory(days = 7): Promise<SyncResult> {
-  const running = inflight;
+  const context = captureSyncAccountContext();
+  if (context === null) return Promise.resolve(EMPTY_RESULT);
+  const running =
+    inflight?.context.generation === context.generation &&
+    inflight.context.accountEpoch === context.accountEpoch
+      ? inflight
+      : null;
   if (running !== null && days <= running.days) return running.promise;
   const promise: Promise<SyncResult> = (async () => {
-    const first = running ? await running.promise.catch(() => ({ groups: 0, messages: 0, failures: 0 })) : null;
-    const r = await doSync(days);
+    const first = running ? await running.promise.catch(() => EMPTY_RESULT) : null;
+    // 更大窗口排在旧任务后面时，换号会让后半程直接作废，不能在新账号上重新起跑。
+    if (!syncAccountIsCurrent(context)) return first ?? EMPTY_RESULT;
+    const r = await doSync(days, context);
     return first
       ? {
           groups: Math.max(first.groups, r.groups),
@@ -53,12 +82,12 @@ export function syncHistory(days = 7): Promise<SyncResult> {
   })().finally(() => {
     if (inflight?.promise === promise) inflight = null;
   });
-  inflight = { days, promise };
+  inflight = { days, context, promise };
   return promise;
 }
 
-async function doSync(days: number): Promise<SyncResult> {
-  const gen = dbGeneration(); // 换号守卫：同步中途切了账号，后面拉到的历史不往新库里写
+async function doSync(days: number, context: SyncAccountContext): Promise<SyncResult> {
+  if (!syncAccountIsCurrent(context)) return EMPTY_RESULT;
   let rows: Array<{ group_id?: unknown }> = [];
   try {
     rows = db
@@ -75,24 +104,25 @@ async function doSync(days: number): Promise<SyncResult> {
   let failures = 0;
 
   for (const row of rows) {
-    if (dbGeneration() !== gen) break; // 换号了：拉来的是旧号的历史，停
+    if (!syncAccountIsCurrent(context)) break; // 换号或挂库失败：拉来的是旧上下文历史，停
     const groupId = String(row?.group_id ?? '');
     if (groupId === '' || groupId.startsWith('demo-')) continue;
     try {
-      const r = await fetchGroupHistory(groupId, since);
-      if (dbGeneration() !== gen) break;
+      const r = await fetchGroupHistory(groupId, since, context);
+      if (!syncAccountIsCurrent(context)) break;
       // 精华消息独立于漫游窗口（班委常把通知设精华）：顺带拉一遍，一起去重入库
-      const ess = await fetchGroupEssence(groupId, since);
-      if (dbGeneration() !== gen) break;
+      const ess = await fetchGroupEssence(groupId, since, context);
+      if (!syncAccountIsCurrent(context)) break;
       const { inserted } = ingestMessages([...r.msgs, ...ess], 'history');
       groups += 1;
       messages += inserted;
       if (!r.complete) failures += 1;
-      writeGroupSync(groupId, now, r.oldestAt, r.complete, r.reason);
+      writeGroupSync(groupId, now, r.oldestAt, r.complete, r.reason, context);
     } catch {
       // 一个群失败不影响其他群（分工 A6）；但失败要留痕，前端能提示「这群没补上」
+      if (!syncAccountIsCurrent(context)) break;
       failures += 1;
-      writeGroupSync(groupId, now, null, false, 'error');
+      writeGroupSync(groupId, now, null, false, 'error', context);
     }
   }
   return { groups, messages, failures };
@@ -105,7 +135,9 @@ function writeGroupSync(
   oldestAt: number | null,
   complete: boolean,
   reason: string,
+  context: SyncAccountContext,
 ): void {
+  if (!syncAccountIsCurrent(context)) return;
   try {
     db.prepare(
       `INSERT INTO group_sync (group_id, last_sync_at, oldest_at, complete, reason) VALUES (?, ?, ?, ?, ?)
@@ -124,7 +156,7 @@ function writeGroupSync(
  * 翻页拉一个群的历史（消息体大，不整页入库，逐页转换）。
  * 单页失败/抛错 = 停止该群翻页，已翻到的照样返回（部分补齐也好过没有）。
  */
-async function fetchGroupHistory(groupId: string, since: number): Promise<GroupFetch> {
+async function fetchGroupHistory(groupId: string, since: number, context: SyncAccountContext): Promise<GroupFetch> {
   const name = () => getGroupNameCached(groupId);
   const out: Message[] = [];
   const seenIds = new Set<string>();
@@ -134,6 +166,7 @@ async function fetchGroupHistory(groupId: string, since: number): Promise<GroupF
   let reason: GroupFetch['reason'] = 'ok';
 
   for (let page = 0; page < MAX_PAGES; page++) {
+    if (!syncAccountIsCurrent(context)) break;
     const params: Record<string, unknown> = { group_id: Number(groupId), count: PAGE_SIZE };
     if (seq !== undefined) {
       params.message_seq = seq;
@@ -143,9 +176,12 @@ async function fetchGroupHistory(groupId: string, since: number): Promise<GroupF
     let items: unknown[] | undefined;
     // 单页失败重试一次（群多时限流/抖动常见）：第二次再失败才算 page_error
     for (let attempt = 0; attempt < 2 && items === undefined; attempt++) {
+      if (!syncAccountIsCurrent(context)) break;
       try {
         items = extractMessages(await callAction<unknown>('get_group_msg_history', params));
+        if (!syncAccountIsCurrent(context)) break;
       } catch (e) {
+        if (!syncAccountIsCurrent(context)) break;
         // NapCat 找不到锚点时抛「消息 X 不存在」= 服务端也没有更早的记录，算补全；
         // 其它错误（断网/超时/限流）无法确认窗口内是否还有更早消息，按没补全报
         const msg = e instanceof Error ? e.message : String(e);
@@ -159,8 +195,10 @@ async function fetchGroupHistory(groupId: string, since: number): Promise<GroupF
           break;
         }
         await new Promise((r) => setTimeout(r, 800)); // 轻退避再试一次
+        if (!syncAccountIsCurrent(context)) break;
       }
     }
+    if (!syncAccountIsCurrent(context)) break;
     if (complete && items === undefined) break; // 「不存在」到头
     if (items === undefined) break; // 重试后仍失败
     if (items.length === 0) {
@@ -213,9 +251,11 @@ async function fetchGroupHistory(groupId: string, since: number): Promise<GroupF
  * 群精华消息。NapCat get_essence_msg_list 返回真实 message_id，
  * 和实时流/漫游拉到的同一条天然去重；失败返回空（精华是补充通道，不拖垮主同步）。
  */
-async function fetchGroupEssence(groupId: string, since: number): Promise<Message[]> {
+async function fetchGroupEssence(groupId: string, since: number, context: SyncAccountContext): Promise<Message[]> {
+  if (!syncAccountIsCurrent(context)) return [];
   try {
     const data = await callAction<unknown>('get_essence_msg_list', { group_id: Number(groupId) });
+    if (!syncAccountIsCurrent(context)) return [];
     const items = Array.isArray(data) ? data : [];
     const out: Message[] = [];
     for (const it of items) {

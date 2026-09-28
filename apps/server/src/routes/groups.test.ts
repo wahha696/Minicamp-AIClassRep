@@ -38,6 +38,20 @@ function addEvent(group_id: string, title: string): number {
   return Number(res.lastInsertRowid);
 }
 
+function addProposal(eventId: number, messageId: string): number {
+  return Number(db.prepare(
+    `INSERT INTO event_proposals
+       (event_id, kind, reason, proposed_changes, source_message_ids, confidence,
+        base_version, base_status, status, created_at)
+     VALUES (?, 'update', 'low_confidence', ?, ?, 0.4, 1, 'active', 'pending', ?)`,
+  ).run(
+    eventId,
+    JSON.stringify({ location: { from: null, to: 'A301' } }),
+    JSON.stringify([messageId]),
+    Date.now(),
+  ).lastInsertRowid);
+}
+
 function count(table: string, where = '', params: unknown[] = []): number {
   const sql = `SELECT COUNT(*) AS n FROM ${table}${where === '' ? '' : ` WHERE ${where}`}`;
   return (db.prepare(sql).get(...(params as never[])) as { n: number }).n;
@@ -219,24 +233,26 @@ describe('PATCH /api/groups/:id', () => {
 // ===== DELETE /api/groups/:id/data
 
 describe('DELETE /api/groups/:id/data', () => {
-  function seed(): { eventId: number } {
+  function seed(): { eventId: number; otherEventId: number } {
     addGroup('g1', '高数(2)班');
     addGroup('g2', '物理实验');
     addMessage('m1', 'g1');
     addMessage('m2', 'g1');
     addMessage('m3', 'g2');
     const eventId = addEvent('g1', '高数小测');
-    addEvent('g2', '物理实验');
+    const otherEventId = addEvent('g2', '物理实验');
     db.prepare(
       'INSERT INTO event_sources (event_id, message_id, sender_name, text, sent_at) VALUES (?, ?, ?, ?, ?)',
     ).run(eventId, 'm1', '张老师', '明天下午两点小测', Date.now());
     db.prepare(
       'INSERT INTO event_history (event_id, version, changed_fields, source_message_id, changed_at) VALUES (?, 1, ?, ?, ?)',
     ).run(eventId, '{"location":{"from":null,"to":"A301"}}', 'm1', Date.now());
-    return { eventId };
+    addProposal(eventId, 'm1');
+    addProposal(otherEventId, 'm3');
+    return { eventId, otherEventId };
   }
 
-  it('删掉该群的 messages/events/sources/history，群本身保留', async () => {
+  it('删掉该群的 messages/events/sources/history/proposals，群本身保留', async () => {
     const app = freshApp();
     const { eventId } = seed();
 
@@ -248,6 +264,7 @@ describe('DELETE /api/groups/:id/data', () => {
     expect(count('events', 'group_id = ?', ['g1'])).toBe(0);
     expect(count('event_sources', 'event_id = ?', [eventId])).toBe(0);
     expect(count('event_history', 'event_id = ?', [eventId])).toBe(0);
+    expect(count('event_proposals', 'event_id = ?', [eventId])).toBe(0);
 
     // 群还在
     expect(count('groups', 'group_id = ?', ['g1'])).toBe(1);
@@ -260,12 +277,13 @@ describe('DELETE /api/groups/:id/data', () => {
 
   it('别的群的数据一条都不能少', async () => {
     const app = freshApp();
-    seed();
+    const { otherEventId } = seed();
 
     await deleteJson(app, '/api/groups/g1/data');
 
     expect(count('messages', 'group_id = ?', ['g2'])).toBe(1);
     expect(count('events', 'group_id = ?', ['g2'])).toBe(1);
+    expect(count('event_proposals', 'event_id = ?', [otherEventId])).toBe(1);
     expect(count('groups')).toBe(2);
   });
 

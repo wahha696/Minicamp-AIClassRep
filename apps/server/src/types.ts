@@ -4,6 +4,16 @@
 
 export type EventType = 'exam' | 'assignment' | 'meeting' | 'activity' | 'announcement' | 'other';
 export type EventStatus = 'active' | 'cancelled' | 'done' | 'pending_confirm';
+export type EventProposalKind = 'create' | 'update' | 'cancel';
+export type EventProposalReason = 'low_confidence' | 'manual_lock_conflict';
+export type EventEditableField =
+  | 'title'
+  | 'description'
+  | 'start_at'
+  | 'end_at'
+  | 'deadline_at'
+  | 'location'
+  | 'action_required';
 /** 危机等级：1 低、2 中、3 高、4 紧急 */
 export type Level = 1 | 2 | 3 | 4;
 export type ConnectState =
@@ -36,6 +46,7 @@ export interface EventDTO {
   confidence: number;   // 0~1
   level: Level;
   level_locked: boolean; // 用户手动设过 = true；AI 更新时不改 level
+  manual_locked_fields: EventEditableField[]; // 用户手动修正后，AI 不再覆盖这些字段
   version: number;
   created_at: number;
   updated_at: number;
@@ -55,9 +66,21 @@ export interface HistoryDTO {
   changed_at: number;
 }
 
+export interface EventProposalDTO {
+  id: number;
+  kind: EventProposalKind;
+  reason: EventProposalReason;
+  changes: Partial<Record<EventEditableField | 'level' | 'status', { from: unknown; to: unknown }>>;
+  source_message_ids: string[];
+  confidence: number;
+  base_version: number;
+  created_at: number;
+}
+
 export interface EventDetailDTO extends EventDTO {
   sources: SourceMessageDTO[];
   history: HistoryDTO[];
+  pending_proposals: EventProposalDTO[];
 }
 
 /**
@@ -121,6 +144,7 @@ export interface MemoryDTO {
 
 export interface ConnectStatusDTO {
   state: ConnectState;
+  account_epoch: string; // 不含账号信息的数据代次令牌；前端业务读写用它拒绝跨号请求
   uin?: string;
   nickname?: string;    // online 时登录者的 QQ 昵称（get_login_info；取不到就没有）
   since: number;        // 进入当前状态的时间

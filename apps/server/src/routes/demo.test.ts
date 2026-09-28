@@ -11,6 +11,8 @@ import { registerBusinessRoutes } from './business.js';
 // 回放/导入最后会调 runPipelineNow()（C 的），这里替掉：不依赖 LLM key，也能断言"确实调了"
 const { runPipelineNowMock } = vi.hoisted(() => ({ runPipelineNowMock: vi.fn(async () => {}) }));
 vi.mock('../pipeline/index.js', () => ({ runPipelineNow: runPipelineNowMock }));
+// 演示接口生产默认关闭；本文件专测演示功能，显式打开，避免依赖开发机的 .env。
+vi.mock('../env.js', () => ({ env: { DEMO_MODE: true } }));
 
 const SCENARIOS = ['assignment', 'cancel', 'meeting', 'noisy', 'reschedule', 'similar-exams'];
 
@@ -344,6 +346,17 @@ describe('POST /api/demo/reset', () => {
     db.prepare(
       'INSERT INTO event_history (event_id, version, changed_fields, source_message_id, changed_at) VALUES (?, 1, ?, ?, ?)',
     ).run(eventId, '{"location":{"from":null,"to":"A301"}}', 'demo-reschedule-1', Date.now());
+    db.prepare(
+      `INSERT INTO event_proposals
+         (event_id, kind, reason, proposed_changes, source_message_ids, confidence,
+          base_version, base_status, status, created_at)
+       VALUES (?, 'update', 'low_confidence', ?, ?, 0.4, 1, 'active', 'pending', ?)`,
+    ).run(
+      eventId,
+      JSON.stringify({ location: { from: null, to: 'A301' } }),
+      JSON.stringify(['demo-reschedule-1']),
+      Date.now(),
+    );
 
     const { status, body } = await postJson(app, '/api/demo/reset');
     expect(status).toBe(200);
@@ -354,6 +367,7 @@ describe('POST /api/demo/reset', () => {
     expect(count('events', "group_id LIKE 'demo-%'")).toBe(0);
     expect(count('event_sources', 'event_id = ?', [eventId])).toBe(0);
     expect(count('event_history', 'event_id = ?', [eventId])).toBe(0);
+    expect(count('event_proposals', 'event_id = ?', [eventId])).toBe(0);
 
     // 真实群与它的消息不受影响
     expect(count('groups', 'group_id = ?', ['123456'])).toBe(1);

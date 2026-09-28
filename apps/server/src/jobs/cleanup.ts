@@ -21,6 +21,11 @@ export function resumeCleanup(): void {
   paused = false;
 }
 
+/** 账号切换测试与健康诊断用；清理任务在挂库失败期间必须保持暂停。 */
+export function isCleanupPaused(): boolean {
+  return paused;
+}
+
 /** 清理一次，返回删掉的原始消息数。`now` 可注入，方便测试。 */
 export function cleanupOnce(now: number = Date.now()): number {
   const ttlDays = env.RAW_MSG_TTL_DAYS;
@@ -64,10 +69,12 @@ export function cleanupOnce(now: number = Date.now()): number {
 
 /** 启动时跑一次，之后每小时一次。定时器 unref()，不挡进程退出。 */
 export function startCleanupJob(): void {
-  try {
-    cleanupOnce();
-  } catch (err) {
-    console.error(`清理任务首次执行失败：${err instanceof Error ? err.message : String(err)}`);
+  if (!paused) {
+    try {
+      cleanupOnce();
+    } catch (err) {
+      console.error(`清理任务首次执行失败：${err instanceof Error ? err.message : String(err)}`);
+    }
   }
   const timer = setInterval(() => {
     if (paused) return; // 正在切账号库，这轮跳过

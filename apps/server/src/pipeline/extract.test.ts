@@ -97,6 +97,15 @@ describe('parseExtraction', () => {
     expect(r.events[0]?.source_message_ids).toEqual(['m1']);
   });
 
+  it('事件过滤后没有任何有效来源时整个输出判为不合格，防止无法审计的重放重复', () => {
+    const r = parseExtraction(
+      JSON.stringify({ events: [ev({ source_message_ids: ['not-in-this-batch'] })] }),
+      ids,
+    );
+    expect(r).toMatchObject({ ok: false });
+    if (!r.ok) expect(r.error).toContain('source_message_ids');
+  });
+
   it('update 可以不给标题；空串字段当 null；update_of 容忍字符串数字', () => {
     const r = parseExtraction(
       JSON.stringify({ events: [ev({ action: 'update', update_of: '3', title: null, location: ' ', start_at: '' })] }),

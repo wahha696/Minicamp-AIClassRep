@@ -154,11 +154,12 @@ describe('lanReadOnly 中间件', () => {
 
 // ===== 修复计划 S1/S2：accessGuard =====
 
-function guardApp(token: string | null): Hono {
+function guardApp(token: string | null, epoch: () => string = () => 'epoch-a'): Hono {
   const app = new Hono();
-  app.use('*', accessGuard({ lanToken: () => token, lanHosts: () => ['192.168.1.10'] }));
+  app.use('*', accessGuard({ lanToken: () => token, lanHosts: () => ['192.168.1.10'], accountEpoch: epoch }));
   app.get('/api/today', (c) => c.json({ ok: true }));
   app.get('/api/connect/qrcode', (c) => c.json({ ok: true }));
+  app.get('/api/accounts', (c) => c.json({ accounts: [{ uin: '10001' }] }));
   app.post('/api/things', (c) => c.json({ ok: true }));
   return app;
 }
@@ -274,18 +275,60 @@ describe('accessGuard：局域网访问', () => {
     expect(res.status).toBe(401);
   });
 
-  it('?token= 正确 → 200 并写 cookie', async () => {
-    const res = await req(guardApp('secret-token-123456'), 'GET', '/api/today?token=secret-token-123456', '192.168.1.20', lanHost);
+  it('?token= 与签发 epoch 都正确 → 200 并写 cookie', async () => {
+    const res = await req(
+      guardApp('secret-token-123456'),
+      'GET',
+      '/api/today?token=secret-token-123456&lan_epoch=epoch-a',
+      '192.168.1.20',
+      lanHost,
+    );
     expect(res.status).toBe(200);
     expect(res.headers.get('set-cookie')).toContain('classrep_lan=secret-token-123456');
+    expect(res.headers.get('set-cookie')).toContain('classrep_lan_epoch=epoch-a');
+  });
+
+  it('只有 token、缺少签发 epoch 的旧链接不能建立会话', async () => {
+    const res = await req(
+      guardApp('secret-token-123456'),
+      'GET',
+      '/api/today?token=secret-token-123456',
+      '192.168.1.20',
+      lanHost,
+    );
+    expect(res.status).toBe(401);
   });
 
   it('cookie 正确 → 200', async () => {
     const res = await req(guardApp('secret-token-123456'), 'GET', '/api/today', '192.168.1.20', {
       ...lanHost,
-      cookie: 'classrep_lan=secret-token-123456',
+      cookie: 'classrep_lan=secret-token-123456; classrep_lan_epoch=epoch-a',
     });
     expect(res.status).toBe(200);
+  });
+
+  it('账号数据代次变化后旧 cookie 立即失效，不能自动跟到新账号', async () => {
+    let epoch = 'epoch-a';
+    const app = guardApp('secret-token-123456', () => epoch);
+    const cookie = 'classrep_lan=secret-token-123456; classrep_lan_epoch=epoch-a';
+    expect((await req(app, 'GET', '/api/today', '192.168.1.20', { ...lanHost, cookie })).status).toBe(200);
+
+    epoch = 'epoch-b';
+    const stale = await req(app, 'GET', '/api/today', '192.168.1.20', { ...lanHost, cookie });
+    expect(stale.status).toBe(401);
+    expect(await stale.json()).toEqual({ error: '需要电脑上「设置 → 手机访问」里的链接才能打开' });
+  });
+
+  it('A 签发的旧 URL 在 A→B 后刷新仍被拒绝，即使 token 被错误复用', async () => {
+    let epoch = 'epoch-a';
+    const app = guardApp('secret-token-123456', () => epoch);
+    const oldUrl = '/api/today?token=secret-token-123456&lan_epoch=epoch-a';
+    expect((await req(app, 'GET', oldUrl, '192.168.1.20', lanHost)).status).toBe(200);
+
+    epoch = 'epoch-b';
+    const stale = await req(app, 'GET', oldUrl, '192.168.1.20', lanHost);
+    expect(stale.status).toBe(401);
+    expect(await stale.json()).toEqual({ error: '手机访问链接已失效，请在电脑上重新复制' });
   });
 
   it('token 错误 → 401', async () => {
@@ -296,7 +339,7 @@ describe('accessGuard：局域网访问', () => {
   it('带 token 的写操作仍然 403（只读）', async () => {
     const res = await req(guardApp('secret-token-123456'), 'POST', '/api/things', '192.168.1.20', {
       ...lanHost,
-      cookie: 'classrep_lan=secret-token-123456',
+      cookie: 'classrep_lan=secret-token-123456; classrep_lan_epoch=epoch-a',
     });
     expect(res.status).toBe(403);
   });
@@ -304,8 +347,17 @@ describe('accessGuard：局域网访问', () => {
   it('带 token 也读不到二维码（敏感接口只允许本机）', async () => {
     const res = await req(guardApp('secret-token-123456'), 'GET', '/api/connect/qrcode', '192.168.1.20', {
       ...lanHost,
-      cookie: 'classrep_lan=secret-token-123456',
+      cookie: 'classrep_lan=secret-token-123456; classrep_lan_epoch=epoch-a',
     });
     expect(res.status).toBe(403);
+  });
+
+  it('带 token 也不能读取本机历史账号列表', async () => {
+    const res = await req(guardApp('secret-token-123456'), 'GET', '/api/accounts', '192.168.1.20', {
+      ...lanHost,
+      cookie: 'classrep_lan=secret-token-123456; classrep_lan_epoch=epoch-a',
+    });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: '该内容只能在电脑上查看' });
   });
 });

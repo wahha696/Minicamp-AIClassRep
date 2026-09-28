@@ -1,6 +1,7 @@
 // 用 :memory: 库，不碰 data/classrep.db
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db, openDb } from '../db/index.js';
+import { resolveEventProposal } from '../event-proposals.js';
 import type { Message } from '../types.js';
 import type { ExtractedEvent } from './extract.js';
 import { applyEvents, listActiveEvents, titleSimilarity } from './reconcile.js';
@@ -41,6 +42,14 @@ const history = (id: number) =>
   db.prepare('SELECT * FROM event_history WHERE event_id = ? ORDER BY version').all(id) as Record<string, unknown>[];
 const sources = (id: number) =>
   db.prepare('SELECT * FROM event_sources WHERE event_id = ? ORDER BY sent_at').all(id) as Record<string, unknown>[];
+const proposals = (id: number) =>
+  db.prepare('SELECT * FROM event_proposals WHERE event_id = ? ORDER BY id').all(id) as Array<{
+    id: number;
+    kind: string;
+    proposed_changes: string;
+    source_message_ids: string;
+    status: string;
+  }>;
 
 /** 建一个事件并返回它的 id */
 function create(over: Partial<ExtractedEvent> = {}, text = '明天下午两点 A301 高数小测'): number {
@@ -52,7 +61,7 @@ function create(over: Partial<ExtractedEvent> = {}, text = '明天下午两点 A
 beforeAll(() => openDb(':memory:'));
 afterAll(() => db.close());
 beforeEach(() => {
-  db.exec('DELETE FROM events; DELETE FROM event_sources; DELETE FROM event_history;');
+  db.exec('DELETE FROM event_proposals; DELETE FROM events; DELETE FROM event_sources; DELETE FROM event_history;');
 });
 
 describe('update', () => {
@@ -193,7 +202,7 @@ describe('A03：低置信度关键变更 → pending_confirm 门', () => {
     });
   });
 
-  it('低置信度但只动非关键字段（description/action_required）→ 正常改，不挂起', () => {
+  it('低置信度只动非关键字段也先挂起，不静默覆盖', () => {
     const id = create();
     const m = msg('补充：带学生证');
     applyEvents(
@@ -201,7 +210,11 @@ describe('A03：低置信度关键变更 → pending_confirm 门', () => {
       [ev(m, { action: 'update', update_of: id, title: '', description: '补充：带学生证', action_required: '带学生证', confidence: 0.4 })],
       [m],
     );
-    expect(events()[0]).toMatchObject({ status: 'active', action_required: '带学生证', version: 2 });
+    expect(events()[0]).toMatchObject({ status: 'pending_confirm', action_required: '带计算器', version: 2 });
+    expect(JSON.parse(proposals(id)[0]!.proposed_changes)).toMatchObject({
+      description: { from: '第三章导数与微分', to: '补充：带学生证' },
+      action_required: { from: '带计算器', to: '带学生证' },
+    });
   });
 
   it('已经是 pending_confirm 的低置信度关键变更 → 只追加来源', () => {
@@ -225,6 +238,474 @@ describe('A03：低置信度关键变更 → pending_confirm 门', () => {
       [m],
     );
     expect(events()[0]).toMatchObject({ status: 'active', start_at: T0 + 3 * DAY, version: 2 });
+  });
+
+  it('低置信度改期把全部候选字段保存为结构化提案，当前安排保持不动', () => {
+    const id = create();
+    const m = msg('可能改到周五 B201，还要带学生证');
+    applyEvents(
+      G,
+      [ev(m, {
+        action: 'update',
+        update_of: id,
+        title: '',
+        start_at: T0 + 3 * DAY,
+        location: 'B201',
+        action_required: '带学生证',
+        confidence: 0.4,
+      })],
+      [m],
+    );
+
+    expect(events()[0]).toMatchObject({
+      status: 'pending_confirm',
+      start_at: T0,
+      location: 'A301',
+      action_required: '带计算器',
+    });
+    const [proposal] = proposals(id);
+    expect(proposal).toMatchObject({ kind: 'update', status: 'pending' });
+    expect(JSON.parse(proposal!.proposed_changes)).toEqual({
+      start_at: { from: T0, to: T0 + 3 * DAY },
+      location: { from: 'A301', to: 'B201' },
+      action_required: { from: '带计算器', to: '带学生证' },
+    });
+    expect(JSON.parse(proposal!.source_message_ids)).toEqual([m.message_id]);
+  });
+
+  it('人工锁定字段遇到高置信度新值：锁定字段进提案，未锁字段正常更新', () => {
+    const id = create();
+    db.prepare("UPDATE events SET manual_locked_fields = '[\"start_at\"]' WHERE id = ?").run(id);
+    const m = msg('确认改到周五 B201');
+    applyEvents(
+      G,
+      [ev(m, {
+        action: 'update',
+        update_of: id,
+        title: '',
+        start_at: T0 + 3 * DAY,
+        location: 'B201',
+        confidence: 0.95,
+      })],
+      [m],
+    );
+
+    expect(events()[0]).toMatchObject({
+      status: 'pending_confirm',
+      start_at: T0,
+      location: 'B201',
+      manual_locked_fields: '["start_at"]',
+    });
+    expect(JSON.parse(proposals(id)[0]!.proposed_changes)).toEqual({
+      start_at: { from: T0, to: T0 + 3 * DAY },
+    });
+  });
+
+  it('未确认新建后又出现改期和取消，三类提案互不覆盖；同一来源重复处理不重复新增', () => {
+    const first = msg('可能有一场高数小测');
+    applyEvents(G, [ev(first, { confidence: 0.4 })], [first]);
+    const id = Number(events()[0]!.id);
+
+    const update = msg('好像改到周五');
+    const updateEvent = ev(update, {
+      action: 'update',
+      update_of: id,
+      title: '',
+      start_at: T0 + 3 * DAY,
+      confidence: 0.4,
+    });
+    applyEvents(G, [updateEvent], [update]);
+    applyEvents(G, [updateEvent], [update]);
+
+    const cancel = msg('听说又取消了');
+    applyEvents(
+      G,
+      [ev(cancel, { action: 'cancel', update_of: id, title: '', confidence: 0.4 })],
+      [cancel],
+    );
+
+    expect(events()[0]).toMatchObject({ status: 'pending_confirm', start_at: T0 });
+    expect(proposals(id).map((p) => [p.kind, p.status])).toEqual([
+      ['create', 'pending'],
+      ['update', 'pending'],
+      ['cancel', 'pending'],
+    ]);
+  });
+
+  it('不相交的低置信度改动分别保留；高置信自动更新也不丢另一字段提案', () => {
+    const id = create();
+    const locationMessage = msg('地点可能改到 B201');
+    applyEvents(G, [ev(locationMessage, {
+      action: 'update', update_of: id, title: '', location: 'B201', confidence: 0.4,
+    })], [locationMessage]);
+
+    const timeMessage = msg('确定改到周五');
+    applyEvents(G, [ev(timeMessage, {
+      action: 'update', update_of: id, title: '', start_at: T0 + 3 * DAY, location: null, confidence: 0.95,
+    })], [timeMessage]);
+
+    expect(events()[0]).toMatchObject({
+      status: 'pending_confirm', start_at: T0 + 3 * DAY, location: 'A301',
+    });
+    const pending = proposals(id).filter((proposal) => proposal.status === 'pending');
+    expect(pending).toHaveLength(1);
+    expect(JSON.parse(pending[0]!.proposed_changes)).toEqual({
+      location: { from: 'A301', to: 'B201' },
+    });
+
+    const actionMessage = msg('可能还要带学生证');
+    applyEvents(G, [ev(actionMessage, {
+      action: 'update', update_of: id, title: '', start_at: null,
+      location: null, action_required: '带学生证', confidence: 0.4,
+    })], [actionMessage]);
+    expect(proposals(id).filter((proposal) => proposal.status === 'pending')).toHaveLength(2);
+  });
+
+  it('已处理提案的同一来源重放不会再次挂起且不会丢失结构化差异', () => {
+    const id = create();
+    const m = msg('地点可能改到 B201');
+    const update = ev(m, {
+      action: 'update', update_of: id, title: '', location: 'B201', confidence: 0.4,
+    });
+    applyEvents(G, [update], [m]);
+    const proposal = proposals(id)[0]!;
+    const event = events()[0]!;
+    expect(resolveEventProposal(
+      id,
+      proposal.id,
+      'reject',
+      Number(event.version),
+      Number(event.updated_at),
+    )).toBe('ok');
+
+    applyEvents(G, [update], [m]);
+    expect(events()[0]).toMatchObject({ status: 'active', location: 'A301' });
+    expect(proposals(id).map((item) => item.status)).toEqual(['rejected']);
+  });
+
+  it('已拒绝的低置信度新建来源重放不会创建第二条事件', () => {
+    const m = msg('可能有一场临时小测');
+    const createEvent = ev(m, { confidence: 0.4 });
+    applyEvents(G, [createEvent], [m]);
+    const event = events()[0]!;
+    const proposal = proposals(Number(event.id))[0]!;
+    expect(resolveEventProposal(
+      Number(event.id),
+      proposal.id,
+      'reject',
+      Number(event.version),
+      Number(event.updated_at),
+    )).toBe('ok');
+
+    applyEvents(G, [createEvent], [m]);
+    expect(events()).toHaveLength(1);
+    expect(events()[0]).toMatchObject({ status: 'cancelled' });
+  });
+
+  it('pending create 人工改值再拒绝后，同来源被改判为 update 也不新建第二条事件', () => {
+    const m = msg('可能在 A301 有一场高数小测');
+    const original = ev(m, { confidence: 0.4 });
+    applyEvents(G, [original], [m]);
+    const id = Number(events()[0]!.id);
+    const proposal = proposals(id)[0]!;
+    const persistedBeforeEdit = db.prepare(
+      'SELECT event_fingerprint FROM event_proposals WHERE id = ?',
+    ).get(proposal.id) as { event_fingerprint: string };
+    expect(JSON.parse(persistedBeforeEdit.event_fingerprint)).toMatchObject({
+      title: '高数小测',
+      description: '第三章导数与微分',
+      start_at: T0,
+      location: 'A301',
+    });
+
+    db.prepare(
+      `UPDATE events SET title = '人工核对后的临时测验', description = '人工补充说明',
+         start_at = ?, location = '人工确认 B202',
+         manual_locked_fields = '["title","description","start_at","location"]',
+         updated_at = updated_at + 1 WHERE id = ?`,
+    ).run(T0 + DAY, id);
+    const edited = events()[0]!;
+    expect(resolveEventProposal(
+      id,
+      proposal.id,
+      'reject',
+      Number(edited.version),
+      Number(edited.updated_at),
+    )).toBe('ok');
+
+    // update 的正式合约只带实际字段，其余是 ''/null；不能拿这些空值做完整指纹比较。
+    // update_of 丢失且标题已被人工改到无法模糊匹配，只能用持久化快照做稀疏约束查重。
+    applyEvents(G, [ev(m, {
+      action: 'update',
+      update_of: null,
+      title: '高数小测',
+      description: '',
+      start_at: null,
+      end_at: null,
+      deadline_at: null,
+      location: 'A301',
+      action_required: null,
+      level: null,
+      confidence: 0.95,
+    })], [m]);
+    expect(events()).toHaveLength(1);
+    expect(events()[0]).toMatchObject({
+      status: 'cancelled',
+      title: '人工核对后的临时测验',
+      location: '人工确认 B202',
+    });
+    expect(proposals(id).map((item) => item.status)).toEqual(['rejected']);
+    expect((db.prepare('SELECT event_fingerprint FROM event_proposals WHERE id = ?').get(proposal.id) as {
+      event_fingerprint: string;
+    }).event_fingerprint).toBe(persistedBeforeEdit.event_fingerprint);
+  });
+
+  it('同一来源可提取多个不同低置信新建；拒绝一个后整批重放既不重复也不吞另一个', () => {
+    const m = msg('本周有高数小测，周末还要交实验报告');
+    const exam = ev(m, { title: '高数小测', confidence: 0.4 });
+    const assignment = ev(m, {
+      type: 'assignment',
+      title: '实验报告',
+      start_at: null,
+      deadline_at: T0 + 4 * DAY,
+      location: null,
+      confidence: 0.4,
+    });
+    applyEvents(G, [exam, assignment], [m]);
+    expect(events()).toHaveLength(2);
+    expect(events().map((row) => row.title)).toEqual(['高数小测', '实验报告']);
+
+    const examRow = events().find((row) => row.title === '高数小测')!;
+    const examProposal = proposals(Number(examRow.id))[0]!;
+    expect(resolveEventProposal(
+      Number(examRow.id),
+      examProposal.id,
+      'reject',
+      Number(examRow.version),
+      Number(examRow.updated_at),
+    )).toBe('ok');
+
+    applyEvents(G, [exam, assignment], [m]);
+    expect(events()).toHaveLength(2);
+    expect(events().find((row) => row.title === '高数小测')).toMatchObject({ status: 'cancelled' });
+    expect(events().find((row) => row.title === '实验报告')).toMatchObject({ status: 'pending_confirm' });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM event_proposals WHERE kind = 'create'").get()).toEqual({ n: 2 });
+  });
+
+  it('低置信 create 接受并人工改值后，原来源跨 action 重放仍保持人工结果且不新增提案', () => {
+    const m = msg('可能在 A301 有一场高数小测');
+    const createEvent = ev(m, { confidence: 0.4 });
+    applyEvents(G, [createEvent], [m]);
+    const row = events()[0]!;
+    const id = Number(row.id);
+    const createProposal = proposals(id)[0]!;
+    expect(resolveEventProposal(
+      id,
+      createProposal.id,
+      'accept',
+      Number(row.version),
+      Number(row.updated_at),
+    )).toBe('ok');
+    db.prepare(
+      `UPDATE events SET location = '人工确认 B202', start_at = ?,
+         manual_locked_fields = '["location","start_at"]', updated_at = updated_at + 1 WHERE id = ?`,
+    ).run(T0 + DAY, id);
+
+    // 同一来源若重跑时被模型改判成 update 或 cancel，也不能反向覆盖已确认/人工修改。
+    applyEvents(G, [ev(m, {
+      action: 'update', update_of: id, title: '', location: 'A301', start_at: T0, confidence: 0.4,
+    })], [m]);
+    applyEvents(G, [ev(m, {
+      action: 'cancel', update_of: id, title: '', confidence: 0.4,
+    })], [m]);
+
+    expect(events()[0]).toMatchObject({
+      status: 'active', location: '人工确认 B202', start_at: T0 + DAY,
+    });
+    expect(proposals(id).map((proposal) => proposal.status)).toEqual(['accepted']);
+  });
+
+  it('已接受 create 被人工大幅修改后，无目标的同来源 update 仍按原始指纹幂等', () => {
+    const m = msg('可能在 A301 有一场高数小测');
+    const original = ev(m, { confidence: 0.4 });
+    applyEvents(G, [original], [m]);
+    const id = Number(events()[0]!.id);
+    const createProposal = proposals(id)[0]!;
+    const row = events()[0]!;
+    expect(resolveEventProposal(
+      id,
+      createProposal.id,
+      'accept',
+      Number(row.version),
+      Number(row.updated_at),
+    )).toBe('ok');
+
+    db.prepare(
+      `UPDATE events SET title = '人工最终安排', description = '完全重写的说明',
+         start_at = ?, end_at = ?, deadline_at = ?, location = 'C909',
+         action_required = '携带人工确认材料', level = 4,
+         manual_locked_fields = '["title","description","start_at","end_at","deadline_at","location","action_required"]',
+         updated_at = updated_at + 1 WHERE id = ?`,
+    ).run(T0 + 5 * DAY, T0 + 5 * DAY + 3600_000, T0 + 4 * DAY, id);
+
+    // 没有 update_of，且原标题与人工标题不相似，findTarget 必然找不到；稀疏字段仍应
+    // 唯一命中持久化的原始 create 快照。
+    applyEvents(G, [ev(m, {
+      action: 'update',
+      update_of: null,
+      title: '高数小测',
+      description: '',
+      start_at: null,
+      end_at: null,
+      deadline_at: null,
+      location: 'A301',
+      action_required: null,
+      level: null,
+      confidence: 0.99,
+    })], [m]);
+    expect(events()).toHaveLength(1);
+    expect(events()[0]).toMatchObject({
+      status: 'active',
+      title: '人工最终安排',
+      description: '完全重写的说明',
+      start_at: T0 + 5 * DAY,
+      location: 'C909',
+      level: 4,
+    });
+    expect(proposals(id).map((proposal) => proposal.status)).toEqual(['accepted']);
+  });
+
+  it('稀疏 update_of 指向已拒绝 create 时优先按来源判重，不误改同名 LIVE 事件', () => {
+    const originalMessage = msg('可能在 A301 有一场高数小测');
+    applyEvents(G, [ev(originalMessage, { confidence: 0.4 })], [originalMessage]);
+    const rejectedId = Number(events()[0]!.id);
+    const createProposal = proposals(rejectedId)[0]!;
+    const pending = events()[0]!;
+    expect(resolveEventProposal(
+      rejectedId,
+      createProposal.id,
+      'reject',
+      Number(pending.version),
+      Number(pending.updated_at),
+    )).toBe('ok');
+
+    const liveMessage = msg('确定有一场高数小测，在 C909');
+    applyEvents(G, [ev(liveMessage, {
+      title: '高数小测',
+      location: 'C909',
+      start_at: T0 + DAY,
+      confidence: 0.95,
+    })], [liveMessage]);
+    const live = events().find((row) => row.status === 'active')!;
+
+    // q.byId 找不到 cancelled 的 rejectedId；若先做模糊匹配，会错误命中并改写同名 live。
+    applyEvents(G, [ev(originalMessage, {
+      action: 'update',
+      update_of: rejectedId,
+      title: '',
+      description: '',
+      start_at: null,
+      end_at: null,
+      deadline_at: null,
+      location: 'A301',
+      action_required: null,
+      level: null,
+      confidence: 0.9,
+    })], [originalMessage]);
+
+    expect(events()).toHaveLength(2);
+    expect(events().find((row) => row.id === live.id)).toMatchObject({
+      status: 'active', location: 'C909', start_at: T0 + DAY, version: 1,
+    });
+  });
+
+  it('同一来源的稀疏重放只匹配满足约束的 create，不吞掉新的不同事件', () => {
+    const m = msg('可能有高数小测和线代小测');
+    const calculus = ev(m, { title: '高数小测', location: 'A301', confidence: 0.4 });
+    const algebra = ev(m, {
+      title: '线代小测',
+      location: 'B202',
+      start_at: T0 + DAY,
+      confidence: 0.4,
+    });
+    applyEvents(G, [calculus, algebra], [m]);
+    expect(events()).toHaveLength(2);
+
+    for (const row of events()) {
+      const proposal = proposals(Number(row.id))[0]!;
+      expect(resolveEventProposal(
+        Number(row.id), proposal.id, 'reject', Number(row.version), Number(row.updated_at),
+      )).toBe('ok');
+    }
+
+    // 稀疏字段唯一指向线代快照，因此是重放。
+    applyEvents(G, [ev(m, {
+      action: 'update', update_of: null, title: '线代小测', description: '',
+      start_at: null, end_at: null, deadline_at: null, location: 'B202',
+      action_required: null, level: null, confidence: 0.9,
+    })], [m]);
+    expect(events()).toHaveLength(2);
+
+    // 同一来源也可能包含第三件事；不满足任一旧快照的约束时必须正常新建。
+    applyEvents(G, [ev(m, {
+      action: 'update', update_of: null, title: '物理实验', description: '', type: 'activity',
+      start_at: T0 + 2 * DAY, end_at: null, deadline_at: null, location: '实验楼',
+      action_required: null, level: null, confidence: 0.95,
+    })], [m]);
+    expect(events()).toHaveLength(3);
+    expect(events().at(-1)).toMatchObject({ title: '物理实验', location: '实验楼', status: 'active' });
+  });
+
+  it('低置信 create 后的 update/cancel 继承 active 基线，排列处理完不会卡 pending', () => {
+    const createMessage = msg('可能有一场临时小测');
+    applyEvents(G, [ev(createMessage, { confidence: 0.4 })], [createMessage]);
+    const id = Number(events()[0]!.id);
+
+    const updateMessage = msg('地点可能改到 B201');
+    applyEvents(G, [ev(updateMessage, {
+      action: 'update', update_of: id, title: '', location: 'B201', confidence: 0.4,
+    })], [updateMessage]);
+    const cancelMessage = msg('也可能取消');
+    applyEvents(G, [ev(cancelMessage, {
+      action: 'cancel', update_of: id, title: '', confidence: 0.4,
+    })], [cancelMessage]);
+
+    const byKind = Object.fromEntries(proposals(id).map((proposal) => [proposal.kind, proposal]));
+    const decide = (proposalId: number, decision: 'accept' | 'reject') => {
+      const row = events()[0]!;
+      return resolveEventProposal(
+        id, proposalId, decision, Number(row.version), Number(row.updated_at),
+      );
+    };
+    expect(decide(byKind.create!.id, 'accept')).toBe('ok');
+    expect(events()[0]).toMatchObject({ status: 'pending_confirm' });
+    expect(decide(byKind.update!.id, 'reject')).toBe('ok');
+    expect(events()[0]).toMatchObject({ status: 'pending_confirm', location: 'A301' });
+    expect(decide(byKind.cancel!.id, 'reject')).toBe('ok');
+    expect(events()[0]).toMatchObject({ status: 'active', location: 'A301' });
+    expect(proposals(id).filter((proposal) => proposal.status === 'pending')).toHaveLength(0);
+  });
+
+  it('active 上的 update/cancel 多提案无论逐条拒绝都最终恢复 active', () => {
+    const id = create();
+    const updateMessage = msg('地点可能改到 B201');
+    applyEvents(G, [ev(updateMessage, {
+      action: 'update', update_of: id, title: '', location: 'B201', confidence: 0.4,
+    })], [updateMessage]);
+    const cancelMessage = msg('也可能取消');
+    applyEvents(G, [ev(cancelMessage, {
+      action: 'cancel', update_of: id, title: '', confidence: 0.4,
+    })], [cancelMessage]);
+
+    const byKind = Object.fromEntries(proposals(id).map((proposal) => [proposal.kind, proposal]));
+    for (const proposal of [byKind.cancel!, byKind.update!]) {
+      const row = events()[0]!;
+      expect(resolveEventProposal(
+        id, proposal.id, 'reject', Number(row.version), Number(row.updated_at),
+      )).toBe('ok');
+    }
+    expect(events()[0]).toMatchObject({ status: 'active', location: 'A301' });
+    expect(proposals(id).filter((proposal) => proposal.status === 'pending')).toHaveLength(0);
   });
 });
 
