@@ -23,7 +23,7 @@ afterAll(() => {
   }
   for (const dir of tempDirs) {
     try {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 200 });
     } catch {
       // 兜底清理失败不影响测试结论
     }

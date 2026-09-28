@@ -115,7 +115,7 @@ afterAll(() => {
   } catch {
     // 已关闭
   }
-  for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+  for (const dir of dirs) rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 200 });
 });
 
 describe('OneBot 迟到响应的账号隔离', () => {

@@ -49,7 +49,7 @@ afterAll(() => {
   }
   for (const dir of tempDirs) {
     try {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 200 });
     } catch {
       // Windows 句柄延迟，兜底忽略
     }
@@ -187,7 +187,7 @@ describe('按账号分库：切号 → 隔离 → 切回（问题 1 核心验收
     expect(tryAcquireAccountMutationLease(epochA)).toBeNull();
     expect(isCleanupPaused()).toBe(true);
 
-    rmSync(accountDbPath('10002'), { force: true });
+    rmSync(accountDbPath('10002'), { force: true, maxRetries: 8, retryDelay: 200 });
     await switchAccount('10002');
     expect(accountDataState()).toBe('ready');
     expect(isCleanupPaused()).toBe(false);

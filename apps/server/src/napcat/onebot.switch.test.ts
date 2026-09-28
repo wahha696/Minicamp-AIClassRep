@@ -52,7 +52,7 @@ afterAll(() => {
   }
   for (const d of dirs) {
     try {
-      rmSync(d, { recursive: true, force: true });
+      rmSync(d, { recursive: true, force: true, maxRetries: 8, retryDelay: 200 });
     } catch {
       // 句柄没放干净就留临时文件，不影响测试结果
     }

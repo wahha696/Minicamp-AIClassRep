@@ -19,7 +19,7 @@ afterEach(() => {
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
     if (dir) {
-      try { rmSync(dir, { recursive: true, force: true }); } catch { /* 忽略 */ }
+      try { rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 200 }); } catch { /* 忽略 */ }
     }
   }
 });

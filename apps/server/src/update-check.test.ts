@@ -8,7 +8,7 @@ import { isNewer, sha256File } from './update-check.js';
 
 const dirs: string[] = [];
 afterAll(() => {
-  for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  for (const d of dirs) rmSync(d, { recursive: true, force: true, maxRetries: 8, retryDelay: 200 });
 });
 
 describe('isNewer', () => {

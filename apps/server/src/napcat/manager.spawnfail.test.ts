@@ -30,7 +30,7 @@ import { getManagerFacts, NAPCAT_REQUIRED, spawnNapcat } from './manager.js';
 const tempRoot = join(tmpdir(), 'classrep-spawnfail-test');
 afterEach(() => {
   vi.clearAllMocks();
-  try { rmSync(tempRoot, { recursive: true, force: true }); } catch { /* 忽略 */ }
+  try { rmSync(tempRoot, { recursive: true, force: true, maxRetries: 8, retryDelay: 200 }); } catch { /* 忽略 */ }
 });
 
 /** 造一个「完整」的 napcat 目录（只需要文件存在） */

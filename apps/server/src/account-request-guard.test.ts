@@ -30,7 +30,7 @@ beforeAll(async () => {
 
 afterAll(() => {
   try { db.close(); } catch { /* ignore */ }
-  rmSync(root, { recursive: true, force: true });
+  rmSync(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 200 });
 });
 
 describe('账号数据请求闸门', () => {
@@ -181,7 +181,7 @@ describe('账号数据请求闸门', () => {
     expect((await app.request('/api/events/test', { method: 'POST' })).status).toBe(503);
     expect(db.prepare("SELECT 1 FROM groups WHERE group_id = 'should-not-write'").get()).toBeUndefined();
 
-    rmSync(accountDbPath('30003'), { force: true });
+    rmSync(accountDbPath('30003'), { force: true, maxRetries: 8, retryDelay: 200 });
     await switchAccount('30003');
     expect(accountDataState()).toBe('ready');
     expect((await app.request('/api/events/test', {

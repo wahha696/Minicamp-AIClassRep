@@ -35,7 +35,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  rmSync(dir, { recursive: true, force: true });
+  rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 200 });
 });
 
 describe('LAN 链接账号绑定', () => {

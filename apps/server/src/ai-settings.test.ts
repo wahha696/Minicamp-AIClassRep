@@ -19,7 +19,7 @@ function tempDir(): string {
   return d;
 }
 afterAll(() => {
-  for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  for (const d of dirs) rmSync(d, { recursive: true, force: true, maxRetries: 8, retryDelay: 200 });
 });
 
 describe('ai-settings（修复计划 3.2）', () => {

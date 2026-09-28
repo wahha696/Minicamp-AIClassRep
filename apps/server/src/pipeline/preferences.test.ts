@@ -51,7 +51,7 @@ beforeAll(() => {
 });
 afterAll(() => {
   db.close();
-  rmSync(llmSettingsDir, { recursive: true, force: true });
+  rmSync(llmSettingsDir, { recursive: true, force: true, maxRetries: 8, retryDelay: 200 });
 });
 beforeEach(() => {
   db.exec('DELETE FROM level_feedback; DELETE FROM level_rules;');
@@ -175,7 +175,7 @@ describe('summarize', () => {
     await switchAccount('11111');
     setAccountsDirForTest(join(root, 'unused-accounts'), join(root, 'unused-fallback.db'));
     openDb(':memory:');
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 200 });
   });
 
   it('AI 返回非法 JSON → 保留旧规则', async () => {

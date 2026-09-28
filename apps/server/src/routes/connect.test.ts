@@ -41,7 +41,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  try { rmSync(dirname(QRCODE_PATH), { recursive: true, force: true }); } catch { /* 忽略 */ }
+  try { rmSync(dirname(QRCODE_PATH), { recursive: true, force: true, maxRetries: 8, retryDelay: 200 }); } catch { /* 忽略 */ }
 });
 
 describe('GET /api/connect/status', () => {
@@ -63,7 +63,7 @@ describe('GET /api/connect/qrcode', () => {
   });
 
   it('二维码不存在 → 404 + 中文 error', async () => {
-    rmSync(QRCODE_PATH, { force: true });
+    rmSync(QRCODE_PATH, { force: true, maxRetries: 8, retryDelay: 200 });
     const res = await app().request('/api/connect/qrcode');
     expect(res.status).toBe(404);
     const body = (await res.json()) as { error: string };
