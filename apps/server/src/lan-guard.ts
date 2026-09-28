@@ -59,7 +59,8 @@ export function isSensitivePath(path: string): boolean {
     path.startsWith('/api/settings/llm') ||
     path.startsWith('/api/settings/ai') ||
     path.startsWith('/api/settings/lan') ||
-    path.startsWith('/api/timetable/csu')
+    path.startsWith('/api/timetable/csu') ||
+    path.startsWith('/api/timetable/versions')
   );
 }
 

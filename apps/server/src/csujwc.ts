@@ -14,6 +14,8 @@ import type { CheerioAPI } from 'cheerio';
 import type { Element } from 'domhandler';
 import iconv from 'iconv-lite';
 import type { CourseDTO } from './types.js';
+import type { ParsedTimetable } from '../../../shared/timetable-import.js';
+import { normalizeCourses, type SourceRef } from '../../../shared/timetable.js';
 import { parseTimetableHtml } from './timetable-html.js';
 
 const BASE = 'http://csujwc.its.csu.edu.cn';
@@ -293,7 +295,7 @@ export async function csuBeginImport(account: string, password: string): Promise
 export async function csuFetchCourses(
   sessionId: string,
   captcha: string,
-): Promise<{ courses: CourseDTO[]; warnings: string[] }> {
+): Promise<ParsedTimetable> {
   const st = pending.get(sessionId);
   if (!st) throw new CsuError('登录会话不存在或已超时,请重新获取验证码');
   pending.delete(sessionId); // 一次性:验证码是一次性的,成败都不复用
@@ -421,7 +423,7 @@ export async function csuFetchCourses(
     // 兜底:裸路径(部分部署支持)
     candidates.push(`${new URL(landUrl).origin}/jsxsd/xskb/xskb_list.do`, `${BASE}/jsxsd/xskb/xskb_list.do`);
 
-    let parsedResult: { courses: CourseDTO[]; warnings: string[] } | null = null;
+    let parsedResult: ParsedTimetable | null = null;
     let foundTable = false;
     for (const url of [...new Set(candidates)]) {
       if (tried.has(url)) continue;
@@ -431,11 +433,14 @@ export async function csuFetchCourses(
         const h = Session.decode(res);
         if (!isLoginPage(h) && /id=["']kbtable["']/.test(h)) {
           foundTable = true;
+          const structured = parseTimetableHtml(h);
+          if (structured && (structured.courses.length || structured.items?.length)) { parsedResult = structured; break; }
           const parsed = parseKbtable(h);
           const courses = toCourseDTOs(parsed.raw, parsed.warnings);
           console.log(`[csujwc] 课表解析:有效排课 ${courses.length} 项,提示 ${parsed.warnings.length} 条`);
           if (courses.length) {
-            parsedResult = { courses, warnings: parsed.warnings };
+            parsedResult = { courses, warnings: parsed.warnings,
+              items: [{id:'legacy-web',sheet:'网页',row:1,column:1,raw:h.replace(/<[^>]*>/g,' '),status:'pending',course_ids:courses.map(c=>c.id!),message:'兼容解析无法逐格对账；请核对整张原表后确认'}] };
             break;
           }
         }
@@ -465,6 +470,7 @@ export async function csuFetchCourses(
 // ===== 课表 HTML 解析(强智 #kbtable) =====
 
 export interface RawCourse {
+  id?: string; source?: SourceRef; class_name?: string;
   name: string;
   teacher: string;
   location: string;
@@ -604,7 +610,8 @@ export function parseKbtable(html: string): { raw: RawCourse[]; warnings: string
     return {
       raw: structured.courses.map(c => ({
         name: c.name, teacher: c.teacher, location: c.location, dayOfWeek: c.weekday,
-        startSection: c.block * 2 - 1, endSection: c.block * 2, weeks: c.weeks,
+        startSection: c.start_period ?? c.block * 2 - 1, endSection: c.end_period ?? c.block * 2, weeks: c.weeks,
+        id:c.id, source:c.source, class_name:c.class_name,
       })),
       warnings: structured.warnings,
     };
@@ -682,43 +689,15 @@ export function parseKbtable(html: string): { raw: RawCourse[]; warnings: string
   return { raw, warnings };
 }
 
-/** 强智解析结果 → CourseDTO:节次对齐到 5 个作息块,周次收敛到 1~30,重复课次合并 */
-export function toCourseDTOs(
-  raw: RawCourse[],
-  warnings: string[] = [],
-): CourseDTO[] {
-  const merged = new Map<string, CourseDTO>();
-  for (const c of raw) {
-    const dayText = `周${'一二三四五六日'[c.dayOfWeek - 1] ?? c.dayOfWeek}`;
-    if (c.startSection < 1 || c.endSection < c.startSection || c.endSection > 10) {
-      warnings.push(`${dayText}「${c.name}」的节次(第${c.startSection}-${c.endSection}节)不在作息表内,已忽略`);
-      continue;
+/** Legacy HTML fallback: preserve each rule and its full range, never merge by name. */
+export function toCourseDTOs(raw: RawCourse[], warnings: string[] = []): CourseDTO[] {
+  return normalizeCourses(raw.flatMap(c => {
+    if (c.startSection < 1 || c.endSection < c.startSection || c.endSection > 24 || c.dayOfWeek<1 || c.dayOfWeek>7 || !c.weeks.length || c.weeks.some(w=>w<1 || w>60)) {
+      warnings.push(`「${c.name}」节次或周次无效，需手动确认：${JSON.stringify(c)}`);
+      return [];
     }
-    const block = Math.min(5, Math.max(1, Math.ceil(c.startSection / 2))) as CourseDTO['block'];
-    if (Math.ceil(c.endSection / 2) !== Math.ceil(c.startSection / 2)) {
-      warnings.push(`${dayText}「${c.name}」第${c.startSection}-${c.endSection}节跨作息块,按第 ${block} 块(前半)处理`);
-    }
-    const weeks = [...new Set(c.weeks.filter((w) => w >= 1 && w <= 30))].sort((a, b) => a - b);
-    if (!weeks.length) {
-      warnings.push(`「${c.name}」(${dayText})没有有效周次,已忽略`);
-      continue;
-    }
-    const key = `${c.name}|${c.teacher}|${c.location}|${c.dayOfWeek}|${block}`;
-    const prev = merged.get(key);
-    if (prev) {
-      const set = new Set([...prev.weeks, ...weeks]);
-      prev.weeks = [...set].sort((a, b) => a - b);
-    } else {
-      merged.set(key, {
-        name: c.name.slice(0, 60),
-        teacher: c.teacher.slice(0, 100),
-        location: c.location.slice(0, 60),
-        weekday: c.dayOfWeek as CourseDTO['weekday'],
-        block,
-        weeks,
-      });
-    }
-  }
-  if (merged.size > 200) warnings.push('课次超过 200 条,只保留前 200 个');
-  return [...merged.values()].slice(0, 200);
+    return [{id:c.id, source:c.source, class_name:c.class_name, name:c.name, teacher:c.teacher, location:c.location,
+      weekday:c.dayOfWeek as CourseDTO['weekday'], block:Math.ceil(c.startSection/2),
+      start_period:c.startSection, end_period:c.endSection, weeks:c.weeks}];
+  }));
 }

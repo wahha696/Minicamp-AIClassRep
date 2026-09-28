@@ -105,19 +105,7 @@ export interface TodosDTO {
   manual: TodoDTO[];  // 用户手动添加的待办（未完成的）
 }
 
-export interface CourseDTO {
-  name: string;
-  teacher: string;
-  location: string;
-  weekday: 1 | 2 | 3 | 4 | 5 | 6 | 7; // 1=周一…7=周日
-  block: 1 | 2 | 3 | 4 | 5;
-  weeks: number[];
-}
-
-export interface TimetableDTO {
-  semester_start: string; // 'YYYY-MM-DD'，本学期第一周的周一
-  courses: CourseDTO[];
-}
+export type { CourseDTO, TimetableDTO } from '../../../shared/timetable.js';
 
 export interface LevelRuleDTO {
   id: number;

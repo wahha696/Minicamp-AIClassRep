@@ -283,7 +283,7 @@ describe('真实模式（fetch 打桩）', () => {
       { method: 'PATCH', url: '/api/todos/1', body: { done: true } },
       { method: 'GET', url: '/api/timetable' },
       { method: 'PUT', url: '/api/timetable', body: { semester_start: '2026-09-07', courses: [] } },
-      { method: 'DELETE', url: '/api/timetable' },
+      { method: 'DELETE', url: '/api/timetable', body: {} },
       { method: 'GET', url: '/api/settings/memory' },
       { method: 'PUT', url: '/api/settings/memory', body: { enabled: true } },
       { method: 'DELETE', url: '/api/settings/memory/rules/2' },

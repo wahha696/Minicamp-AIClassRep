@@ -107,19 +107,8 @@ export interface TodosDTO {
   manual: TodoDTO[];  // 用户手动添加的待办（未完成的）
 }
 
-export interface CourseDTO {
-  name: string;
-  teacher: string;
-  location: string;
-  weekday: 1 | 2 | 3 | 4 | 5 | 6 | 7; // 1=周一…7=周日
-  block: 1 | 2 | 3 | 4 | 5;
-  weeks: number[];
-}
-
-export interface TimetableDTO {
-  semester_start: string; // 'YYYY-MM-DD'，本学期第一周的周一
-  courses: CourseDTO[];
-}
+import type { CourseDTO } from '../../../../shared/timetable';
+export type { CourseDTO, TimetableDTO } from '../../../../shared/timetable';
 
 export interface LevelRuleDTO {
   id: number;
@@ -244,6 +233,8 @@ export interface CsuImportStartDTO {
 
 /** POST /api/timetable/csu/fetch:解析好的课次(不落库,走预览确认流程) */
 export interface CsuImportResultDTO {
+  items?: import('../../../../shared/timetable').ImportItem[];
+  semesterStart?: string;
   courses: CourseDTO[];
   warnings: string[];
 }

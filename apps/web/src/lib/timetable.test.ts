@@ -9,8 +9,9 @@ const sh = (date: string, hhmm = '00:00') => Date.parse(`${date}T${hhmm}:00+08:0
 describe('parseTimetable（附录 A 样例）', () => {
   const { courses, warnings } = parseTimetable(fixture as string[][]);
 
-  it('解析出 13 个课次（同门课不同天各一条），没有 warnings', () => {
-    expect(warnings).toEqual([]);
+  it('解析出 13 条规则；无节次的实践课备注保留待确认', () => {
+    expect(warnings).toHaveLength(1);
+    expect(parseTimetable(fixture as string[][]).items?.find(i=>i.raw.includes('高级程序设计实践'))).toMatchObject({status:'pending',row:10,column:2});
     expect(courses).toHaveLength(13);
   });
 
@@ -42,7 +43,7 @@ describe('parseTimetable（附录 A 样例）', () => {
     expect(c?.weeks).toEqual([8, 12]);
   });
 
-  it('备注行被忽略，不产生 warning、不产课程', () => {
+  it('备注不猜测成已排定课程', () => {
     expect(courses.some((c) => c.name.includes('高级程序设计实践'))).toBe(false);
   });
 });
@@ -71,16 +72,15 @@ describe('parseTimetable 变体', () => {
     expect(courses[1]!.weeks).toEqual([6, 7, 8, 9, 10]);
   });
 
-  it('11–12 节有课 → warning；空行不警告', () => {
+  it('11–12 节完整保留；空行不警告', () => {
     const rows = [
       header,
       ['11－12', '\n晚课\n某老师\n1-16[周]\nX101\n'],
     ];
     const { courses, warnings } = parseTimetable(rows as string[][]);
-    expect(courses).toHaveLength(0);
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain('第 11–12 节不在作息表内');
-    expect(warnings[0]).toContain('晚课');
+    expect(courses).toHaveLength(1);
+    expect(courses[0]).toMatchObject({name:'晚课',start_period:11,end_period:12,block:6});
+    expect(warnings).toEqual([]);
 
     const empty = parseTimetable([header, ['11－12', ' ', ' ']] as string[][]);
     expect(empty.warnings).toEqual([]);
@@ -96,7 +96,7 @@ describe('parseTimetable 变体', () => {
     const cell = '\n课A\n教师A\n周次不明\nA101\n课B\n教师B\n1-5[周]\nA202\n';
     // 「周次不明」不含 [周] → 只有 1-5[周] 一个锚点，课A 被并进课B 的头部；加个真锚点验证跳过逻辑：
     const { warnings } = parseTimetable([header, ['1－2', cell]] as string[][]);
-    expect(warnings.length).toBeGreaterThanOrEqual(0); // 形态一：课A 名字进了课B 的头
+    expect(warnings.length).toBeGreaterThan(0); // 不得把不明课程悄悄并入其他课程
     const cell2 = '\n课A\n教师A\nabc[周]\nA101\n课B\n教师B\n1-5[周]\nA202\n';
     const { courses, warnings: w2 } = parseTimetable([header, ['1－2', cell2]] as string[][]);
     expect(w2.some((w) => w.includes('课A'))).toBe(true); // abc[周] 解析失败 → 跳过课A
@@ -125,7 +125,7 @@ describe('parseTimetable（形式二：行=星期、列=节次）', () => {
     expect(semesterStart).toBe('2026-09-07');
   });
 
-  it('一格多门课 + 11–12 节有课警告', () => {
+  it('一格多门课 + 11–12 节完整保留，备注内容待确认', () => {
     const rows = [
       ['', '1－2', '', '', '', '11－12', '', '', '', '备注'],
       ['星期三', '\n课A\n1-8周(16学时)\nA101\n某班\n课B\n9-16周(16学时)\n\n某班\n', '', '', '', '\n晚课\n1-16周\nX1\n', '', '', '', '随便'],
@@ -134,9 +134,10 @@ describe('parseTimetable（形式二：行=星期、列=节次）', () => {
     expect(r.courses.map((c) => [c.name, c.location, c.weeks.length, c.weekday, c.block])).toEqual([
       ['课A', 'A101', 8, 3, 1],
       ['课B', '', 8, 3, 1],
+      ['晚课','X1',16,3,6],
     ]);
     expect(r.warnings).toHaveLength(1);
-    expect(r.warnings[0]).toContain('晚课');
+    expect(r.items?.find(i=>i.raw==='随便')?.status).toBe('pending');
     expect(r.semesterStart).toBeUndefined();
   });
 });
