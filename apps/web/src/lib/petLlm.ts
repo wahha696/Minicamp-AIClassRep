@@ -1,7 +1,7 @@
 // 桌宠对话的 LLM 通道（PET-15）：对话框里说的每句话都发到这里，
 // 由服务端持 key 调 DeepSeek（OpenAI 兼容协议）。key 永远不进前端。
 // 失败（没配 key / 超时 / 服务出错）一律抛错，调用方如实提示用户——前端已无规则引擎兜底。
-import { isMock } from '../api/client';
+import { accountScopedFetch, isMock } from '../api/client';
 import { eventTimeText } from './time';
 import type { ConnectState, EventDTO } from '../api/types';
 
@@ -26,7 +26,7 @@ export function llmAvailable(): boolean {
 /** 问一句 DeepSeek（后端代理）。失败抛错，由调用方决定回退话术。style = 用户自定义人设/说话风格（可选） */
 export async function askPetLlm(message: string, history: readonly PetLlmMsg[], ctx: PetLlmCtx, style?: string): Promise<string> {
   if (isMock) throw new Error('mock 模式没有 LLM');
-  const res = await fetch('/api/pet/chat', {
+  const res = await accountScopedFetch('/api/pet/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

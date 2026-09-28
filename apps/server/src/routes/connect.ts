@@ -31,9 +31,15 @@ export function registerConnectRoutes(app: Hono): void {
   // （「关闭电脑版 QQ 并继续」「重新连接」「重启采集端」共用，架构.md §5）
   // body 可选 { kill_qq: true }：只有「关闭电脑版 QQ 并继续」按钮传，才会结束用户自己的 QQ（修复计划 S4）
   app.post('/api/connect/restart', async (c) => {
-    const body = (await c.req.json().catch(() => ({}))) as { kill_qq?: unknown } | null;
+    const parsed = restartSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: '连接状态已过期，请刷新后重试' }, 400);
     try {
-      await restartNapcat({ killUserQQ: body?.kill_qq === true });
+      const restarted = await restartNapcat({
+        killUserQQ: parsed.data.kill_qq === true,
+        expectedAccountEpoch: parsed.data.expected_account_epoch,
+        expectedUin: parsed.data.expected_uin,
+      });
+      if (!restarted) return c.json({ error: '账号已发生变化，请刷新后重试' }, 409);
       return c.json({ ok: true });
     } catch (err) {
       return c.json({ error: `重启采集端失败：${err instanceof Error ? err.message : String(err)}` }, 500);
@@ -43,9 +49,18 @@ export function registerConnectRoutes(app: Hono): void {
   // POST /api/connect/logout：退出当前 QQ（忘掉 QQ 号 + 重启采集端）→ 回到扫码，可换号登录。
   // 数据按号分库存着，换回来原样恢复；body 可选 { erase: true } = 「退出并删除本号数据」（不可恢复）
   app.post('/api/connect/logout', async (c) => {
-    const body = (await c.req.json().catch(() => ({}))) as { erase?: unknown } | null;
+    const parsed = logoutSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: '连接状态已过期，请刷新后重试' }, 400);
     try {
-      await logoutNapcat({ erase: body?.erase === true });
+      const loggedOut = await logoutNapcat({
+        erase: parsed.data.erase === true,
+        expectedAccountEpoch: parsed.data.expected_account_epoch,
+        expectedUin: parsed.data.expected_uin,
+      });
+      if (loggedOut === 'external_unsupported') {
+        return c.json({ error: '当前使用远端 OneBot，请先在远端 NapCat 中退出 QQ' }, 409);
+      }
+      if (!loggedOut) return c.json({ error: '账号已发生变化，请刷新后重试' }, 409);
       return c.json({ ok: true });
     } catch (err) {
       return c.json({ error: `退出登录失败：${err instanceof Error ? err.message : String(err)}` }, 500);
@@ -98,4 +113,19 @@ export function registerConnectRoutes(app: Hono): void {
 
 const syncSchema = z.object({
   days: z.union([z.literal(1), z.literal(7), z.literal(30)]).default(7),
+});
+
+const accountEpochSchema = z.string().trim().min(1).max(200);
+const uinSchema = z.string().regex(/^\d{5,12}$/);
+
+const restartSchema = z.object({
+  expected_account_epoch: accountEpochSchema,
+  expected_uin: uinSchema.nullable(),
+  kill_qq: z.boolean().optional(),
+});
+
+const logoutSchema = z.object({
+  expected_account_epoch: accountEpochSchema,
+  expected_uin: uinSchema,
+  erase: z.boolean().optional(),
 });

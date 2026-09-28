@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { csuBeginImport, csuFetchCourses } from './csujwc.js';
+import { notifyAccountSwitch } from './db/index.js';
 
 const login = 'https://ca.csu.edu.cn/authserver/login?service=http%3A%2F%2Fcsujwc.its.csu.edu.cn%2Fsso.jsp';
 const page = '<form action="/authserver/login"><input id="execution" value="e1s1"><input id="pwdEncryptSalt" value="1234567890123456"></form>';
@@ -13,7 +14,7 @@ function mockLogin(need: Response = Response.json({ isNeed: false })) {
   vi.stubGlobal('fetch', mock);
   return mock;
 }
-afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('CAS 登录请求与错误归因', () => {
   it('保留 service,提交空验证码,不混入指纹字段;CAS 500 不重试', async () => {
@@ -64,6 +65,25 @@ describe('CAS 登录请求与错误归因', () => {
     const now = Date.now();
     vi.spyOn(Date, 'now').mockReturnValue(now + 11 * 60_000);
     await expect(csuFetchCourses(s.session_id, '')).rejects.toThrow('登录会话已超时');
+    expect(mock).toHaveBeenCalledTimes(3);
+  });
+
+  it('换账号会立即销毁待用教务会话，旧 session_id 不能在新账号复用', async () => {
+    const mock = mockLogin();
+    const s = await csuBeginImport('000000', 'test-password');
+    notifyAccountSwitch('22222');
+
+    await expect(csuFetchCourses(s.session_id, '')).rejects.toThrow('登录会话不存在或已超时');
+    expect(mock).toHaveBeenCalledTimes(3); // 绝不向 CAS 提交旧账号凭据
+  });
+
+  it('挂起会话到 TTL 会主动销毁，不需要再次 start 才清理', async () => {
+    vi.useFakeTimers();
+    const mock = mockLogin();
+    const s = await csuBeginImport('000000', 'test-password');
+    await vi.advanceTimersByTimeAsync(10 * 60_000 + 1);
+
+    await expect(csuFetchCourses(s.session_id, '')).rejects.toThrow('登录会话不存在或已超时');
     expect(mock).toHaveBeenCalledTimes(3);
   });
 

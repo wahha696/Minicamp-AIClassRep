@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Hono } from 'hono';
-import { deleteAccountData, legacyDataExists, listAccounts } from '../accounts.js';
+import { deleteInactiveAccountData, legacyDataExists, listAccounts } from '../accounts.js';
 import { DATA_DIR, NAPCAT_DIR, ROOT } from '../paths.js';
 
 const NAPCAT_BOOT_EXE = 'NapCatWinBootMain.exe';
@@ -61,12 +61,16 @@ export function registerSetupRoutes(app: Hono): void {
   // GET /api/accounts → 本机账号库列表（问题 1 延伸：网页可查看/删除账号数据）
   app.get('/api/accounts', (c) => c.json({ accounts: listAccounts(), legacy_data: legacyDataExists() }));
 
-  // DELETE /api/accounts/:uin → 删除某账号的本机数据（连库一起）；正在登录的账号先切回无账号库
+  // DELETE /api/accounts/:uin → 只删非活动账号。当前号必须走「退出并删除本号数据」，
+  // 否则单独切到兜底库会让 NapCat 仍在线、业务库却已无账号，形成假在线。
   app.delete('/api/accounts/:uin', async (c) => {
     const uin = c.req.param('uin');
     try {
-      const ok = await deleteAccountData(uin);
-      if (!ok) return c.json({ error: '该账号在本机没有数据' }, 404);
+      const result = await deleteInactiveAccountData(uin);
+      if (result === 'active') {
+        return c.json({ error: '当前 NapCat 登录账号不能直接删除，请使用“退出并删除本号数据”' }, 409);
+      }
+      if (result === 'not_found') return c.json({ error: '该账号在本机没有数据' }, 404);
       return c.json({ ok: true });
     } catch (err) {
       return c.json({ error: `删除失败：${err instanceof Error ? err.message : String(err)}` }, 500);

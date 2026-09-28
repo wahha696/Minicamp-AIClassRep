@@ -2,8 +2,18 @@
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db, openDb } from '../db/index.js';
+import { createEventProposal, type ProposedChanges } from '../event-proposals.js';
+import type { ExtractedEvent } from '../pipeline/extract.js';
+import { applyEvents } from '../pipeline/reconcile.js';
 import { registerBusinessRoutes } from './business.js';
-import type { EventDetailDTO, EventDTO, TodayDTO } from '../types.js';
+import type {
+  EventDetailDTO,
+  EventDTO,
+  EventProposalKind,
+  EventProposalReason,
+  Message,
+  TodayDTO,
+} from '../types.js';
 
 // ===== 固定时钟：「现在」钉在上海时间某天 12:00，结果不随跑测试的时刻变化
 // （否则 00:10 前 / 23:00 后跑，「未来那件」会落到明天，摘要断言就会挂）
@@ -101,6 +111,75 @@ async function patchJson(
     body: JSON.stringify(payload),
   });
   return { status: res.status, body: await res.json() };
+}
+
+async function postJson(
+  app: Hono,
+  path: string,
+  payload: unknown,
+): Promise<{ status: number; body: unknown }> {
+  const res = await app.request(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  return { status: res.status, body: await res.json() };
+}
+
+function addProposal(
+  eventId: number,
+  opts: {
+    kind?: EventProposalKind;
+    reason?: EventProposalReason;
+    changes: ProposedChanges;
+    sourceMessageIds?: string[];
+    confidence?: number;
+  },
+): number {
+  const event = db.prepare('SELECT version, status FROM events WHERE id = ?').get(eventId) as {
+    version: number;
+    status: EventDTO['status'];
+  };
+  const baseStatus = event.status === 'pending_confirm' ? 'active' : event.status;
+  db.prepare("UPDATE events SET status = 'pending_confirm' WHERE id = ?").run(eventId);
+  return createEventProposal({
+    eventId,
+    kind: opts.kind ?? 'update',
+    reason: opts.reason ?? 'low_confidence',
+    changes: opts.changes,
+    sourceMessageIds: opts.sourceMessageIds ?? ['m-proposal'],
+    confidence: opts.confidence ?? 0.42,
+    baseVersion: event.version,
+    baseStatus,
+    now: Date.now(),
+  });
+}
+
+function aiLocationUpdate(eventId: number, messageId: string, location: string, sentAt: number): void {
+  const message: Message = {
+    message_id: messageId,
+    group_id: 'g1',
+    group_name: '高数(2)班',
+    sender_name: '张老师',
+    text: `地点改到 ${location}`,
+    sent_at: sentAt,
+  };
+  const extracted: ExtractedEvent = {
+    action: 'update',
+    update_of: eventId,
+    type: 'exam',
+    title: '',
+    description: '',
+    start_at: null,
+    end_at: null,
+    deadline_at: null,
+    location,
+    action_required: null,
+    confidence: 0.96,
+    level: null,
+    source_message_ids: [messageId],
+  };
+  applyEvents('g1', [extracted], [message]);
 }
 
 // ===== /api/today
@@ -376,6 +455,35 @@ describe('GET /api/events/:id', () => {
     expect(status).toBe(200);
     expect((body as EventDetailDTO).history[0]!.changed_fields).toEqual({});
   });
+
+  it('返回人工锁定字段和结构化待确认提案，不丢原因、来源与字段差异', async () => {
+    const app = freshApp();
+    addGroup('g1', '高数(2)班');
+    const id = addEvent({ title: '高数小测', location: 'A101' });
+    db.prepare('UPDATE events SET manual_locked_fields = ? WHERE id = ?').run('["title"]', id);
+    const proposalId = addProposal(id, {
+      reason: 'manual_lock_conflict',
+      changes: { title: { from: '高数小测', to: '线代小测' } },
+      sourceMessageIds: ['m2', 'm1'],
+      confidence: 0.88,
+    });
+
+    const { status, body } = await getJson(app, `/api/events/${id}`);
+    expect(status).toBe(200);
+    expect(body as EventDetailDTO).toMatchObject({
+      status: 'pending_confirm',
+      manual_locked_fields: ['title'],
+      pending_proposals: [{
+        id: proposalId,
+        kind: 'update',
+        reason: 'manual_lock_conflict',
+        changes: { title: { from: '高数小测', to: '线代小测' } },
+        source_message_ids: ['m1', 'm2'],
+        confidence: 0.88,
+        base_version: 1,
+      }],
+    });
+  });
 });
 
 // ===== PATCH /api/events/:id
@@ -484,6 +592,59 @@ describe('PATCH /api/events/:id', () => {
     expect((db.prepare('SELECT COUNT(*) n FROM level_feedback WHERE event_id = ?').get(id) as { n: number }).n).toBe(1);
   });
 
+  it('人工调级会消解 level 提案并恢复原状态，旧提案不得再覆盖人工值', async () => {
+    const app = freshApp();
+    addGroup('g1', '高数(2)班');
+    const id = addEvent({ title: '实验报告' });
+    const proposalId = addProposal(id, {
+      changes: { level: { from: 2, to: 3 } },
+    });
+    const before = (await getJson(app, `/api/events/${id}`)).body as EventDetailDTO;
+
+    const corrected = await patchJson(app, `/api/events/${id}`, {
+      level: 4,
+      expected_version: before.version,
+      expected_updated_at: before.updated_at,
+    });
+    expect(corrected.status).toBe(200);
+    expect(corrected.body as EventDetailDTO).toMatchObject({
+      level: 4,
+      level_locked: true,
+      status: 'active',
+      version: 1,
+      pending_proposals: [],
+    });
+    expect(db.prepare('SELECT status FROM event_proposals WHERE id = ?').get(proposalId)).toEqual({
+      status: 'superseded',
+    });
+    expect(await postJson(app, `/api/events/${id}/proposals/${proposalId}/resolve`, {
+      decision: 'accept',
+    })).toMatchObject({ status: 409 });
+    expect((await getJson(app, `/api/events/${id}`)).body as EventDetailDTO).toMatchObject({ level: 4 });
+  });
+
+  it('手调成当前等级也是最终裁决；只缩减 level，保留同提案的其他差异', async () => {
+    const app = freshApp();
+    addGroup('g1', '高数(2)班');
+    const id = addEvent({ title: '地点待定', location: 'A101' });
+    addProposal(id, {
+      changes: {
+        level: { from: 2, to: 3 },
+        location: { from: 'A101', to: 'B202' },
+      },
+    });
+
+    const corrected = await patchJson(app, `/api/events/${id}`, { level: 2 });
+    expect(corrected.status).toBe(200);
+    expect(corrected.body as EventDetailDTO).toMatchObject({
+      level: 2,
+      level_locked: true,
+      status: 'pending_confirm',
+      pending_proposals: [{ changes: { location: { from: 'A101', to: 'B202' } } }],
+    });
+    expect((corrected.body as EventDetailDTO).pending_proposals[0]!.changes).not.toHaveProperty('level');
+  });
+
   it('已锁定再调级：feedback 的 ai_level 沿用上一条的（不是上一次用户值）', async () => {
     const app = freshApp();
     addGroup('g1', '高数(2)班');
@@ -561,6 +722,527 @@ describe('PATCH /api/events/:id', () => {
     const { status, body } = await patchJson(app, `/api/events/${id}`, { status: 'done', level: 1 });
     expect(status).toBe(200);
     expect(body as EventDTO).toMatchObject({ status: 'done', level: 1, level_locked: true });
+  });
+
+  it('待确认事件可人工修正时间和地点，保存后锁字段、关闭提案并支持解锁', async () => {
+    const app = freshApp();
+    const today = shanghaiToday();
+    addGroup('g1', '高数(2)班');
+    const oldStart = shTime(today, '14:00');
+    const oldEnd = shTime(today, '15:00');
+    const id = addEvent({ start_at: oldStart, end_at: oldEnd, location: 'A101' });
+    const proposalId = addProposal(id, {
+      changes: {
+        start_at: { from: oldStart, to: shTime(today, '15:00') },
+        end_at: { from: oldEnd, to: shTime(today, '16:00') },
+        location: { from: 'A101', to: 'A201' },
+      },
+    });
+
+    expect(await patchJson(app, `/api/events/${id}`, { status: 'active', expected_version: 1 })).toMatchObject({
+      status: 409,
+    });
+
+    const correctedStart = shTime(today, '16:00');
+    const correctedEnd = shTime(today, '17:30');
+    const corrected = await patchJson(app, `/api/events/${id}`, {
+      start_at: correctedStart,
+      end_at: correctedEnd,
+      location: 'B302',
+      expected_version: 1,
+    });
+    expect(corrected.status).toBe(200);
+    expect(corrected.body as EventDetailDTO).toMatchObject({
+      start_at: correctedStart,
+      end_at: correctedEnd,
+      location: 'B302',
+      status: 'active',
+      version: 2,
+      manual_locked_fields: ['start_at', 'end_at', 'location'],
+      pending_proposals: [],
+    });
+    expect(db.prepare('SELECT status FROM event_proposals WHERE id = ?').get(proposalId)).toEqual({
+      status: 'superseded',
+    });
+
+    expect(await patchJson(app, `/api/events/${id}`, {
+      location: 'C404',
+      expected_version: 1,
+    })).toMatchObject({ status: 409 });
+    expect(await patchJson(app, `/api/events/${id}`, {
+      end_at: correctedStart,
+      expected_version: 2,
+    })).toMatchObject({ status: 400 });
+
+    const unlocked = await patchJson(app, `/api/events/${id}`, {
+      unlock_fields: ['location'],
+      expected_version: 2,
+    });
+    expect(unlocked.status).toBe(200);
+    expect(unlocked.body as EventDetailDTO).toMatchObject({
+      version: 2,
+      manual_locked_fields: ['start_at', 'end_at'],
+    });
+  });
+
+  it('人工锁定地点后 AI 只提案；解锁后下一条高置信度通知可自动更新', async () => {
+    const app = freshApp();
+    addGroup('g1', '高数(2)班');
+    const id = addEvent({ location: 'A101' });
+
+    const manual = await patchJson(app, `/api/events/${id}`, {
+      location: '人工确认 A201',
+      expected_version: 1,
+    });
+    expect(manual.status).toBe(200);
+    expect(manual.body as EventDetailDTO).toMatchObject({
+      location: '人工确认 A201',
+      version: 2,
+      manual_locked_fields: ['location'],
+    });
+
+    aiLocationUpdate(id, 'm-locked', 'AI 建议 A301', FIXED_NOW + 1_000);
+    const protectedDetail = (await getJson(app, `/api/events/${id}`)).body as EventDetailDTO;
+    expect(protectedDetail).toMatchObject({
+      location: '人工确认 A201',
+      status: 'pending_confirm',
+      version: 3,
+      manual_locked_fields: ['location'],
+      pending_proposals: [{
+        kind: 'update',
+        reason: 'manual_lock_conflict',
+        changes: { location: { from: '人工确认 A201', to: 'AI 建议 A301' } },
+      }],
+    });
+
+    const unlocked = await patchJson(app, `/api/events/${id}`, {
+      unlock_fields: ['location'],
+      expected_version: 3,
+    });
+    expect(unlocked.status).toBe(200);
+    expect(unlocked.body as EventDetailDTO).toMatchObject({
+      status: 'pending_confirm',
+      version: 3,
+      manual_locked_fields: [],
+    });
+
+    aiLocationUpdate(id, 'm-unlocked', 'AI 确认 A401', FIXED_NOW + 2_000);
+    const updated = (await getJson(app, `/api/events/${id}`)).body as EventDetailDTO;
+    expect(updated).toMatchObject({
+      location: 'AI 确认 A401',
+      status: 'active',
+      version: 4,
+      manual_locked_fields: [],
+      pending_proposals: [],
+    });
+    expect(db.prepare('SELECT status FROM event_proposals WHERE event_id = ?').all(id)).toEqual([
+      { status: 'superseded' },
+    ]);
+  });
+
+  it('状态、等级和解锁都会推进并发令牌，旧页面不能静默覆盖', async () => {
+    const app = freshApp();
+    addGroup('g1', '高数(2)班');
+    const id = addEvent({ location: 'A101' });
+    db.prepare("UPDATE events SET manual_locked_fields = '[\"location\"]' WHERE id = ?").run(id);
+
+    const initial = (await getJson(app, `/api/events/${id}`)).body as EventDetailDTO;
+    const statusWrite = await patchJson(app, `/api/events/${id}`, {
+      status: 'done', expected_version: initial.version, expected_updated_at: initial.updated_at,
+    });
+    expect(statusWrite.status).toBe(200);
+    const afterStatus = statusWrite.body as EventDetailDTO;
+    expect(afterStatus.version).toBe(initial.version); // 群通知/ICS 版本语义保持不变
+    expect(afterStatus.updated_at).toBeGreaterThan(initial.updated_at);
+    expect(await patchJson(app, `/api/events/${id}`, {
+      level: 4, expected_version: initial.version, expected_updated_at: initial.updated_at,
+    })).toMatchObject({ status: 409 });
+
+    const levelWrite = await patchJson(app, `/api/events/${id}`, {
+      level: 4, expected_version: afterStatus.version, expected_updated_at: afterStatus.updated_at,
+    });
+    expect(levelWrite.status).toBe(200);
+    const afterLevel = levelWrite.body as EventDetailDTO;
+    expect(afterLevel.updated_at).toBeGreaterThan(afterStatus.updated_at);
+    expect(await patchJson(app, `/api/events/${id}`, {
+      level: 3, expected_version: afterStatus.version, expected_updated_at: afterStatus.updated_at,
+    })).toMatchObject({ status: 409 });
+
+    const unlockWrite = await patchJson(app, `/api/events/${id}`, {
+      unlock_fields: ['location'],
+      expected_version: afterLevel.version,
+      expected_updated_at: afterLevel.updated_at,
+    });
+    expect(unlockWrite.status).toBe(200);
+    const afterUnlock = unlockWrite.body as EventDetailDTO;
+    expect(afterUnlock.manual_locked_fields).toEqual([]);
+    expect(afterUnlock.updated_at).toBeGreaterThan(afterLevel.updated_at);
+  });
+
+  it('人工只修正部分字段时保留同一提案里的其他差异并继续待确认', async () => {
+    const app = freshApp();
+    const today = shanghaiToday();
+    addGroup('g1', '高数(2)班');
+    const oldStart = shTime(today, '14:00');
+    const id = addEvent({ start_at: oldStart, end_at: shTime(today, '18:00'), location: 'A101' });
+    addProposal(id, {
+      changes: {
+        start_at: { from: oldStart, to: shTime(today, '15:00') },
+        location: { from: 'A101', to: 'B202' },
+      },
+    });
+    const before = (await getJson(app, `/api/events/${id}`)).body as EventDetailDTO;
+    const correctedStart = shTime(today, '16:00');
+    const result = await patchJson(app, `/api/events/${id}`, {
+      start_at: correctedStart,
+      expected_version: before.version,
+      expected_updated_at: before.updated_at,
+    });
+    expect(result.status).toBe(200);
+    expect(result.body as EventDetailDTO).toMatchObject({
+      start_at: correctedStart,
+      location: 'A101',
+      status: 'pending_confirm',
+      pending_proposals: [{ changes: { location: { from: 'A101', to: 'B202' } } }],
+    });
+  });
+
+  it('有待确认提案时不允许绕过确认直接完成或取消', async () => {
+    const app = freshApp();
+    addGroup('g1', '高数(2)班');
+    const id = addEvent({ title: '待确认改期', location: 'A101' });
+    const proposalId = addProposal(id, {
+      changes: { location: { from: 'A101', to: 'B202' } },
+    });
+
+    for (const status of ['done', 'cancelled'] as const) {
+      const result = await patchJson(app, `/api/events/${id}`, { status });
+      expect(result.status).toBe(409);
+      expect(result.body).toHaveProperty('error');
+    }
+    expect((await getJson(app, `/api/events/${id}`)).body as EventDetailDTO).toMatchObject({
+      status: 'pending_confirm',
+      pending_proposals: [{ id: proposalId }],
+    });
+    expect(db.prepare('SELECT status FROM event_proposals WHERE id = ?').get(proposalId)).toEqual({
+      status: 'pending',
+    });
+  });
+});
+
+// ===== POST /api/events/:id/proposals/:proposalId/resolve
+
+describe('POST /api/events/:id/proposals/:proposalId/resolve', () => {
+  it('接受 update：原子应用全部字段、恢复 active、升版本并记录来源', async () => {
+    const app = freshApp();
+    const today = shanghaiToday();
+    addGroup('g1', '高数(2)班');
+    const oldStart = shTime(today, '14:00');
+    const oldEnd = shTime(today, '15:00');
+    const nextStart = shTime(today, '15:00');
+    const nextEnd = shTime(today, '16:30');
+    const id = addEvent({ start_at: oldStart, end_at: oldEnd, location: 'A101' });
+    const proposalId = addProposal(id, {
+      changes: {
+        start_at: { from: oldStart, to: nextStart },
+        end_at: { from: oldEnd, to: nextEnd },
+        location: { from: 'A101', to: 'B202' },
+      },
+      sourceMessageIds: ['m-update'],
+    });
+
+    const resolved = await postJson(app, `/api/events/${id}/proposals/${proposalId}/resolve`, {
+      decision: 'accept',
+      expected_version: 1,
+    });
+    expect(resolved.status).toBe(200);
+    const detail = resolved.body as EventDetailDTO;
+    expect(detail).toMatchObject({
+      start_at: nextStart,
+      end_at: nextEnd,
+      location: 'B202',
+      status: 'active',
+      version: 2,
+      pending_proposals: [],
+    });
+    expect(detail.history.at(-1)).toMatchObject({
+      version: 2,
+      source_message_id: 'm-update',
+      changed_fields: {
+        start_at: { from: oldStart, to: nextStart },
+        end_at: { from: oldEnd, to: nextEnd },
+        location: { from: 'A101', to: 'B202' },
+        status: { from: 'pending_confirm', to: 'active' },
+      },
+    });
+    expect(db.prepare('SELECT status FROM event_proposals WHERE id = ?').get(proposalId)).toEqual({
+      status: 'accepted',
+    });
+  });
+
+  it('拒绝 update 保留原值；相同决定可重试，改成另一决定会冲突', async () => {
+    const app = freshApp();
+    addGroup('g1', '高数(2)班');
+    const id = addEvent({ location: 'A101' });
+    const proposalId = addProposal(id, {
+      changes: { location: { from: 'A101', to: 'B202' } },
+    });
+    const path = `/api/events/${id}/proposals/${proposalId}/resolve`;
+
+    const first = await postJson(app, path, { decision: 'reject', expected_version: 1 });
+    expect(first.status).toBe(200);
+    expect(first.body as EventDetailDTO).toMatchObject({ location: 'A101', status: 'active', version: 2 });
+    const historyCount = (db.prepare('SELECT COUNT(*) AS n FROM event_history WHERE event_id = ?').get(id) as {
+      n: number;
+    }).n;
+
+    expect((await postJson(app, path, { decision: 'reject', expected_version: 1 })).status).toBe(200);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM event_history WHERE event_id = ?').get(id) as { n: number }).n)
+      .toBe(historyCount);
+    expect((await postJson(app, path, { decision: 'accept', expected_version: 2 })).status).toBe(409);
+    expect(db.prepare('SELECT status FROM event_proposals WHERE id = ?').get(proposalId)).toEqual({
+      status: 'rejected',
+    });
+  });
+
+  it('create/cancel 的接受与拒绝映射到正确最终状态', async () => {
+    const app = freshApp();
+    addGroup('g1', '高数(2)班');
+
+    const acceptedCreate = addEvent({ title: '新活动' });
+    const acceptedCreateProposal = addProposal(acceptedCreate, {
+      kind: 'create',
+      changes: { title: { from: null, to: '新活动' } },
+    });
+    expect((await postJson(app, `/api/events/${acceptedCreate}/proposals/${acceptedCreateProposal}/resolve`, {
+      decision: 'accept', expected_version: 1,
+    })).body as EventDetailDTO).toMatchObject({ status: 'active' });
+
+    const rejectedCreate = addEvent({ title: '误识别活动' });
+    const rejectedCreateProposal = addProposal(rejectedCreate, {
+      kind: 'create',
+      changes: { title: { from: null, to: '误识别活动' } },
+    });
+    expect((await postJson(app, `/api/events/${rejectedCreate}/proposals/${rejectedCreateProposal}/resolve`, {
+      decision: 'reject', expected_version: 1,
+    })).body as EventDetailDTO).toMatchObject({ status: 'cancelled' });
+
+    const acceptedCancel = addEvent({ title: '被取消的考试' });
+    const acceptedCancelProposal = addProposal(acceptedCancel, {
+      kind: 'cancel',
+      changes: { status: { from: 'active', to: 'cancelled' } },
+    });
+    expect((await postJson(app, `/api/events/${acceptedCancel}/proposals/${acceptedCancelProposal}/resolve`, {
+      decision: 'accept', expected_version: 1,
+    })).body as EventDetailDTO).toMatchObject({ status: 'cancelled' });
+  });
+
+  it('多种提案共存时逐条处理，create 未确认前不会提前恢复 active', async () => {
+    const app = freshApp();
+    addGroup('g1', '高数(2)班');
+
+    // 拒绝 update 和 cancel 都只能关闭各自提案，不能顺手关闭 create。
+    const rejectedId = addEvent({ title: '待确认新活动', location: 'A101' });
+    const rejectedCreate = addProposal(rejectedId, {
+      kind: 'create',
+      changes: { status: { from: 'pending_confirm', to: 'active' } },
+      sourceMessageIds: ['m-create-reject-path'],
+    });
+    const rejectedUpdate = addProposal(rejectedId, {
+      kind: 'update',
+      changes: { location: { from: 'A101', to: 'A201' } },
+      sourceMessageIds: ['m-update-reject-path'],
+    });
+    const rejectedCancel = addProposal(rejectedId, {
+      kind: 'cancel',
+      changes: { status: { from: 'active', to: 'cancelled' } },
+      sourceMessageIds: ['m-cancel-reject-path'],
+    });
+    const afterUpdateReject = (await postJson(app, `/api/events/${rejectedId}/proposals/${rejectedUpdate}/resolve`, {
+      decision: 'reject', expected_version: 1,
+    })).body as EventDetailDTO;
+    expect(afterUpdateReject).toMatchObject({ status: 'pending_confirm', version: 1 });
+    expect(afterUpdateReject.pending_proposals.map((proposal) => proposal.id).sort((a, b) => a - b))
+      .toEqual([rejectedCreate, rejectedCancel].sort((a, b) => a - b));
+    const afterCancelReject = await postJson(
+      app,
+      `/api/events/${rejectedId}/proposals/${rejectedCancel}/resolve`,
+      { decision: 'reject', expected_version: 1 },
+    );
+    expect(afterCancelReject.body as EventDetailDTO).toMatchObject({ status: 'pending_confirm', version: 1 });
+    expect((afterCancelReject.body as EventDetailDTO).pending_proposals.map((proposal) => proposal.id))
+      .toEqual([rejectedCreate]);
+
+    // 接受 update 只应用该差异；create 仍待确认，随后还能继续接受 create。
+    const acceptedId = addEvent({ title: '另一条待确认活动', location: 'B101' });
+    const acceptedCreate = addProposal(acceptedId, {
+      kind: 'create',
+      changes: { status: { from: 'pending_confirm', to: 'active' } },
+      sourceMessageIds: ['m-create-accept-path'],
+    });
+    const acceptedUpdate = addProposal(acceptedId, {
+      kind: 'update',
+      changes: { location: { from: 'B101', to: 'B201' } },
+      sourceMessageIds: ['m-update-accept-path'],
+    });
+    const acceptedCancel = addProposal(acceptedId, {
+      kind: 'cancel',
+      changes: { status: { from: 'active', to: 'cancelled' } },
+      sourceMessageIds: ['m-cancel-accept-path'],
+    });
+    await postJson(app, `/api/events/${acceptedId}/proposals/${acceptedCancel}/resolve`, {
+      decision: 'reject', expected_version: 1,
+    });
+    const afterUpdateAccept = await postJson(
+      app,
+      `/api/events/${acceptedId}/proposals/${acceptedUpdate}/resolve`,
+      { decision: 'accept', expected_version: 1 },
+    );
+    expect(afterUpdateAccept.body as EventDetailDTO).toMatchObject({
+      location: 'B201',
+      status: 'pending_confirm',
+      version: 2,
+    });
+    expect((afterUpdateAccept.body as EventDetailDTO).pending_proposals.map((proposal) => proposal.id))
+      .toEqual([acceptedCreate]);
+    const afterCreateAccept = await postJson(
+      app,
+      `/api/events/${acceptedId}/proposals/${acceptedCreate}/resolve`,
+      { decision: 'accept', expected_version: 2 },
+    );
+    expect(afterCreateAccept.body as EventDetailDTO).toMatchObject({
+      location: 'B201',
+      status: 'active',
+      version: 3,
+      pending_proposals: [],
+    });
+  });
+
+  it('旧库遗留的无提案 pending_confirm 在拒绝后续 update/cancel 时仍保持待确认', async () => {
+    const app = freshApp();
+    addGroup('g1', '高数(2)班');
+
+    const updateId = addEvent({ title: '旧待确认活动', status: 'pending_confirm', location: 'A101' });
+    const updateMessage: Message = {
+      message_id: 'legacy-pending-update',
+      group_id: 'g1',
+      group_name: '高数(2)班',
+      sender_name: '张老师',
+      text: '地点可能改到 A201',
+      sent_at: FIXED_NOW + 1_000,
+    };
+    applyEvents('g1', [{
+      action: 'update',
+      update_of: updateId,
+      type: 'exam',
+      title: '',
+      description: '',
+      start_at: null,
+      end_at: null,
+      deadline_at: null,
+      location: 'A201',
+      action_required: null,
+      confidence: 0.4,
+      level: null,
+      source_message_ids: [updateMessage.message_id],
+    }], [updateMessage]);
+    const updateProposal = ((await getJson(app, `/api/events/${updateId}`)).body as EventDetailDTO)
+      .pending_proposals[0]!;
+    expect(updateProposal).toMatchObject({ kind: 'update', base_version: 1 });
+    expect(db.prepare('SELECT base_status FROM event_proposals WHERE id = ?').get(updateProposal.id))
+      .toEqual({ base_status: 'pending_confirm' });
+    const rejectedUpdate = await postJson(app, `/api/events/${updateId}/proposals/${updateProposal.id}/resolve`, {
+      decision: 'reject', expected_version: 1,
+    });
+    expect(rejectedUpdate.body as EventDetailDTO).toMatchObject({
+      status: 'pending_confirm', location: 'A101', version: 1, pending_proposals: [],
+    });
+    expect(await patchJson(app, `/api/events/${updateId}`, { status: 'done' }))
+      .toMatchObject({ status: 409 });
+
+    const cancelId = addEvent({ title: '另一条旧待确认活动', status: 'pending_confirm' });
+    const cancelMessage: Message = {
+      message_id: 'legacy-pending-cancel',
+      group_id: 'g1',
+      group_name: '高数(2)班',
+      sender_name: '张老师',
+      text: '活动可能取消',
+      sent_at: FIXED_NOW + 2_000,
+    };
+    applyEvents('g1', [{
+      action: 'cancel',
+      update_of: cancelId,
+      type: 'exam',
+      title: '',
+      description: '',
+      start_at: null,
+      end_at: null,
+      deadline_at: null,
+      location: null,
+      action_required: null,
+      confidence: 0.4,
+      level: null,
+      source_message_ids: [cancelMessage.message_id],
+    }], [cancelMessage]);
+    const cancelProposal = ((await getJson(app, `/api/events/${cancelId}`)).body as EventDetailDTO)
+      .pending_proposals[0]!;
+    expect(db.prepare('SELECT base_status FROM event_proposals WHERE id = ?').get(cancelProposal.id))
+      .toEqual({ base_status: 'pending_confirm' });
+    const rejectedCancel = await postJson(app, `/api/events/${cancelId}/proposals/${cancelProposal.id}/resolve`, {
+      decision: 'reject', expected_version: 1,
+    });
+    expect(rejectedCancel.body as EventDetailDTO).toMatchObject({
+      status: 'pending_confirm', version: 1, pending_proposals: [],
+    });
+    expect(await patchJson(app, `/api/events/${cancelId}`, { status: 'cancelled' }))
+      .toMatchObject({ status: 409 });
+  });
+
+  it('expected_version 过期时不消费提案，也不覆盖并发修改', async () => {
+    const app = freshApp();
+    addGroup('g1', '高数(2)班');
+    const id = addEvent({ location: 'A101' });
+    const proposalId = addProposal(id, {
+      changes: { location: { from: 'A101', to: 'B202' } },
+    });
+    db.prepare('UPDATE events SET location = ?, version = 2 WHERE id = ?').run('人工并发修改', id);
+
+    expect(await postJson(app, `/api/events/${id}/proposals/${proposalId}/resolve`, {
+      decision: 'accept', expected_version: 1,
+    })).toMatchObject({ status: 409 });
+    expect(db.prepare('SELECT location, version, status FROM events WHERE id = ?').get(id)).toEqual({
+      location: '人工并发修改',
+      version: 2,
+      status: 'pending_confirm',
+    });
+    expect(db.prepare('SELECT status FROM event_proposals WHERE id = ?').get(proposalId)).toEqual({
+      status: 'pending',
+    });
+  });
+
+  it('接受改期后若结束不晚于开始则拒绝，事件和提案都保持原样', async () => {
+    const app = freshApp();
+    const today = shanghaiToday();
+    addGroup('g1', '高数(2)班');
+    const oldStart = shTime(today, '14:00');
+    const oldEnd = shTime(today, '15:00');
+    const id = addEvent({ start_at: oldStart, end_at: oldEnd });
+    const proposalId = addProposal(id, {
+      changes: { start_at: { from: oldStart, to: shTime(today, '16:00') } },
+    });
+    const before = (await getJson(app, `/api/events/${id}`)).body as EventDetailDTO;
+    const resolved = await postJson(app, `/api/events/${id}/proposals/${proposalId}/resolve`, {
+      decision: 'accept',
+      expected_version: before.version,
+      expected_updated_at: before.updated_at,
+    });
+    expect(resolved).toMatchObject({ status: 400 });
+    expect(db.prepare('SELECT start_at, end_at, status FROM events WHERE id = ?').get(id)).toEqual({
+      start_at: oldStart, end_at: oldEnd, status: 'pending_confirm',
+    });
+    expect(db.prepare('SELECT status FROM event_proposals WHERE id = ?').get(proposalId)).toEqual({
+      status: 'pending',
+    });
   });
 });
 

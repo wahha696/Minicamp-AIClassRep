@@ -12,18 +12,27 @@ import {
 } from '../ai-settings.js';
 import { llmStats } from '../pipeline/stats.js';
 import { lanAddresses } from '../lan-guard.js';
-import { currentLanToken, rotateLanToken, setLanEnabled } from '../lan-settings.js';
+import { currentLanBinding, lanConfiguredEnabled, rotateLanToken, setLanEnabled } from '../lan-settings.js';
 
 /** 局域网只读开关：GET 看状态和手机链接；PUT {enabled} 切换；POST /rotate 换 token */
 function registerLanRoutes(app: Hono, listeningLan: boolean, port: () => number): void {
   const dto = () => {
-    const token = currentLanToken();
+    const binding = currentLanBinding();
     const addrs = lanAddresses();
+    const enabled = lanConfiguredEnabled();
     return {
-      enabled: token !== null,
+      enabled,
       // 开关状态和实际监听不一致 = 需要重启后端才生效
-      restart_required: (token !== null) !== listeningLan,
-      urls: token === null ? [] : addrs.map((a) => `http://${a}:${port()}/?token=${token}`),
+      restart_required: enabled !== listeningLan,
+      // 换号/切库后 token 会保持失效，必须由本机明确换新链接才能分享新账号。
+      account_rebind_required: enabled && binding === null,
+      urls:
+        binding === null
+          ? []
+          : addrs.map(
+              (a) =>
+                `http://${a}:${port()}/?token=${encodeURIComponent(binding.token)}&lan_epoch=${encodeURIComponent(binding.accountEpoch)}`,
+            ),
     };
   };
   app.get('/api/settings/lan', (c) => c.json(dto()));

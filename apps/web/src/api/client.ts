@@ -4,6 +4,7 @@ import { ApiError } from './error';
 import { mockApi } from './mock';
 import type {
   AccountsDTO,
+  AccountControlContext,
   AiSettingsDTO,
   AiTestResultDTO,
   ConnectStatusDTO,
@@ -11,7 +12,8 @@ import type {
   CsuImportStartDTO,
   EventDetailDTO,
   EventDTO,
-  EventStatus,
+  EventPatch,
+  EventProposalDTO,
   GroupDTO,
   HealthDTO,
   LanSettingsDTO,
@@ -34,8 +36,15 @@ export interface Api {
   getToday(): Promise<TodayDTO>;
   getEvents(from?: number, to?: number): Promise<EventDTO[]>;
   getEvent(id: number): Promise<EventDetailDTO>;
-  /** status 改状态；level 1~4 手动设级（锁），null 交还 AI（解锁） */
-  patchEvent(id: number, patch: { status?: EventStatus; level?: Level | null }): Promise<EventDetailDTO>;
+  /** 改事件内容、状态或等级；人工修改的业务字段会受到保护。 */
+  patchEvent(id: number, patch: EventPatch): Promise<EventDetailDTO>;
+  resolveEventProposal(
+    eventId: number,
+    proposalId: EventProposalDTO['id'],
+    decision: 'accept' | 'reject',
+    expectedVersion: number,
+    expectedUpdatedAt?: number,
+  ): Promise<EventDetailDTO>;
   getGroups(): Promise<GroupDTO[]>;
   patchGroup(id: string, patch: { enabled?: boolean; course_name?: string | null }): Promise<GroupDTO>;
   deleteGroupData(id: string): Promise<{ ok: true }>;
@@ -46,9 +55,9 @@ export interface Api {
   importText(groupName: string, text: string): Promise<{ messages: number }>;
   getConnectStatus(): Promise<ConnectStatusDTO>;
   /** killQQ=true 只给「关闭电脑版 QQ 并继续」用：会结束用户自己开着的 QQ */
-  restartConnect(killQQ?: boolean): Promise<{ ok: true }>;
+  restartConnect(context: AccountControlContext, killQQ?: boolean): Promise<{ ok: true }>;
   /** erase=true：退出并删除本号在本机的全部数据（不可恢复） */
-  logoutConnect(erase?: boolean): Promise<{ ok: true }>;
+  logoutConnect(context: AccountControlContext & { uin: string }, erase?: boolean): Promise<{ ok: true }>;
   /** 采集端组件一键下载：POST 立即返回，进度轮询 getFetchNapcatProgress */
   startFetchNapcat(): Promise<{ ok: true }>;
   getFetchNapcatProgress(): Promise<SetupProgressDTO>;
@@ -92,12 +101,59 @@ export interface Api {
 
 export const isMock = import.meta.env.VITE_MOCK === '1';
 
+const ACCOUNT_DATA_PREFIXES = [
+  '/api/today',
+  '/api/export.ics',
+  '/api/events',
+  '/api/groups',
+  '/api/demo',
+  '/api/import',
+  '/api/sync',
+  '/api/todos',
+  '/api/timetable',
+  '/api/settings/memory',
+  '/api/trash',
+  '/api/pet/chat',
+] as const;
+
+function isAccountDataPath(path: string): boolean {
+  const pathname = path.split('?', 1)[0] ?? path;
+  return ACCOUNT_DATA_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
+}
+
+/** 最近一次连接状态返回的账号库租约。换号后旧页面不会跨号读取或迟到写入。 */
+let accountEpoch: string | undefined;
+let accountEpochRefresh: Promise<string> | undefined;
+
+async function ensureAccountEpoch(): Promise<string> {
+  if (accountEpoch !== undefined) return accountEpoch;
+  if (accountEpochRefresh !== undefined) return accountEpochRefresh;
+  accountEpochRefresh = request<ConnectStatusDTO>('GET', '/api/connect/status')
+    .then((status) => {
+      if (typeof status.account_epoch !== 'string' || status.account_epoch.length === 0) {
+        throw new ApiError('连接状态缺少账号上下文，请刷新后重试', 409);
+      }
+      accountEpoch = status.account_epoch;
+      return status.account_epoch;
+    })
+    .finally(() => {
+      accountEpochRefresh = undefined;
+    });
+  return accountEpochRefresh;
+}
+
 async function request<T>(method: string, path: string, body?: unknown, timeoutMs = 10_000): Promise<T> {
   let res: Response;
+  const scoped = isAccountDataPath(path);
+  const epoch = scoped ? await ensureAccountEpoch() : undefined;
   try {
+    const headers: Record<string, string> = {};
+    // 本机写接口的 CSRF 闸门要求 JSON；即使没有 body（重启/退出/清空）也必须声明。
+    if (body !== undefined || (method !== 'GET' && method !== 'HEAD')) headers['Content-Type'] = 'application/json';
+    if (epoch !== undefined) headers['X-ClassRep-Account-Epoch'] = epoch;
     res = await fetch(path, {
       method,
-      headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+      headers: Object.keys(headers).length === 0 ? undefined : headers,
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs), // B14：后端卡住时超时兜底，轮询不会永久停摆
     });
@@ -107,6 +163,9 @@ async function request<T>(method: string, path: string, body?: unknown, timeoutM
 
   const data: unknown = await res.json().catch(() => null);
   if (!res.ok) {
+    // 换号或挂库期间的 409 不能让旧 epoch 继续被复用；下一次业务请求会先重取状态。
+    // 其他业务冲突（如事件版本过期）即使多取一次状态也是安全的。
+    if (scoped && res.status === 409) accountEpoch = undefined;
     const msg =
       data && typeof data === 'object' && 'error' in data && typeof data.error === 'string'
         ? data.error
@@ -114,6 +173,16 @@ async function request<T>(method: string, path: string, body?: unknown, timeoutM
     throw new ApiError(msg, res.status);
   }
   return data as T;
+}
+
+/** 为少数需要自行解析 Response 的账号业务请求附加同一个 epoch 闸门。 */
+export async function accountScopedFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  if (!isAccountDataPath(path)) throw new Error(`非账号业务路径不应使用 accountScopedFetch：${path}`);
+  const headers = new Headers(init.headers);
+  headers.set('X-ClassRep-Account-Epoch', await ensureAccountEpoch());
+  const response = await fetch(path, { ...init, headers });
+  if (response.status === 409) accountEpoch = undefined;
+  return response;
 }
 
 /** 拼 `?from=&to=`，省略的参数不出现 */
@@ -130,6 +199,12 @@ const realApi: Api = {
   getEvents: (from, to) => request('GET', `/api/events${rangeQuery(from, to)}`),
   getEvent: (id) => request('GET', `/api/events/${id}`),
   patchEvent: (id, patch) => request('PATCH', `/api/events/${id}`, patch),
+  resolveEventProposal: (eventId, proposalId, decision, expectedVersion, expectedUpdatedAt) =>
+    request('POST', `/api/events/${eventId}/proposals/${proposalId}/resolve`, {
+      decision,
+      expected_version: expectedVersion,
+      expected_updated_at: expectedUpdatedAt,
+    }),
   getGroups: () => request('GET', '/api/groups'),
   patchGroup: (id, patch) => request('PATCH', `/api/groups/${encodeURIComponent(id)}`, patch),
   deleteGroupData: (id) => request('DELETE', `/api/groups/${encodeURIComponent(id)}/data`),
@@ -138,9 +213,21 @@ const realApi: Api = {
   resetDemo: () => request('POST', '/api/demo/reset'),
   undoReplay: (name) => request('POST', '/api/demo/undo', { scenario: name }),
   importText: (groupName, text) => request('POST', '/api/import/text', { groupName, text }),
-  getConnectStatus: () => request('GET', '/api/connect/status'),
-  restartConnect: (killQQ) => request('POST', '/api/connect/restart', killQQ ? { kill_qq: true } : undefined),
-  logoutConnect: (erase) => request('POST', '/api/connect/logout', erase ? { erase: true } : undefined),
+  getConnectStatus: async () => {
+    const status = await request<ConnectStatusDTO>('GET', '/api/connect/status');
+    accountEpoch = status.account_epoch;
+    return status;
+  },
+  restartConnect: (context, killQQ) => request('POST', '/api/connect/restart', {
+    expected_account_epoch: context.accountEpoch,
+    expected_uin: context.uin,
+    ...(killQQ ? { kill_qq: true } : {}),
+  }),
+  logoutConnect: (context, erase) => request('POST', '/api/connect/logout', {
+    expected_account_epoch: context.accountEpoch,
+    expected_uin: context.uin,
+    ...(erase ? { erase: true } : {}),
+  }),
   startFetchNapcat: () => request('POST', '/api/setup/fetch-napcat'),
   getFetchNapcatProgress: () => request('GET', '/api/setup/napcat'),
   listAccounts: () => request('GET', '/api/accounts'),
@@ -182,6 +269,7 @@ export const {
   getEvents,
   getEvent,
   patchEvent,
+  resolveEventProposal,
   getGroups,
   patchGroup,
   deleteGroupData,
@@ -227,8 +315,15 @@ export const {
 
 // ===== 直接给 <a href> / <img src> 用的地址（不经 fetch）
 
-export const exportIcsUrl = (from?: number, to?: number) => `/api/export.ics${rangeQuery(from, to)}`;
-export const eventIcsUrl = (id: number) => `/api/events/${id}/export.ics`;
+function accountDownloadUrl(path: string): string {
+  // epoch 不是身份凭据，只是当前库的短生命期标识。<a> 无法加请求头，因此 GET 下载用 query。
+  if (isMock || accountEpoch === undefined) return path;
+  const separator = path.includes('?') ? '&' : '?';
+  return `${path}${separator}account_epoch=${encodeURIComponent(accountEpoch)}`;
+}
+
+export const exportIcsUrl = (from?: number, to?: number) => accountDownloadUrl(`/api/export.ics${rangeQuery(from, to)}`);
+export const eventIcsUrl = (id: number) => accountDownloadUrl(`/api/events/${id}/export.ics`);
 export const qrcodeUrl = () => (isMock ? MOCK_QRCODE : `/api/connect/qrcode?t=${Date.now()}`);
 
 // mock 模式没有后端，给连接页一张占位「二维码」看效果

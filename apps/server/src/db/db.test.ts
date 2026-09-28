@@ -8,9 +8,9 @@ import { db, openDb } from './index.js';
 
 const TABLES = [
   'groups', 'messages', 'events', 'event_sources', 'event_history',
-  'todos', 'level_feedback', 'level_rules', 'courses', 'kv', 'message_seen',
+  'event_proposals', 'todos', 'level_feedback', 'level_rules', 'courses', 'kv', 'message_seen',
 ];
-const INDEXES = ['idx_messages_group_time', 'idx_messages_processed'];
+const INDEXES = ['idx_messages_group_time', 'idx_messages_processed', 'idx_event_proposals_event_status'];
 
 const tempDirs: string[] = [];
 
@@ -151,24 +151,25 @@ describe('db 建表', () => {
     const eventCols = (db.prepare('PRAGMA table_info(events)').all() as { name: string }[]).map((c) => c.name);
     expect(eventCols).toContain('level');
     expect(eventCols).toContain('level_locked');
+    expect(eventCols).toContain('manual_locked_fields');
     const groupCols = (db.prepare('PRAGMA table_info(groups)').all() as { name: string }[]).map((c) => c.name);
     expect(groupCols).toContain('course_name');
 
     // 旧数据还在，新列是默认值
-    const ev = db.prepare('SELECT title, level, level_locked FROM events').get() as Record<string, unknown>;
-    expect(ev).toMatchObject({ title: '高数小测', level: 2, level_locked: 0 });
+    const ev = db.prepare('SELECT title, level, level_locked, manual_locked_fields FROM events').get() as Record<string, unknown>;
+    expect(ev).toMatchObject({ title: '高数小测', level: 2, level_locked: 0, manual_locked_fields: '[]' });
     const g = db.prepare('SELECT name, course_name FROM groups WHERE group_id = ?').get('g1') as Record<string, unknown>;
     expect(g).toMatchObject({ name: '高数(2)班', course_name: null });
 
     // 新表建出来了 + schema_version 写入（D3）
-    for (const t of ['todos', 'level_feedback', 'level_rules', 'courses', 'kv', 'message_seen', 'group_sync']) {
+    for (const t of ['event_proposals', 'todos', 'level_feedback', 'level_rules', 'courses', 'kv', 'message_seen', 'group_sync']) {
       expect(tableNames()).toContain(t);
     }
     const courseCols = (db.prepare('PRAGMA table_info(courses)').all() as { name: string }[]).map((c) => c.name);
     expect(courseCols).toContain('block');   // PR#31：block 做排序提示
     expect(courseCols).toContain('details'); // 精确节次等在 details JSON
     const kv = db.prepare("SELECT value FROM kv WHERE key = 'schema_version'").get() as { value: string };
-    expect(kv.value).toBe('4');
+    expect(kv.value).toBe('6');
   });
 
   it('文件库的 journal_mode 是 WAL', () => {

@@ -13,6 +13,8 @@ import * as cheerio from 'cheerio';
 import type { CheerioAPI } from 'cheerio';
 import type { Element } from 'domhandler';
 import iconv from 'iconv-lite';
+import { accountDataState, accountEpoch } from './accounts.js';
+import { dbGeneration, onAccountSwitch } from './db/index.js';
 import type { CourseDTO } from './types.js';
 import type { ParsedTimetable } from '../../../shared/timetable-import.js';
 import { normalizeCourses, type SourceRef } from '../../../shared/timetable.js';
@@ -168,10 +170,36 @@ interface PendingLogin {
   /** CAS 登录页地址(含 service 参数),登录 POST 的 Referer 用 */
   loginPageUrl: string;
   createdAt: number;
+  /** 两步导入只属于创建它的账号与数据库代次。 */
+  accountEpoch: string;
+  dbGeneration: number;
+  expiryTimer: NodeJS.Timeout | null;
 }
 
 /** 验证码与会话绑定:第一步到第二步之间放在内存里,不落盘 */
 const pending = new Map<string, PendingLogin>();
+
+function discardPending(id: string, expected?: PendingLogin): void {
+  const entry = pending.get(id);
+  if (entry === undefined || (expected !== undefined && entry !== expected)) return;
+  pending.delete(id);
+  if (entry.expiryTimer !== null) clearTimeout(entry.expiryTimer);
+  entry.expiryTimer = null;
+  entry.password = ''; // 移除 map 强引用前尽早抹掉明文密码
+}
+
+function clearPending(): void {
+  for (const [id, entry] of pending) discardPending(id, entry);
+}
+
+function pendingBelongsToCurrentAccount(entry: PendingLogin): boolean {
+  return accountDataState() === 'ready' &&
+    entry.accountEpoch === accountEpoch() &&
+    entry.dbGeneration === dbGeneration();
+}
+
+// 换号/登出一旦成功挂载新库，旧验证码、cookie、学号与密码立即作废。
+onAccountSwitch(() => clearPending());
 
 export interface CsuBeginDTO {
   session_id: string;
@@ -224,6 +252,9 @@ function inputById(html: string, id: string): string {
 
 /** 第一步:打开 SSO 链路拿到 CAS 登录上下文;需要验证码时返回图片 data URL */
 export async function csuBeginImport(account: string, password: string): Promise<CsuBeginDTO> {
+  if (accountDataState() !== 'ready') throw new CsuError('账号数据正在切换或不可用,请稍后重试');
+  const ownerEpoch = accountEpoch();
+  const ownerGeneration = dbGeneration();
   const session = new Session();
   const casRes = await session.get(`${BASE}/sso.jsp`); // 302 → ca.csu.edu.cn/authserver/login
   const html = Session.decode(casRes);
@@ -264,8 +295,13 @@ export async function csuBeginImport(account: string, password: string): Promise
     captcha = `data:${img.contentType.split(';')[0]};base64,${img.body.toString('base64')}`;
   }
 
+  // 第一步访问教务网期间可能已换号；不能把 A 的凭据挂到 B 的上下文。
+  if (accountDataState() !== 'ready' || accountEpoch() !== ownerEpoch || dbGeneration() !== ownerGeneration) {
+    throw new CsuError('账号已切换,本次教务登录已作废,请重新开始导入');
+  }
+
   const id = randomUUID();
-  pending.set(id, {
+  const entry: PendingLogin = {
     session,
     account,
     password,
@@ -274,16 +310,22 @@ export async function csuBeginImport(account: string, password: string): Promise
     captchaRequired,
     loginPageUrl: casRes.finalUrl,
     createdAt: Date.now(),
-  });
+    accountEpoch: ownerEpoch,
+    dbGeneration: ownerGeneration,
+    expiryTimer: null,
+  };
+  pending.set(id, entry);
+  entry.expiryTimer = setTimeout(() => discardPending(id, entry), SESSION_TTL);
+  entry.expiryTimer.unref();
   // 顺手清掉过期/过多的挂起会话(验证码本来就该是短命的)
   const now = Date.now();
   for (const [pid, p] of pending) {
-    if (now - p.createdAt > SESSION_TTL) pending.delete(pid);
+    if (now - p.createdAt > SESSION_TTL) discardPending(pid, p);
   }
   while (pending.size > MAX_PENDING) {
     const oldest = [...pending.entries()].sort((a, b) => a[1].createdAt - b[1].createdAt)[0];
     if (!oldest) break;
-    pending.delete(oldest[0]);
+    discardPending(oldest[0], oldest[1]);
   }
   return { session_id: id, captcha };
 }
@@ -299,7 +341,12 @@ export async function csuFetchCourses(
   const st = pending.get(sessionId);
   if (!st) throw new CsuError('登录会话不存在或已超时,请重新获取验证码');
   pending.delete(sessionId); // 一次性:验证码是一次性的,成败都不复用
+  if (st.expiryTimer !== null) clearTimeout(st.expiryTimer);
+  st.expiryTimer = null;
   try {
+    if (!pendingBelongsToCurrentAccount(st)) {
+      throw new CsuError('账号已切换,旧教务登录会话已作废,请重新开始导入');
+    }
     if (Date.now() - st.createdAt > SESSION_TTL) {
       throw new CsuError('登录会话已超时,请重新点击「下一步」');
     }
@@ -457,6 +504,9 @@ export async function csuFetchCourses(
       throw new CsuError(
         `没在教务系统页面里找到课表入口(页面标题:「${title || '未知'}」)。页面已保存到 data/logs/csu-kb-dump.html,请把此提示反馈给开发者`,
       );
+    }
+    if (!pendingBelongsToCurrentAccount(st)) {
+      throw new CsuError('账号已切换,本次教务导入结果已丢弃,请重新开始');
     }
     return parsedResult;
   } catch (e) {

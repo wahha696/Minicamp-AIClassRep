@@ -1,7 +1,8 @@
 import OpenAI from 'openai';
 import { z } from 'zod';
 
-import { beginTx, commitTx, db, rollbackTx } from '../db/index.js';
+import { accountDataState, accountEpoch } from '../accounts.js';
+import { beginTx, commitTx, db, dbGeneration, onAccountSwitch, rollbackTx } from '../db/index.js';
 import { getLlmConfig } from '../ai-settings.js';
 import type { Level } from '../types.js';
 import type { LlmClient } from './extract.js';
@@ -76,6 +77,24 @@ let timer: NodeJS.Timeout | null = null;
  */
 let generation = 0;
 
+interface PreferenceAccountContext {
+  dbGeneration: number;
+  accountEpoch: string;
+}
+
+function capturePreferenceAccountContext(): PreferenceAccountContext | null {
+  if (accountDataState() !== 'ready') return null;
+  return { dbGeneration: dbGeneration(), accountEpoch: accountEpoch() };
+}
+
+function preferenceAccountIsCurrent(context: PreferenceAccountContext): boolean {
+  return (
+    accountDataState() === 'ready' &&
+    dbGeneration() === context.dbGeneration &&
+    accountEpoch() === context.accountEpoch
+  );
+}
+
 /** 让正在进行的总结作废（清空记忆时用；删规则走 schedulePreferenceSummary，同样会作废） */
 export function invalidatePreferenceSummary(): void {
   generation++;
@@ -83,16 +102,26 @@ export function invalidatePreferenceSummary(): void {
 
 export function schedulePreferenceSummary(): void {
   generation++;
+  const context = capturePreferenceAccountContext();
   if (timer) clearTimeout(timer);
+  if (context === null) {
+    timer = null;
+    return;
+  }
   timer = setTimeout(() => {
     timer = null;
-    void summarize();
+    if (preferenceAccountIsCurrent(context)) void summarize(context.dbGeneration, context.accountEpoch);
   }, 5_000);
   timer.unref?.();
 }
 
 /** 把最近 100 条未忽略调级记录总结成规则，事务性替换 level_rules。失败时保留旧规则。 */
-export async function summarize(): Promise<void> {
+export async function summarize(
+  expectedDbGeneration: number = dbGeneration(),
+  expectedAccountEpoch: string = accountEpoch(),
+): Promise<void> {
+  const context = { dbGeneration: expectedDbGeneration, accountEpoch: expectedAccountEpoch };
+  if (!preferenceAccountIsCurrent(context)) return;
   const gen = generation;
   const feedback = db
     .prepare(
@@ -139,8 +168,8 @@ export async function summarize(): Promise<void> {
     return;
   }
 
-  if (gen !== generation) {
-    console.warn('[preferences] 总结期间记忆有改动，丢弃这次结果');
+  if (gen !== generation || !preferenceAccountIsCurrent(context)) {
+    console.warn('[preferences] 总结期间记忆或账号有改动，丢弃这次结果');
     return;
   }
 
@@ -164,3 +193,10 @@ export async function summarize(): Promise<void> {
     throw e;
   }
 }
+
+// 换号时取消 A 账号的防抖任务，并让已经在等 LLM 的总结失效。
+onAccountSwitch(() => {
+  generation++;
+  if (timer) clearTimeout(timer);
+  timer = null;
+});

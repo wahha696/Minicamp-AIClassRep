@@ -9,13 +9,14 @@ import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { env } from './env.js';
 import { db } from './db/index.js';
-import { initAccounts } from './accounts.js';
+import { accountDataState, initAccounts } from './accounts.js';
 import { startNapcat, stopNapcat } from './napcat/index.js';
 import { getConnectStatus } from './napcat/state.js';
 import { getPipelineStats, startScheduler } from './pipeline/index.js';
 import { startCleanupJob } from './jobs/cleanup.js';
 import { accessGuard } from './lan-guard.js';
 import { currentLanToken, lanEnabledAtBoot } from './lan-settings.js';
+import { accountMutationGuard } from './account-request-guard.js';
 import { installCrashHandlers } from './crash-log.js';
 import { trustSystemCertificates } from './system-ca.js';
 import { registerBusinessRoutes } from './routes/business.js';
@@ -47,11 +48,14 @@ const app = new Hono();
 // 局域网只读中间件：非 loopback 且方法不是 GET/HEAD → 403。
 // 来源 IP 取不到时按「非本机」处理（宁可只读，也不放行写操作）。
 app.use('*', accessGuard({ lanToken: currentLanToken }));
+app.use('*', accountMutationGuard());
 
 app.get('/health', (c) => {
+  const accountReady = accountDataState() === 'ready';
   let dbState: HealthDTO['db'] = 'ok';
   let pending = 0;
   try {
+    if (!accountReady) throw new Error('account database unavailable');
     db.prepare('SELECT 1').get();
     // 待整理 = 未处理且未被过滤的消息，只算启用的群（群行不存在按启用算）
     pending = (
@@ -66,7 +70,8 @@ app.get('/health', (c) => {
   } catch {
     dbState = 'error';
   }
-  const stats = getPipelineStats();
+  // 恢复入口无需 epoch，但切换/挂库失败时绝不能从仍挂着的旧账号库或内存统计泄露聚合信息。
+  const stats = getPipelineStats(accountReady);
   const qq = getConnectStatus().state;
   const body: HealthDTO = {
     status: dbState === 'ok' && qq === 'online' && stats.llm !== 'error' ? 'ok' : 'degraded',

@@ -73,16 +73,37 @@ describe('GET /api/connect/qrcode', () => {
 
 describe('POST /api/connect/restart', () => {
   it('成功 → { ok: true }，restart 恰好一次', async () => {
-    restartMock.mockResolvedValue(undefined);
-    const res = await app().request('/api/connect/restart', { method: 'POST' });
+    restartMock.mockResolvedValue(true);
+    const res = await app().request('/api/connect/restart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expected_account_epoch: 'v2:test:1:0', expected_uin: '10001' }),
+    });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
-    expect(restartMock).toHaveBeenCalledOnce();
+    expect(restartMock).toHaveBeenCalledWith({
+      expectedAccountEpoch: 'v2:test:1:0', expectedUin: '10001', killUserQQ: false,
+    });
+  });
+
+  it('缺账号快照 → 400；快照过期 → 409，均不误报成功', async () => {
+    expect((await app().request('/api/connect/restart', { method: 'POST' })).status).toBe(400);
+    restartMock.mockResolvedValue(false);
+    const stale = await app().request('/api/connect/restart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expected_account_epoch: 'v2:old:1:0', expected_uin: null }),
+    });
+    expect(stale.status).toBe(409);
   });
 
   it('restart 抛错 → 500 + 中文 error', async () => {
     restartMock.mockRejectedValue(new Error('boom'));
-    const res = await app().request('/api/connect/restart', { method: 'POST' });
+    const res = await app().request('/api/connect/restart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expected_account_epoch: 'v2:test:1:0', expected_uin: null }),
+    });
     expect(res.status).toBe(500);
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain('重启采集端失败');
@@ -91,17 +112,38 @@ describe('POST /api/connect/restart', () => {
 
 describe('POST /api/connect/logout', () => {
   it('成功 → { ok: true }，只调 logout 不调 restart', async () => {
-    logoutMock.mockResolvedValue(undefined);
-    const res = await app().request('/api/connect/logout', { method: 'POST' });
+    logoutMock.mockResolvedValue(true);
+    const res = await app().request('/api/connect/logout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expected_account_epoch: 'v2:test:1:0', expected_uin: '10001', erase: true }),
+    });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
-    expect(logoutMock).toHaveBeenCalledOnce();
+    expect(logoutMock).toHaveBeenCalledWith({
+      erase: true, expectedAccountEpoch: 'v2:test:1:0', expectedUin: '10001',
+    });
     expect(restartMock).not.toHaveBeenCalled();
+  });
+
+  it('缺账号快照 → 400；旧页面快照 → 409', async () => {
+    expect((await app().request('/api/connect/logout', { method: 'POST' })).status).toBe(400);
+    logoutMock.mockResolvedValue(false);
+    const stale = await app().request('/api/connect/logout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expected_account_epoch: 'v2:old:1:0', expected_uin: '10001' }),
+    });
+    expect(stale.status).toBe(409);
   });
 
   it('logout 抛错 → 500 + 中文 error', async () => {
     logoutMock.mockRejectedValue(new Error('boom'));
-    const res = await app().request('/api/connect/logout', { method: 'POST' });
+    const res = await app().request('/api/connect/logout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expected_account_epoch: 'v2:test:1:0', expected_uin: '10001' }),
+    });
     expect(res.status).toBe(500);
     expect(((await res.json()) as { error: string }).error).toContain('退出登录失败');
   });
