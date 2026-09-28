@@ -16,7 +16,13 @@ const isWin = () => process.platform === 'win32';
 export async function resolvePnpm(root, log) {
   const probe = (cmd, args, shell) => {
     try {
-      const r = spawnSync(cmd, [...args, '--version'], { stdio: 'ignore', shell, windowsHide: true, timeout: 30_000 });
+      const r = spawnSync(cmd, [...args, '--version'], {
+        stdio: 'ignore',
+        shell,
+        windowsHide: true,
+        timeout: 30_000,
+        env: { ...process.env, ...corepackEnv() },
+      });
       return r.status === 0;
     } catch {
       return false;
@@ -28,7 +34,9 @@ export async function resolvePnpm(root, log) {
   // corepack：nodejs.org 发行版自带（<node>/node_modules/corepack）。装到仓库内目录，不动系统。
   const corepackJs = join(dirname(process.execPath), 'node_modules', 'corepack', 'dist', 'corepack.js');
   if (existsSync(corepackJs)) {
+    // corepack enable 会对安装目录 realpathSync，目录不存在直接 ENOENT（全新解压的首跑必中）
     const bin = join(root, '.corepack', 'bin');
+    mkdirSync(bin, { recursive: true });
     spawnSync(process.execPath, [corepackJs, 'enable', '--install-directory', bin], {
       stdio: 'inherit',
       windowsHide: true,
