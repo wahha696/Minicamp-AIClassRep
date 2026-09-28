@@ -104,11 +104,11 @@ export function buildEnv(src: Record<string, string | undefined>) {
     FASTJUDGE_MODE: parseFastjudgeMode(src.FASTJUDGE_MODE),
     /** dual 时用哪边分数做调度路由；另一边仅记录 */
     FASTJUDGE_ROUTE: parseFastjudgeRoute(src.FASTJUDGE_ROUTE),
-    /** 本地模型 joblib 路径；空则用 FASTJUDGE_ROOT/models/local-jev-v1.joblib */
+    /** 本地模型 joblib 路径；空则用 FASTJUDGE_ROOT/models/local-jev-v1.joblib（须先设 ROOT） */
     LOCAL_JEV_MODEL_PATH: src.LOCAL_JEV_MODEL_PATH?.trim() || '',
-    /** classrep-fastjudge 根目录 */
-    FASTJUDGE_ROOT: src.FASTJUDGE_ROOT?.trim() || '/workspace/classrep-fastjudge',
-    /** 调 infer.py 的 Python；空则优先 FASTJUDGE_ROOT/.venv/bin/python */
+    /** classrep-fastjudge 根目录；默认空（Windows-first，须显式配置，勿假装 Linux 路径可用） */
+    FASTJUDGE_ROOT: src.FASTJUDGE_ROOT?.trim() || '',
+    /** 调 infer.py 的 Python；空则优先 ROOT/.venv/Scripts/python.exe（Win）或 .venv/bin/python */
     FASTJUDGE_PYTHON: src.FASTJUDGE_PYTHON?.trim() || '',
     // B10：演示模式默认关闭（演示数据会进真实群列表），开发者要用在 .env 里显式开
     DEMO_MODE: (src.DEMO_MODE ?? 'false').trim() === 'true',

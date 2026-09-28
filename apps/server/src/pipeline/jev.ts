@@ -10,7 +10,7 @@ import { z } from 'zod';
 import { getJevConfig } from '../ai-settings.js';
 import { env } from '../env.js';
 import type { Message } from '../types.js';
-import { localJevAvailable, scoreWithLocal } from './jev-local.js';
+import { localJevAvailable, localJevReady, scoreWithLocal } from './jev-local.js';
 import { jevStats } from './stats.js';
 
 const ENDPOINT = 'https://api.typesafe.ai/v1/systemone';
@@ -39,12 +39,43 @@ export interface DualScoreBatch {
   routed: number[] | null;
   routeBackend: 'jev' | 'local';
 }
+
+/** 对外暴露的精简摘要（不含原文，避免健康检查泄露群聊内容） */
+export interface DualScoreSummary {
+  at: number;
+  groupName: string;
+  n: number;
+  remote: number[] | null;
+  local: number[] | null;
+  routed: number[] | null;
+  routeBackend: 'jev' | 'local';
+}
+
 const DUAL_RING_MAX = 50;
-export const dualScoreLog: DualScoreBatch[] = [];
+const dualScoreLog: DualScoreBatch[] = [];
 
 function pushDual(entry: DualScoreBatch): void {
   dualScoreLog.push(entry);
   while (dualScoreLog.length > DUAL_RING_MAX) dualScoreLog.shift();
+}
+
+/** 最近 N 条 dual 批摘要（默认 10；不返回原文） */
+export function getDualScoreLog(limit = 10): DualScoreSummary[] {
+  const n = Math.max(0, Math.min(limit, DUAL_RING_MAX));
+  return dualScoreLog.slice(-n).map(({ at, groupName, texts, remote, local, routed, routeBackend }) => ({
+    at,
+    groupName,
+    n: texts.length,
+    remote,
+    local,
+    routed,
+    routeBackend,
+  }));
+}
+
+/** 测试用：清空 dual 环 */
+export function resetDualScoreLog(): void {
+  dualScoreLog.length = 0;
 }
 
 function remoteConfigured(): boolean {
@@ -56,13 +87,13 @@ function remoteReady(now = Date.now()): boolean {
 }
 
 /** 配置了且不在失败退避期内（修复计划 3.2：读运行时配置，网页上改 key 立即生效）
- *  local / dual 时：本地模型可用也算「可用」（调度用它决定等待策略） */
+ *  local / dual 时：本地模型可用且不在退避期内也算「可用」（调度用它决定等待策略） */
 export function jevAvailable(now = Date.now()): boolean {
   const cfg = getJevConfig();
   if (!cfg.enabled) return false;
   const mode = env.FASTJUDGE_MODE;
-  if (mode === 'local') return localJevAvailable();
-  if (mode === 'dual') return remoteReady(now) || localJevAvailable();
+  if (mode === 'local') return localJevReady(now);
+  if (mode === 'dual') return remoteReady(now) || localJevReady(now);
   return remoteReady(now);
 }
 
@@ -146,7 +177,7 @@ async function scoreLocalTracked(
   context: Message[],
   groupName: string,
 ): Promise<number[] | null> {
-  if (!localJevAvailable() || candidates.length === 0) return null;
+  if (!localJevReady() || candidates.length === 0) return null;
   jevStats.called++;
   const t0 = Date.now();
   const scores = await scoreWithLocal(candidates, context, groupName);
@@ -156,11 +187,12 @@ async function scoreLocalTracked(
     return scores;
   }
   jevStats.state = 'error';
-  console.warn('[pipeline] 本地快判失败，候选直接交给 LLM');
+  // 详细失败原因已由 scoreWithLocal 打日志（含 spawn/timeout/bad_output）
   return null;
 }
 
-function pickRouted(
+/** dual 路由：优先 FASTJUDGE_ROUTE；优先侧为空时回落到另一侧 */
+export function pickRouted(
   remote: number[] | null,
   local: number[] | null,
 ): { routed: number[] | null; routeBackend: 'jev' | 'local' } {
@@ -194,7 +226,8 @@ export async function scoreWithJev(
     const t0 = Date.now();
     const [remote, local] = await Promise.all([
       callRemoteJev(candidates, context, groupName),
-      scoreWithLocal(candidates, context, groupName),
+      // scoreWithLocal 内部尊重本地退避；失败不影响远端
+      localJevAvailable() ? scoreWithLocal(candidates, context, groupName) : Promise.resolve(null),
     ]);
     jevStats.lastMs = Date.now() - t0;
     if (remote || local) jevStats.state = 'ok';

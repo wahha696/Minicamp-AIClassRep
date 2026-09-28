@@ -13,6 +13,7 @@ import { accountDataState, initAccounts } from './accounts.js';
 import { startNapcat, stopNapcat } from './napcat/index.js';
 import { getConnectStatus } from './napcat/state.js';
 import { getPipelineStats, startScheduler } from './pipeline/index.js';
+import { getDualScoreLog } from './pipeline/jev.js';
 import { startCleanupJob } from './jobs/cleanup.js';
 import { accessGuard } from './lan-guard.js';
 import { currentLanToken, lanEnabledAtBoot } from './lan-settings.js';
@@ -86,6 +87,10 @@ app.get('/health', (c) => {
     uptime: Math.round((Date.now() - STARTED_AT) / 1000),
     pending,
   };
+  // DEMO + 账号就绪时附带 dual 批摘要（无原文）；非 DEMO / 未就绪不暴露
+  if (env.DEMO_MODE && accountReady) {
+    body.dual_score_log = getDualScoreLog(10);
+  }
   return c.json(body);
 });
 

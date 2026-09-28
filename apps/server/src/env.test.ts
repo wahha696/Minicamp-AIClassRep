@@ -83,7 +83,7 @@ describe('env', () => {
       FASTJUDGE_MODE: 'jev',
       FASTJUDGE_ROUTE: 'jev',
       LOCAL_JEV_MODEL_PATH: '',
-      FASTJUDGE_ROOT: '/workspace/classrep-fastjudge',
+      FASTJUDGE_ROOT: '',
       FASTJUDGE_PYTHON: '',
       DEMO_MODE: false,
       RAW_MSG_TTL_DAYS: 7,
