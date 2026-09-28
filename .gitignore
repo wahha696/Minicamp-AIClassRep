@@ -10,8 +10,10 @@ tools/
 # 采集端 NapCat 4.18.28（程序随仓库提交，克隆即可用；见 napcat/README.md）。
 # 只忽略账号数据、运行时生成的文件和非 Windows x64 的原生库。
 # 开头的 / 只作用于仓库根的 napcat/，不会误伤 apps/server/src/napcat/ 源码目录
+# 注意：napcat/node_modules 下的 dist/ 目录必须完整随仓库（qs/dist/qs.js 等是运行必需），
+# 顶部的裸 dist/ 规则会把它们静默吞掉，所以这里用 ** 整树反忽略
 !/napcat/node_modules/
-!/napcat/node_modules/**/node_modules/
+!/napcat/node_modules/**
 /napcat/config/
 /napcat/cache/
 /napcat/logs/
