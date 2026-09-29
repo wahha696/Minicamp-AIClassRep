@@ -19,6 +19,13 @@ export default function AiSettingsCard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 本地/双路模式下小字告诉用户已有本地快判，不填远端 key 也会过滤；远端链到 TypeSafe 才有意义
+  const jevHint = info?.jev.enabled && info.jev.mode === 'local'
+    ? { text: `已有本地快判${info.jev.local_configured ? '' : '（模型未配置时回退直连 AI）'}，不填 key 也会过滤群消息`, url: '' }
+    : info?.jev.enabled && info.jev.mode === 'dual'
+      ? { text: '已有本地快判参与打分；填 key 后远端 Jev 并行对照', url: 'https://typesafe.ai' }
+      : { text: '填了先用快判过滤群消息，省 AI 调用、更快', url: 'https://typesafe.ai' };
+
   return (
     <div className="rounded-2xl border border-slate-200 bg-white px-6 py-6 text-left shadow-sm">
       <KeyRow
@@ -39,8 +46,8 @@ export default function AiSettingsCard() {
       <KeyRow
         title="Jev / TypeSafe（可选）"
         canClear
-        hintText="填了先用快判过滤群消息，省 AI 调用、更快"
-        hintUrl="https://typesafe.ai"
+        hintText={jevHint.text}
+        hintUrl={jevHint.url}
         placeholder="jev key..."
         status={info?.jev}
         sourceNote={info?.jev.source === 'env'}
@@ -182,9 +189,13 @@ function KeyRow({
             className="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm outline-none focus:border-slate-500"
           />
           <p className="mt-1.5 text-xs text-slate-400">
-            <a href={hintUrl} target="_blank" rel="noreferrer" className="underline">
-              {hintText}
-            </a>
+            {hintUrl ? (
+              <a href={hintUrl} target="_blank" rel="noreferrer" className="underline">
+                {hintText}
+              </a>
+            ) : (
+              hintText
+            )}
             。只保存在这台电脑上。
           </p>
           <div className="mt-3 flex items-center justify-end gap-2">
