@@ -27,6 +27,11 @@ vi.mock('./paths.js', async () => {
 
 import { getManagerFacts, NAPCAT_REQUIRED, spawnNapcat } from './manager.js';
 
+// 采集端只支持 Windows：spawnNapcat 在非 Windows 首行即 return，下面两个用例断言的 facts
+// 只在 Windows 分支写入，在非 Windows 跑必然失败（macOS 开发机 2 红的根因）。
+// 因此 Windows 专属用例用 runIf 守住（Windows CI 照常覆盖），非 Windows 改测「空操作」契约。
+const isWindows = process.platform === 'win32';
+
 const tempRoot = join(tmpdir(), 'classrep-spawnfail-test');
 afterEach(() => {
   vi.clearAllMocks();
@@ -39,7 +44,7 @@ function stubNapcat(): void {
   for (const f of NAPCAT_REQUIRED) writeFileSync(join(tempRoot, f), '');
 }
 
-describe('spawnNapcat 缺少采集组件', () => {
+describe.runIf(isWindows)('spawnNapcat 缺少采集组件', () => {
   it('napcat 目录不完整 → napcatMissing=true，不调用 spawn', () => {
     expect(() => spawnNapcat()).not.toThrow();
     expect(getManagerFacts().napcatMissing).toBe(true);
@@ -47,7 +52,7 @@ describe('spawnNapcat 缺少采集组件', () => {
   });
 });
 
-describe('spawnNapcat 同步抛错（回归：启动.bat 闪退）', () => {
+describe.runIf(isWindows)('spawnNapcat 同步抛错（回归：启动.bat 闪退）', () => {
   it('spawn 抛 EPERM → 不向外抛，落 spawnFailed=true、pid=null', () => {
     stubNapcat();
     spawnMock.mockImplementation(() => {
@@ -60,5 +65,16 @@ describe('spawnNapcat 同步抛错（回归：启动.bat 闪退）', () => {
     expect(facts.spawnFailed).toBe(true);
     expect(facts.pid).toBeNull();
     expect(facts.qqExe).toBe('D:\\QQ.exe'); // findQQExe 已成功，仅 spawn 被拦
+  });
+});
+
+describe.runIf(!isWindows)('spawnNapcat 非 Windows 平台（采集端不支持）', () => {
+  it('空操作：不抛错、不调 spawn、facts 保持初始值', () => {
+    expect(() => spawnNapcat()).not.toThrow();
+    expect(spawnMock).not.toHaveBeenCalled();
+    const facts = getManagerFacts();
+    expect(facts.napcatMissing).toBe(false);
+    expect(facts.spawnFailed).toBe(false);
+    expect(facts.pid).toBeNull();
   });
 });
