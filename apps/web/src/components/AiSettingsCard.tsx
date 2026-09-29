@@ -36,6 +36,12 @@ export default function AiSettingsCard() {
         onTest={async () => (await testAiSettings('deepseek')).deepseek ?? { ok: false, error: '没有返回结果' }}
       />
       <p className="mt-4 text-xs text-slate-400">群消息经本地快判模型过滤后再交 AI 整理，无需配置。</p>
+      {info?.deepseek.protection === 'plain' && (
+        <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800">
+          当前系统加密（DPAPI）不可用，密钥正以明文保存在这台电脑的 data 目录下。请勿把 data 目录拷给他人；
+          更换 Windows 用户或重装系统后需要重新填写。
+        </p>
+      )}
     </div>
   );
 }

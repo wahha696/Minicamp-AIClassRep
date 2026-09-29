@@ -153,15 +153,31 @@ export interface LlmSettingsDTO {
   configured: boolean;
   key_hint: string;          // 例如 sk-****367f；没配为 ''
   source: 'web' | 'env' | 'none';
+  /** 实际落盘保护态（R8/P1-06）：dpapi=DPAPI 密文；plain=降级明文（界面必须提示，不许静默降级）；none=未配置 */
+  protection: 'dpapi' | 'plain' | 'none';
+}
+
+/** 当前 llm.json 的实际保护形态（看磁盘上的字段，不看缓存）：密文字段在 = dpapi；只有明文字段 = plain */
+function storedProtection(): LlmSettingsDTO['protection'] {
+  try {
+    if (!existsSync(file())) return 'none';
+    const raw = JSON.parse(readFileSync(file(), 'utf8')) as Partial<SavedFile>;
+    if (raw.api_key_dpapi) return 'dpapi';
+    if (raw.api_key) return 'plain';
+    return 'none';
+  } catch {
+    return 'none';
+  }
 }
 
 export function getLlmSettings(): LlmSettingsDTO {
   const s = readSaved();
+  const protection = storedProtection();
   if (s?.api_key) {
-    return { provider: s.provider ?? 'deepseek', configured: true, key_hint: maskKey(s.api_key), source: 'web' };
+    return { provider: s.provider ?? 'deepseek', configured: true, key_hint: maskKey(s.api_key), source: 'web', protection };
   }
-  if (env.LLM_API_KEY) return { provider: 'deepseek', configured: true, key_hint: maskKey(env.LLM_API_KEY), source: 'env' };
-  return { provider: 'deepseek', configured: false, key_hint: '', source: 'none' };
+  if (env.LLM_API_KEY) return { provider: 'deepseek', configured: true, key_hint: maskKey(env.LLM_API_KEY), source: 'env', protection: 'none' };
+  return { provider: 'deepseek', configured: false, key_hint: '', source: 'none', protection: 'none' };
 }
 
 export interface AiKeyStatus {
@@ -171,7 +187,7 @@ export interface AiKeyStatus {
 }
 
 export interface AiSettingsDTO {
-  deepseek: AiKeyStatus & { provider: LlmProvider };
+  deepseek: AiKeyStatus & { provider: LlmProvider; protection: LlmSettingsDTO['protection'] };
   // enabled = ENABLE_JEV 总开关；mode/local_configured 供前端区分远端/本地/双路展示
   jev: AiKeyStatus & { enabled: boolean; mode: 'jev' | 'local' | 'dual'; local_configured: boolean };
 }
@@ -188,7 +204,7 @@ export function getAiSettings(): AiSettingsDTO {
       ? { configured: true, key_hint: maskKey(env.TYPESAFE_API_KEY), source: 'env', enabled: env.ENABLE_JEV, mode, local_configured }
       : { configured: false, key_hint: '', source: 'none', enabled: env.ENABLE_JEV, mode, local_configured };
   return {
-    deepseek: { provider: llm.provider, configured: llm.configured, key_hint: llm.key_hint, source: llm.source },
+    deepseek: { provider: llm.provider, configured: llm.configured, key_hint: llm.key_hint, source: llm.source, protection: llm.protection },
     jev,
   };
 }

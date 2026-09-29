@@ -55,7 +55,14 @@ describe('/api/settings/llm', () => {
     const r = await put({ provider: 'deepseek', api_key: ' sk-abcdef1234567890 ' });
     expect(r.status).toBe(200);
     const dto = await r.json();
-    expect(dto).toEqual({ provider: 'deepseek', configured: true, key_hint: 'sk-****7890', source: 'web' });
+    expect(dto).toEqual({
+      provider: 'deepseek',
+      configured: true,
+      key_hint: 'sk-****7890',
+      source: 'web',
+      // R8：保护态如实上报——Windows+DPAPI 为 dpapi，其余为 plain
+      protection: expect.stringMatching(/^(dpapi|plain)$/),
+    });
     expect(JSON.stringify(await (await app.request('/api/settings/llm')).json())).not.toContain('abcdef');
     const cfg = getLlmConfig();
     expect(cfg.apiKey).toBe('sk-abcdef1234567890');

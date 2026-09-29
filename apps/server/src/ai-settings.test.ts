@@ -98,6 +98,25 @@ describe('ai-settings（修复计划 3.2）', () => {
     expect(s.jev.source).not.toBe('web');
   });
 
+  it('R8：protection 如实反映落盘形态（明文文件=plain；DPAPI 密文=dpapi；env 来源=none）', () => {
+    const dir = tempDir();
+    setLlmSettingsDir(dir);
+    writeFileSync(join(dir, 'llm.json'), JSON.stringify({ provider: 'deepseek', api_key: 'sk-plain9999' }), 'utf8');
+    if (process.platform === 'win32') {
+      // Windows + DPAPI 可用时，首次读取（getAiSettings 内部 readSaved）即原地升级为密文；
+      // DPAPI 不可用的 Windows 则保持明文降级态。两种都必须如实上报。
+      expect(['plain', 'dpapi']).toContain(getAiSettings().deepseek.protection);
+      const raw = JSON.parse(readFileSync(join(dir, 'llm.json'), 'utf8')) as Record<string, unknown>;
+      expect(getAiSettings().deepseek.protection).toBe(raw.api_key_dpapi !== undefined ? 'dpapi' : 'plain');
+    } else {
+      // 非 Windows 没有 DPAPI：旧版明文文件必须能看到降级态
+      expect(getAiSettings().deepseek.protection).toBe('plain');
+    }
+    // 没存过网页 key：env 来源不参与本机落盘保护态
+    setLlmSettingsDir(tempDir());
+    expect(getAiSettings().deepseek.protection).toBe('none');
+  });
+
   it('maskKey：长 key 露前三后四，短 key 全码，空 key 空串', () => {
     expect(maskKey('sk-abcdef1234567890')).toBe('sk-****7890');
     expect(maskKey('short')).toBe('****');
