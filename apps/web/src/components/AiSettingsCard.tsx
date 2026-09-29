@@ -19,13 +19,6 @@ export default function AiSettingsCard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 本地/双路模式下小字告诉用户已有本地快判，不填远端 key 也会过滤；远端链到 TypeSafe 才有意义
-  const jevHint = info?.jev.enabled && info.jev.mode === 'local'
-    ? { text: `已有本地快判${info.jev.local_configured ? '' : '（模型未配置时回退直连 AI）'}，不填 key 也会过滤群消息`, url: '' }
-    : info?.jev.enabled && info.jev.mode === 'dual'
-      ? { text: '已有本地快判参与打分；填 key 后远端 Jev 并行对照', url: 'https://typesafe.ai' }
-      : { text: '填了先用远端快判过滤群消息，省 AI 调用；也可改用本地快判模型（.env 配 FASTJUDGE_ROOT，无需 key）', url: 'https://typesafe.ai' };
-
   return (
     <div className="rounded-2xl border border-slate-200 bg-white px-6 py-6 text-left shadow-sm">
       <KeyRow
@@ -42,28 +35,7 @@ export default function AiSettingsCard() {
         }}
         onTest={async () => (await testAiSettings('deepseek')).deepseek ?? { ok: false, error: '没有返回结果' }}
       />
-      <div className="my-5 border-t border-slate-100" />
-      <KeyRow
-        title="Jev / TypeSafe（可选）"
-        canClear
-        hintText={jevHint.text}
-        hintUrl={jevHint.url}
-        placeholder="jev key..."
-        status={info?.jev}
-        sourceNote={info?.jev.source === 'env'}
-        disabledNote={!info ? undefined : !info.jev.enabled
-          ? '已被 ENABLE_JEV 关闭（.env）'
-          : info.jev.mode === 'local'
-            ? `FASTJUDGE_MODE=local：路由走本地模型${info.jev.local_configured ? '' : '（未配置，会回退直连 AI）'}，此 key 不参与`
-            : info.jev.mode === 'dual'
-              ? 'FASTJUDGE_MODE=dual：远端与本地模型并行打分，此 key 参与对照'
-              : undefined}
-        onSave={async (key) => {
-          const next = await saveAiSettings({ jev_key: key });
-          setInfo(next);
-        }}
-        onTest={async () => (await testAiSettings('jev')).jev ?? { ok: false, error: '没有返回结果' }}
-      />
+      <p className="mt-4 text-xs text-slate-400">群消息经本地快判模型过滤后再交 AI 整理，无需配置。</p>
     </div>
   );
 }

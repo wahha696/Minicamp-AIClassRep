@@ -83,12 +83,12 @@ export default function Demo() {
   const cancelReset = useCallback(() => setConfirmReset(false), []);
   const h = health.data;
   // 快判模式展示：jev/local/dual，未启用时沿用旧文案
-  const jevName = h?.jev_mode === 'local' ? '本地快判' : h?.jev_mode === 'dual' ? '双路快判' : 'Jev 快判';
+  const jevName = h?.jev_mode === 'local' ? '本地快判' : h?.jev_mode === 'dual' ? '双路快判' : '快判';
   const jevHint = h?.jev_mode === 'local'
     ? '本地模型判断为无日程信息的消息'
     : h?.jev_mode === 'dual'
       ? '双路打分后按路由结果判断为无日程信息的消息'
-      : '本次启动后 Jev 判断为无日程信息的消息';
+      : '本次启动后快判判断为无日程信息的消息';
 
   return (
     <section className="space-y-6">

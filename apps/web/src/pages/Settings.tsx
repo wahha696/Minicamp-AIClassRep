@@ -83,7 +83,7 @@ export default function Settings() {
 
       <h2 className="mt-10 text-lg font-semibold text-slate-900">AI 接入</h2>
       <p className="mt-1 text-sm text-slate-500">
-        DeepSeek 必填，群消息靠它整理成日程；Jev/TypeSafe 可选，填了先用快判过滤消息。
+        DeepSeek 必填，群消息靠它整理成日程；快判走本地模型，无需额外配置。
       </p>
       <div className="mt-3">
         <AiSettingsCard />
