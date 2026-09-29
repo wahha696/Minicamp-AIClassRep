@@ -3,7 +3,7 @@ import { db } from '../db/index.js';
 import { getJevConfig, getLlmConfig } from '../ai-settings.js';
 import { env } from '../env.js';
 import type { PipelineStats } from '../types.js';
-import { localJevAvailable } from './jev-local.js';
+import { localJevAvailable, localJevReady } from './jev-local.js';
 import { jevStats, llmStats } from './stats.js';
 
 export { runPipelineNow, startScheduler } from './scheduler.js';
@@ -44,5 +44,19 @@ export function getPipelineStats(includeAccountData = true): PipelineStats {
     llm_called_count: includeAccountData ? llmStats.called : 0,
     llm: !getLlmConfig().apiKey ? 'unconfigured' : includeAccountData ? llmStats.llm : 'ok',
     jev: jevStatusLabel(includeAccountData),
+    ...fastjudgeVisibility(),
+  };
+}
+
+/** 模式/路由/本地侧状态都是进程配置，不是账号数据，includeAccountData=false 也照常给 */
+function fastjudgeVisibility(): Pick<PipelineStats, 'jev_mode' | 'jev_route' | 'jev_local'> {
+  if (!getJevConfig().enabled) return {};
+  const mode = env.FASTJUDGE_MODE;
+  return {
+    jev_mode: mode,
+    jev_route: mode === 'dual' ? env.FASTJUDGE_ROUTE : undefined,
+    jev_local: mode === 'jev' ? undefined
+      : !localJevAvailable() ? 'unconfigured'
+      : localJevReady() ? 'ok' : 'backoff',
   };
 }

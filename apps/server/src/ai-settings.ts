@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { env } from './env.js';
 import { DATA_DIR } from './paths.js';
 import { dpapiAvailable, protectString, unprotectString } from './secure-store.js';
+import { localJevAvailable } from './pipeline/jev-local.js';
 
 /** 目前只支持 DeepSeek；以后加别家在这里加一行 */
 export const LLM_PROVIDERS = {
@@ -171,18 +172,21 @@ export interface AiKeyStatus {
 
 export interface AiSettingsDTO {
   deepseek: AiKeyStatus & { provider: LlmProvider };
-  jev: AiKeyStatus & { enabled: boolean }; // enabled = ENABLE_JEV 总开关
+  // enabled = ENABLE_JEV 总开关；mode/local_configured 供前端区分远端/本地/双路展示
+  jev: AiKeyStatus & { enabled: boolean; mode: 'jev' | 'local' | 'dual'; local_configured: boolean };
 }
 
 /** GET /api/settings/ai：两个 key 的状态（只给打码提示，不回传明文） */
 export function getAiSettings(): AiSettingsDTO {
   const s = readSaved();
   const llm = getLlmSettings();
-  const jev: AiKeyStatus & { enabled: boolean } = s?.typesafe_api_key
-    ? { configured: true, key_hint: maskKey(s.typesafe_api_key), source: 'web', enabled: env.ENABLE_JEV }
+  const mode = env.FASTJUDGE_MODE;
+  const local_configured = localJevAvailable();
+  const jev: AiSettingsDTO['jev'] = s?.typesafe_api_key
+    ? { configured: true, key_hint: maskKey(s.typesafe_api_key), source: 'web', enabled: env.ENABLE_JEV, mode, local_configured }
     : env.TYPESAFE_API_KEY
-      ? { configured: true, key_hint: maskKey(env.TYPESAFE_API_KEY), source: 'env', enabled: env.ENABLE_JEV }
-      : { configured: false, key_hint: '', source: 'none', enabled: env.ENABLE_JEV };
+      ? { configured: true, key_hint: maskKey(env.TYPESAFE_API_KEY), source: 'env', enabled: env.ENABLE_JEV, mode, local_configured }
+      : { configured: false, key_hint: '', source: 'none', enabled: env.ENABLE_JEV, mode, local_configured };
   return {
     deepseek: { provider: llm.provider, configured: llm.configured, key_hint: llm.key_hint, source: llm.source },
     jev,

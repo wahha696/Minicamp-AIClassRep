@@ -210,6 +210,9 @@ export interface PipelineStats {
   llm_called_count: number;  // 累计 LLM 调用次数
   llm: 'ok' | 'error' | 'unconfigured';  // 最近一次调用结果；没配 key 为 unconfigured
   jev: 'ok' | 'error' | 'unconfigured' | 'disabled';
+  jev_mode?: 'jev' | 'local' | 'dual';   // ENABLE_JEV=false 时缺省
+  jev_route?: 'jev' | 'local';           // 仅 dual
+  jev_local?: 'ok' | 'backoff' | 'unconfigured'; // 仅 local/dual
 }
 
 export interface HealthDTO extends PipelineStats {
@@ -262,7 +265,7 @@ export interface AiKeyStatusDTO {
 
 export interface AiSettingsDTO {
   deepseek: AiKeyStatusDTO & { provider: LlmProvider };
-  jev: AiKeyStatusDTO & { enabled: boolean }; // enabled = 后端 ENABLE_JEV 总开关
+  jev: AiKeyStatusDTO & { enabled: boolean; mode: 'jev' | 'local' | 'dual'; local_configured: boolean };
 }
 
 /** POST /api/settings/ai/test 的返回：target 省略时两个都测 */

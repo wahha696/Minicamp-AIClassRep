@@ -1008,7 +1008,7 @@ function aiDto(): AiSettingsDTO {
       key_hint: mockLlm.key_hint,
       source: mockLlm.source,
     },
-    jev: { ...mockJev, enabled: true },
+    jev: { ...mockJev, enabled: true, mode: 'jev', local_configured: false },
   };
 }
 

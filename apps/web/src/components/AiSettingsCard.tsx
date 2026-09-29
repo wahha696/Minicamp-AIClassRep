@@ -44,7 +44,13 @@ export default function AiSettingsCard() {
         placeholder="jev key..."
         status={info?.jev}
         sourceNote={info?.jev.source === 'env'}
-        disabledNote={info && !info.jev.enabled ? '已被 ENABLE_JEV 关闭（.env）' : undefined}
+        disabledNote={!info ? undefined : !info.jev.enabled
+          ? '已被 ENABLE_JEV 关闭（.env）'
+          : info.jev.mode === 'local'
+            ? `FASTJUDGE_MODE=local：路由走本地模型${info.jev.local_configured ? '' : '（未配置，会回退直连 AI）'}，此 key 不参与`
+            : info.jev.mode === 'dual'
+              ? 'FASTJUDGE_MODE=dual：远端与本地模型并行打分，此 key 参与对照'
+              : undefined}
         onSave={async (key) => {
           const next = await saveAiSettings({ jev_key: key });
           setInfo(next);

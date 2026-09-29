@@ -162,6 +162,12 @@ export interface PipelineStats {
   llm_called_count: number;  // 累计 LLM 调用次数
   llm: 'ok' | 'error' | 'unconfigured';  // 最近一次调用结果；没配 key 为 unconfigured
   jev: 'ok' | 'error' | 'unconfigured' | 'disabled';
+  /** 快判模式（FASTJUDGE_MODE）；ENABLE_JEV=false 时缺省 */
+  jev_mode?: 'jev' | 'local' | 'dual';
+  /** dual 下实际路由目标（FASTJUDGE_ROUTE） */
+  jev_route?: 'jev' | 'local';
+  /** 本地模型侧状态；仅 local/dual 模式给出 */
+  jev_local?: 'ok' | 'backoff' | 'unconfigured';
 }
 
 export interface HealthDTO extends PipelineStats {

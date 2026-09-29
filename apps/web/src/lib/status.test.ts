@@ -27,6 +27,20 @@ describe('状态灯', () => {
     expect(lightsFromHealth(health({ jev: 'unconfigured' }))[3].color).toBe('red');
   });
 
+  it('快判灯标出本地/双路后端', () => {
+    const local = lightsFromHealth(health({ jev: 'ok', jev_mode: 'local', jev_local: 'ok' }))[3];
+    expect(local.label).toBe('本地快判');
+    expect(local.tip).toContain('本地模型');
+    const dual = lightsFromHealth(health({ jev: 'ok', jev_mode: 'dual', jev_route: 'local', jev_local: 'ok' }))[3];
+    expect(dual.label).toBe('双路快判');
+    expect(dual.tip).toContain('路由=本地');
+    expect(lightsFromHealth(health({ jev: 'ok', jev_mode: 'dual', jev_route: 'jev', jev_local: 'backoff' }))[3].tip)
+      .toContain('本地模型退避中');
+    const miss = lightsFromHealth(health({ jev: 'unconfigured', jev_mode: 'local', jev_local: 'unconfigured' }))[3];
+    expect(miss.color).toBe('red');
+    expect(miss.tip).toContain('本地快判：模型未就绪');
+  });
+
   it('QQ 非 online、db 异常、llm error/unconfigured 都是红，悬停说明为中文', () => {
     const l = lightsFromHealth(health({ qq: 'kicked', db: 'error', llm: 'unconfigured' }));
     expect(l.map((x) => x.color)).toEqual(['red', 'red', 'red', 'gray']);

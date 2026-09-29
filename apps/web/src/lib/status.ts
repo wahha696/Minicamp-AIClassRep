@@ -30,18 +30,37 @@ const LLM_TEXT: Record<HealthDTO['llm'], string> = {
   unconfigured: '未配置',
 };
 
+/** 快判灯：jev/local/dual 三种模式共用，标签与悬停说明标出实际后端 */
+function jevLight(health: HealthDTO | undefined): Light {
+  if (!health) return { key: 'jev', label: '快判', color: 'gray', tip: '快判：状态未知' };
+  if (health.jev === 'disabled') return { key: 'jev', label: '快判', color: 'gray', tip: '快判：已关闭' };
+
+  const mode = health.jev_mode;
+  const label = mode === 'local' ? '本地快判' : mode === 'dual' ? '双路快判' : '快判';
+  const via = mode === 'local'
+    ? '本地模型'
+    : mode === 'dual'
+      ? `远端 Jev + 本地模型（路由=${health.jev_route === 'local' ? '本地' : '远端'}）`
+      : '远端 Jev';
+
+  if (health.jev === 'ok') {
+    const backoffNote = health.jev_local === 'backoff' ? '；本地模型退避中' : '';
+    return { key: 'jev', label, color: 'green', tip: `快判（${via}）：正常${backoffNote}` };
+  }
+  const tip = health.jev === 'unconfigured'
+    ? mode === 'local'
+      ? '本地快判：模型未就绪（检查 FASTJUDGE_ROOT / 模型路径），消息仍由 AI 处理'
+      : mode === 'dual'
+        ? '双路快判：远端 key 与本地模型均未配置，消息仍由 AI 处理'
+        : 'Jev 快判：未配置 TypeSafe API Key，消息仍由 AI 处理'
+    : `快判（${via}）：最近一次调用失败，消息已交给 AI 处理`;
+  return { key: 'jev', label, color: 'red', tip };
+}
+
 /** health 为 undefined 表示读不到 /health（后端没开或断网） */
 export function lightsFromHealth(health: HealthDTO | undefined): Light[] {
   // P3：health 读不到时 Jev 是「未知」，不是「已关闭」
-  const jev: Light = !health
-    ? { key: 'jev', label: '快判', color: 'gray', tip: 'Jev 快判：状态未知' }
-    : health.jev === 'disabled'
-      ? { key: 'jev', label: '快判', color: 'gray', tip: 'Jev 快判：已关闭' }
-      : health.jev === 'ok'
-        ? { key: 'jev', label: '快判', color: 'green', tip: 'Jev 快判：正常' }
-        : { key: 'jev', label: '快判', color: 'red', tip: health.jev === 'unconfigured'
-            ? 'Jev 快判：未配置 TypeSafe API Key，消息仍由 AI 处理'
-            : 'Jev 快判：最近一次调用失败，消息已交给 AI 处理' };
+  const jev = jevLight(health);
   if (!health) {
     const down = '无法连接到 ClassRep，请确认启动窗口没有关闭';
     return [
