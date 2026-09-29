@@ -3,21 +3,37 @@
 //   ② Jev/TypeSafe API Key（可选，可跳过）
 //   ③ 去 /connect 扫码登录 QQ
 // FirstRunGuard 在 first_run（没有 uin 或 DeepSeek 未配置）时把用户拦到这里。
-import { useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { saveAiSettings, testAiSettings } from '../api/client';
+import { getAiSettings, saveAiSettings, testAiSettings } from '../api/client';
 import { useToast } from '../components/Toast';
 import { toastError } from '../lib/errors';
+import { SKIP_CONNECT_KEY, writeAccountFlag } from '../lib/status';
 
 export default function Setup() {
-  const [step, setStep] = useState<1 | 2 | 3>(1);
+  // 0 = 读取中：已配过 DeepSeek 时直接续到第 3 步，别让用户以为 key 没存上又被弹回来
+  const [step, setStep] = useState<0 | 1 | 2 | 3>(0);
   const navigate = useNavigate();
+
+  useEffect(() => {
+    let alive = true;
+    void getAiSettings()
+      .then((s) => {
+        if (alive) setStep(s.deepseek.configured ? 3 : 1);
+      })
+      .catch(() => {
+        if (alive) setStep(1);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   return (
     <div className="mx-auto flex min-h-[70vh] w-full max-w-md flex-col justify-center px-4 py-10">
       <header className="mb-6 text-center">
         <h1 className="text-2xl font-bold text-slate-900">欢迎使用 AI 课代表</h1>
-        <p className="mt-1 text-sm text-slate-400">第 {step} 步 / 共 3 步</p>
+        <p className="mt-1 text-sm text-slate-400">{step === 0 ? '正在读取配置…' : `第 ${step} 步 / 共 3 步`}</p>
       </header>
 
       {step === 1 && (
@@ -56,6 +72,16 @@ export default function Setup() {
               className="mt-6 w-full rounded-xl bg-slate-900 py-3 text-base font-medium text-white hover:bg-slate-700"
             >
               去扫码登录 →
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                writeAccountFlag(SKIP_CONNECT_KEY, '1');
+                navigate('/demo');
+              }}
+              className="mt-3 w-full text-sm text-slate-400 underline-offset-4 hover:text-slate-600 hover:underline"
+            >
+              暂不扫码，先逛逛演示模式
             </button>
           </div>
         </Panel>
