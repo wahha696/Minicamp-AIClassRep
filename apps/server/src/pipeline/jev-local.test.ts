@@ -1,15 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { env } from '../env.js';
+import type { Message } from '../types.js';
 import {
   getFastjudgePython,
   getFastjudgeRoot,
   getLocalModelPath,
   localJevAvailable,
+  localJevReady,
   resetLocalJevBackoff,
+  scoreWithLocal,
   spawnEnv,
+  stopLocalWorker,
 } from './jev-local.js';
 
 const original = {
@@ -97,5 +101,84 @@ describe('spawnEnv encoding (zh-CN Windows)', () => {
       if (prevUtf8 === undefined) delete process.env.PYTHONUTF8;
       else process.env.PYTHONUTF8 = prevUtf8;
     }
+  });
+});
+
+// ===== R1：常驻 worker（--serve） =====
+// 假 infer：Node 脚本实现同样的「按行 JSON + seq 对账」协议；
+// 每次启动向 marker 文件追加一行，据此统计 spawn 次数（复用 vs 重 spawn）。
+
+function makeFakeRoot(mode: 'ok' | 'short'): { dir: string; marker: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'fj-fake-'));
+  const marker = join(dir, 'spawns.log');
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  mkdirSync(join(dir, 'models'), { recursive: true });
+  writeFileSync(join(dir, 'models', 'local-jev-v1.joblib'), 'fake');
+  writeFileSync(
+    join(dir, 'src', 'infer.py'),
+    `const fs = require('fs');
+fs.appendFileSync(${JSON.stringify(marker)}, 'spawn\\n');
+let buf = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  buf += chunk;
+  let i;
+  while ((i = buf.indexOf('\\n')) >= 0) {
+    const line = buf.slice(0, i); buf = buf.slice(i + 1);
+    if (!line.trim()) continue;
+    try {
+      const p = JSON.parse(line);
+      const scores = ${mode === 'short' ? '[0.5]' : 'p.candidates.map(() => 0.7)'};
+      process.stdout.write(JSON.stringify({ seq: p.seq, scores }) + '\\n');
+    } catch { /* 坏行忽略 */ }
+  }
+});
+`,
+  );
+  return { dir, marker };
+}
+
+const msg = (id: string, text: string): Message =>
+  ({ message_id: id, group_id: 'g1', group_name: 'g', sender_name: 'a', text, sent_at: 1 }) as Message;
+
+describe('R1：常驻 worker（--serve 行协议）', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    stopLocalWorker();
+    resetLocalJevBackoff();
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true, maxRetries: 8, retryDelay: 200 });
+  });
+
+  function setup(mode: 'ok' | 'short'): { marker: string } {
+    const { dir, marker } = makeFakeRoot(mode);
+    dirs.push(dir);
+    env.FASTJUDGE_ROOT = dir;
+    env.FASTJUDGE_PYTHON = process.execPath; // 用 node 跑假 infer，测试不加载真模型
+    return { marker };
+  }
+
+  it('两批连续打分复用同一个 worker（模型进程只起一次）', async () => {
+    const { marker } = setup('ok');
+    const batch = [msg('m1', '明天下午三点开会'), msg('m2', '哈哈')];
+    expect(await scoreWithLocal(batch, [], 'g')).toEqual([0.7, 0.7]);
+    expect(await scoreWithLocal([msg('m3', 'ddl 明天交作业')], [], 'g')).toEqual([0.7]);
+    const spawns = readFileSync(marker, 'utf8').trim().split('\n').length;
+    expect(spawns).toBe(1);
+  });
+
+  it('worker 崩退/被停后自动重 spawn，打分不丢', async () => {
+    const { marker } = setup('ok');
+    expect(await scoreWithLocal([msg('m1', '明天考试')], [], 'g')).toEqual([0.7]);
+    stopLocalWorker(); // 模拟 worker 死亡
+    expect(await scoreWithLocal([msg('m2', '明天考试')], [], 'g')).toEqual([0.7]);
+    const spawns = readFileSync(marker, 'utf8').trim().split('\n').length;
+    expect(spawns).toBe(2);
+  });
+
+  it('响应长度与候选数不符 → 返回 null 并进入 30s 退避（回退 LLM 的老行为不变）', async () => {
+    setup('short'); // 假 infer 永远只回 1 个分数
+    const batch = [msg('m1', '明天考试'), msg('m2', '记得带学生证')];
+    expect(await scoreWithLocal(batch, [], 'g')).toBeNull();
+    expect(localJevReady()).toBe(false); // 退避中
   });
 });

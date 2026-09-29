@@ -1,5 +1,6 @@
 // 本地快判：同机拉起 classrep-fastjudge 的 infer.py（jieba+TFIDF+CalibratedLR±规则并联），
 // 输入/输出对齐 scoreWithJev → number[] | null。失败或缺模型返回 null，由上层回退 LLM。
+// R1：常驻 worker（--serve，模型只加载一次）；崩退/超时自动重 spawn，失败仍走 30s 退避。
 // Windows-first：不硬编码 Linux 路径；须显式配置 FASTJUDGE_ROOT / LOCAL_JEV_MODEL_PATH。
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -144,6 +145,96 @@ type InferPayload = {
 
 type InferResult = { scores: number[] | null; error?: string };
 
+// ---------- R1：常驻 worker（--serve） ----------
+// 旧实现每次打分都 spawn 新进程（import sklearn 秒级 + joblib.load），与急件 3s 路径不匹配。
+// 现在懒启动一个常驻 infer.py --serve 子进程，模型只加载一次；请求按行写 stdin（带 seq），
+// 响应按行读回并按 seq 对账（多群并发共享一个 worker，infer 内部串行打分）。
+// worker 崩退/超时 → 当批按失败处理（上层 30s 退避 + 回退 LLM），下次调用自动重 spawn。
+
+interface WorkerReq {
+  resolve: (r: InferResult) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+interface Worker {
+  child: ReturnType<typeof spawn>;
+  pending: Map<number, WorkerReq>;
+  buf: string;
+  seq: number;
+  dead: boolean;
+}
+
+let worker: Worker | null = null;
+
+function failAll(w: Worker, error: string): void {
+  for (const [, req] of w.pending) {
+    clearTimeout(req.timer);
+    req.resolve({ scores: null, error });
+  }
+  w.pending.clear();
+}
+
+function handleLine(w: Worker, line: string): void {
+  let parsed: { seq?: number | null; scores?: number[] | null; error?: string };
+  try {
+    parsed = JSON.parse(line) as typeof parsed;
+  } catch {
+    return; // 非 JSON 行（不该出现）：忽略，不打断协议
+  }
+  const seq = parsed.seq;
+  if (typeof seq !== 'number') return;
+  const req = w.pending.get(seq);
+  if (!req) return; // 已超时
+  w.pending.delete(seq);
+  clearTimeout(req.timer);
+  if (!parsed || !Array.isArray(parsed.scores)) {
+    req.resolve({ scores: null, error: parsed?.error || 'bad_output' });
+    return;
+  }
+  req.resolve({ scores: parsed.scores.map((n) => Number(n)) });
+}
+
+function spawnWorker(py: string, script: string, model: string): Worker {
+  const child = spawn(py, [script, '--model', model, '--serve'], {
+    stdio: ['pipe', 'pipe', 'ignore'], // stderr 忽略：jieba 启动日志不进协议，也防缓冲撑大
+    env: spawnEnv(),
+  });
+  const w: Worker = { child, pending: new Map(), buf: '', seq: 0, dead: false };
+  child.stdout!.setEncoding('utf8');
+  child.stdout!.on('data', (chunk: string) => {
+    w.buf += chunk;
+    let idx: number;
+    while ((idx = w.buf.indexOf('\n')) >= 0) {
+      const line = w.buf.slice(0, idx).trim();
+      w.buf = w.buf.slice(idx + 1);
+      if (line) handleLine(w, line);
+    }
+  });
+  const onDead = () => {
+    if (w.dead) return;
+    w.dead = true;
+    failAll(w, 'worker_exit');
+    if (worker === w) worker = null; // 下次调用重 spawn
+  };
+  child.on('error', onDead);
+  child.on('close', onDead);
+  return w;
+}
+
+/** 停掉常驻 worker（进程退出 / 测试用）。没有 worker 时是 no-op。 */
+export function stopLocalWorker(): void {
+  const w = worker;
+  worker = null;
+  if (!w) return;
+  w.dead = true;
+  failAll(w, 'worker_stop');
+  try {
+    w.child.kill('SIGKILL');
+  } catch {
+    // 已退出
+  }
+}
+
 function runInfer(payload: InferPayload, timeoutMs: number): Promise<InferResult> {
   const root = getFastjudgeRoot();
   const model = getLocalModelPath();
@@ -159,52 +250,28 @@ function runInfer(payload: InferPayload, timeoutMs: number): Promise<InferResult
     return Promise.resolve({ scores: null, error: 'model missing' });
   }
 
+  if (worker === null || worker.dead) worker = spawnWorker(py, script, model);
+  const w = worker;
+
   return new Promise((resolve) => {
-    const child = spawn(py, [script, '--model', model], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: spawnEnv(),
-    });
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
-    const finish = (result: InferResult) => {
-      if (settled) return;
-      settled = true;
-      resolve(result);
-    };
+    const seq = ++w.seq;
     const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      finish({ scores: null, error: 'timeout' });
+      w.pending.delete(seq);
+      resolve({ scores: null, error: 'timeout' });
+      // 超时可能意味着 infer 卡死：行协议已不可信，杀掉下次重 spawn（R1 防毒化后续请求）
+      stopLocalWorker();
     }, timeoutMs);
-
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => {
-      stdout += chunk;
+    w.pending.set(seq, { resolve, timer });
+    // 模型在 serve 循环前就加载好：提前写入的请求排在 stdin 缓冲里，循环开始即被消费
+    w.child.stdin!.write(JSON.stringify({ seq, ...payload }) + '\n', (err) => {
+      if (!err) return;
+      const req = w.pending.get(seq);
+      if (!req) return;
+      w.pending.delete(seq);
+      clearTimeout(req.timer);
+      req.resolve({ scores: null, error: 'write' });
+      stopLocalWorker(); // EPIPE 等写失败：worker 已不可信
     });
-    child.stderr.on('data', (chunk: string) => {
-      stderr += chunk;
-    });
-    child.on('error', () => {
-      clearTimeout(timer);
-      finish({ scores: null, error: 'spawn' });
-    });
-    child.on('close', () => {
-      clearTimeout(timer);
-      try {
-        const parsed = JSON.parse(stdout.trim() || '{}') as InferResult;
-        if (!parsed || !Array.isArray(parsed.scores)) {
-          finish({ scores: null, error: parsed?.error || 'bad_output' });
-          return;
-        }
-        finish({ scores: parsed.scores.map((n) => Number(n)) });
-      } catch {
-        finish({ scores: null, error: stderr.trim() ? 'stderr' : 'parse' });
-      }
-    });
-
-    child.stdin.write(JSON.stringify(payload));
-    child.stdin.end();
   });
 }
 
