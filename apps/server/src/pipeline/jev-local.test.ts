@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { env } from '../env.js';
 import {
   getFastjudgePython,
@@ -29,9 +32,16 @@ afterEach(() => {
 });
 
 describe('jev-local paths (Windows-first, fail-closed)', () => {
-  it('未配置 ROOT/MODEL 时 root 空、model 空、不可用', () => {
-    expect(getFastjudgeRoot()).toBe('');
-    expect(getLocalModelPath()).toBe('');
+  it('仓库根带 classrep-fastjudge 时免配置自动启用（约定路径）', () => {
+    // 工作区已随仓库分发：不配置任何 env 也应解析到 <repo>/classrep-fastjudge
+    expect(getFastjudgeRoot()).toMatch(/classrep-fastjudge$/);
+    expect(getLocalModelPath()).toMatch(/local-jev-v1\.joblib$/);
+    expect(localJevAvailable()).toBe(true);
+  });
+
+  it('显式 ROOT 指向不存在目录时不可用（fail-closed）', () => {
+    env.FASTJUDGE_ROOT = 'definitely-not-here-fastjudge-root';
+    expect(getFastjudgeRoot()).toBe('definitely-not-here-fastjudge-root');
     expect(localJevAvailable()).toBe(false);
   });
 
@@ -45,9 +55,29 @@ describe('jev-local paths (Windows-first, fail-closed)', () => {
     expect(getFastjudgePython()).toBe('D:\\dev\\classrep-fastjudge\\.venv\\Scripts\\python.exe');
   });
 
-  it('未设 PYTHON 时回落平台默认解释器名（不假装存在 venv）', () => {
+  it('未设 PYTHON 且 root 下无 py/.venv 时回落平台默认解释器名（不假装存在）', () => {
+    env.FASTJUDGE_ROOT = 'definitely-not-here-fastjudge-root';
     const py = getFastjudgePython();
     expect(py === 'python' || py === 'python3').toBe(true);
+  });
+
+  it('root 下有 py/python.exe 时优先于 .venv（打包版开箱即用）', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'fj-root-'));
+    try {
+      const isWin = process.platform === 'win32';
+      const bundled = join(tmp, 'py', 'python.exe');
+      const venvPy = join(tmp, '.venv', isWin ? 'Scripts' : 'bin', isWin ? 'python.exe' : 'python');
+      mkdirSync(dirname(bundled), { recursive: true });
+      writeFileSync(bundled, '');
+      env.FASTJUDGE_ROOT = tmp;
+      expect(getFastjudgePython()).toBe(bundled);
+      rmSync(bundled);
+      mkdirSync(dirname(venvPy), { recursive: true });
+      writeFileSync(venvPy, '');
+      expect(getFastjudgePython()).toBe(venvPy);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true, maxRetries: 8, retryDelay: 200 });
+    }
   });
 });
 

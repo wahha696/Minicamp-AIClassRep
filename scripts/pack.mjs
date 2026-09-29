@@ -9,6 +9,8 @@
 //   ClassRep/app/update.mjs           ← scripts/update.mjs（下次启动应用自更新包）
 //   ClassRep/app/version.json         ← { version, repo }：后端检查更新 / update.mjs 用
 //   ClassRep/data/mock/               ← 仿真剧本（data/mock 本来就进 git）
+//   ClassRep/classrep-fastjudge/      ← 本地快判：src + models + py/ 便携 python（无 python 无网也能跑）
+//                                     排除 .venv（机器绝对路径）、__pycache__、models/best（重复检查点）
 // 不打 .env.release：API Key 由用户首次启动时在向导页填（修复计划 3.2），密钥绝不进发布包。
 // 真机验收：没装过 Node 的 Windows 电脑、解压到含中文+空格路径、双击 启动.bat 走完修复计划的目标体验。
 import { spawnSync, execSync } from 'node:child_process';
@@ -97,6 +99,34 @@ function copyNapcat(src, dst) {
 }
 copyNapcat(napcatSrc, napcatOut);
 if (!existsSync(join(napcatOut, 'NapCatWinBootMain.exe'))) fail('napcat/ 缺 NapCatWinBootMain.exe');
+
+// ---------- 5.5 classrep-fastjudge/（本地快判：源码+模型+便携 python，开箱即用） ----------
+// py/ 便携运行时必须随包预装（用户无 python、可能无网）；缺了就现场供给一次。
+const fjSrc = join(REPO, 'classrep-fastjudge');
+if (existsSync(join(fjSrc, 'src', 'infer.py'))) {
+  if (!existsSync(join(fjSrc, 'py', 'python.exe'))) {
+    log('classrep-fastjudge/py 便携 Python 缺失，先跑 fastjudge-setup.mjs 供给…');
+    const setup = spawnSync(process.execPath, [join(REPO, 'scripts', 'fastjudge-setup.mjs')], {
+      cwd: REPO, stdio: 'inherit',
+    });
+    if (setup.status !== 0) fail('fastjudge-setup.mjs 供给失败（也可手动 node scripts/fastjudge-setup.mjs 后重跑）');
+  }
+  const FJ_SKIP = new Set(['.venv', '__pycache__', 'best']); // best/ 是 models/ 下重复的训练检查点
+  function copyFastjudge(src, dst) {
+    mkdirSync(dst, { recursive: true });
+    for (const name of readdirSync(src)) {
+      if (FJ_SKIP.has(name)) continue;
+      if (name.endsWith('.cache') || name === 'get-pip.py' || name.startsWith('python-') && name.endsWith('.zip')) continue;
+      const s = join(src, name);
+      if (statSync(s).isDirectory()) copyFastjudge(s, join(dst, name));
+      else cpSync(s, join(dst, name));
+    }
+  }
+  copyFastjudge(fjSrc, join(outDir, 'classrep-fastjudge'));
+  log(`classrep-fastjudge → 包内（含 py/ 便携运行时 ${mb(dirSize(join(outDir, 'classrep-fastjudge')))}）`);
+} else {
+  log('⚠️ 缺 classrep-fastjudge/src/infer.py：本包不带本地快判（用户可自行放入项目根目录自动启用）');
+}
 
 // ---------- 6. app/ 与 data/mock/ ----------
 cpSync(join(REPO, 'apps', 'server', 'dist', 'index.js'), join(outDir, 'app', 'server', 'dist', 'index.js'));

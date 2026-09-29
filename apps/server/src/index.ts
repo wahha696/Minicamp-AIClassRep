@@ -14,7 +14,7 @@ import { startNapcat, stopNapcat } from './napcat/index.js';
 import { getConnectStatus } from './napcat/state.js';
 import { getPipelineStats, startScheduler } from './pipeline/index.js';
 import { getDualScoreLog } from './pipeline/jev.js';
-import { getFastjudgeRoot, localJevAvailable } from './pipeline/jev-local.js';
+import { ensureFastjudgeRuntime, getFastjudgeRoot, localJevAvailable } from './pipeline/jev-local.js';
 import { startCleanupJob } from './jobs/cleanup.js';
 import { accessGuard } from './lan-guard.js';
 import { currentLanToken, lanEnabledAtBoot } from './lan-settings.js';
@@ -209,6 +209,7 @@ if (env.FASTJUDGE_MODE !== 'jev') {
   console.log(`本地快判：${!fjRoot
     ? '未配置（把 classrep-fastjudge 放到项目根目录即自动启用）'
     : localJevAvailable() ? `就绪（${fjRoot}）` : `已找到 ${fjRoot}，但模型文件缺失`}`);
+  ensureFastjudgeRuntime(); // 模型在、python 环境缺时后台供给（克隆版开箱即用）
 }
 
 startScheduler();

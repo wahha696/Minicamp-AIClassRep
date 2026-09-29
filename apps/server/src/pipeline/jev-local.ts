@@ -32,12 +32,19 @@ export function getLocalModelPath(): string {
   return join(root, DEFAULT_MODEL);
 }
 
-/** Windows: .venv\Scripts\python.exe；POSIX: .venv/bin/python；皆无则回落 python/python3 */
+/** 便携运行时（随包分发 / 首次启动自动供给）：<root>/py/python.exe */
+export function getBundledPythonPath(root: string): string {
+  return join(root, 'py', 'python.exe');
+}
+
+/** bundled py > .venv > 系统 python。打包版没有系统 python 也能跑 */
 export function getFastjudgePython(): string {
   const explicit = env.FASTJUDGE_PYTHON.trim();
   if (explicit) return explicit;
   const root = getFastjudgeRoot();
   if (root) {
+    const bundled = getBundledPythonPath(root);
+    if (existsSync(bundled)) return bundled;
     const winPy = join(root, '.venv', 'Scripts', 'python.exe');
     const nixPy = join(root, '.venv', 'bin', 'python');
     if (process.platform === 'win32') {
@@ -60,6 +67,45 @@ export function localJevAvailable(): boolean {
 /** 已配置且不在失败退避期内 */
 export function localJevReady(now = Date.now()): boolean {
   return localJevAvailable() && now >= localBackoffUntil;
+}
+
+/** python 能不能 import 快判依赖（sklearn/jieba/joblib/numpy）；30s 超时按不可用算 */
+function pythonUsable(py: string, root: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const child = spawn(py, ['-c', 'import sklearn,jieba,joblib,numpy;print("ok")'], {
+      cwd: root, env: spawnEnv(), stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    let out = '';
+    let settled = false;
+    const done = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(ok);
+    };
+    const timer = setTimeout(() => { child.kill('SIGKILL'); done(false); }, 30_000);
+    child.stdout.setEncoding('utf8').on('data', (c: string) => { out += c; });
+    child.on('error', () => { clearTimeout(timer); done(false); });
+    child.on('close', (code) => { clearTimeout(timer); done(code === 0 && out.includes('ok')); });
+  });
+}
+
+/**
+ * 启动时调用：模型已就绪但 python 环境不可用时，后台跑 scripts/fastjudge-setup.mjs 供给
+ * （Windows 便携 embed / POSIX venv）。打包版没有 scripts/——环境应随包预装，直接跳过。
+ */
+export function ensureFastjudgeRuntime(): void {
+  const root = getFastjudgeRoot();
+  if (!root || !localJevAvailable()) return;
+  const py = getFastjudgePython();
+  void pythonUsable(py, root)
+    .then((ok) => {
+      if (ok) return;
+      const script = join(ROOT, 'scripts', 'fastjudge-setup.mjs');
+      if (!existsSync(script)) return;
+      console.warn('[fastjudge] 本地快判 Python 环境缺失，后台供给便携运行时（首次约几分钟）…');
+      spawn(process.execPath, [script, '--root', root], { detached: true, stdio: 'ignore' }).unref();
+    })
+    .catch(() => {});
 }
 
 /** 测试用：清掉本地失败退避 */

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://classrep.local/schemas/fastjudge-sample-v1.json",
+  "title": "ClassRepLocalFastJudgeSample",
+  "type": "object",
+  "required": ["id", "group_name", "context", "message", "label", "source"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "group_name": { "type": "string", "minLength": 1 },
+    "context": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "required": ["sender_name", "text"],
+        "additionalProperties": false,
+        "properties": {
+          "sender_name": { "type": "string" },
+          "text": { "type": "string" }
+        }
+      }
+    },
+    "message": {
+      "type": "object",
+      "required": ["sender_name", "text"],
+      "additionalProperties": false,
+      "properties": {
+        "sender_name": { "type": "string" },
+        "text": { "type": "string", "minLength": 1 }
+      }
+    },
+    "label": { "type": "integer", "enum": [0, 1] },
+    "soft_label": { "type": "number", "minimum": 0, "maximum": 1 },
+    "source": { "type": "string", "enum": ["synth", "mock", "human"] },
+    "scenario": { "type": "string" },
+    "notes": { "type": "string" }
+  }
+}
