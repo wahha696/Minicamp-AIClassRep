@@ -24,7 +24,7 @@ export default function AiSettingsCard() {
     ? { text: `已有本地快判${info.jev.local_configured ? '' : '（模型未配置时回退直连 AI）'}，不填 key 也会过滤群消息`, url: '' }
     : info?.jev.enabled && info.jev.mode === 'dual'
       ? { text: '已有本地快判参与打分；填 key 后远端 Jev 并行对照', url: 'https://typesafe.ai' }
-      : { text: '填了先用快判过滤群消息，省 AI 调用、更快', url: 'https://typesafe.ai' };
+      : { text: '填了先用远端快判过滤群消息，省 AI 调用；也可改用本地快判模型（.env 配 FASTJUDGE_ROOT，无需 key）', url: 'https://typesafe.ai' };
 
   return (
     <div className="rounded-2xl border border-slate-200 bg-white px-6 py-6 text-left shadow-sm">
