@@ -56,5 +56,8 @@ release/
 classrep-fastjudge/**/__pycache__/
 classrep-fastjudge/**/*.cache
 /classrep-fastjudge/models/best/
+# 训练数据与评测报告（可能含未脱敏样本）：不进仓库、不进发布包（R3）
+/classrep-fastjudge/data/
+/classrep-fastjudge/reports/
 skills-lock.json
 docs/architecture/

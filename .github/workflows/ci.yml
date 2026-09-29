@@ -55,6 +55,17 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm --filter web build
 
+      # R6：本地快判端到端冒烟（Node 之外独立验证 Python→joblib→UTF-8 链路，smoke-utf8.json 不再闲置）
+      - name: 本地快判冒烟（infer.py + smoke-utf8.json）
+        run: |
+          python3 -m venv /tmp/fj-venv
+          /tmp/fj-venv/bin/pip install -q -r classrep-fastjudge/requirements.txt
+          out=$(/tmp/fj-venv/bin/python classrep-fastjudge/src/infer.py \
+            --model classrep-fastjudge/models/local-jev-v1.joblib \
+            --file classrep-fastjudge/smoke-utf8.json)
+          echo "$out"
+          echo "$out" | python3 -c "import json,sys; s=json.load(sys.stdin)['scores']; assert len(s)==4, f'len: {s}'; assert s[2]>=0.2, f'考试通知得分过低: {s}'; assert s[1]<0.2, f'闲聊得分过高: {s}'"
+
       - name: 起后端并打 /health（clone 即用冒烟，不需要 QQ/NapCat）
         run: |
           cd apps/server

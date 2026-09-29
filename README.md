@@ -40,7 +40,7 @@ AI 课代表在本机接管电脑版 QQ，实时读取你开启监听的群，�
 
 1. 从 [Releases](https://github.com/wahha696/Minicamp-AIClassRep/releases) 下载 `ClassRep.zip`，解压到任意目录（路径可以有中文和空格）
 2. 双击 `启动.bat`
-3. 浏览器自动打开**向导页**：填 DeepSeek API Key（AI 整理日程必填）和 Jev/TypeSafe API Key（可选，没有就留空）
+3. 浏览器自动打开**向导页**：填 DeepSeek API Key（必填）；快判走内置本地模型，无需配置
 4. 用手机 QQ 扫页面上的二维码登录，新发现的群默认不监听，到「群管理」里挑要看的群打开
 
 免安装包已内置 Node 运行时与 NapCat 采集端，解压即用不用下载。有新版本时后端会自动下载并校验 SHA-256，下次双击 `启动.bat` 时自动应用，数据不受影响。

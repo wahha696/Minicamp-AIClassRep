@@ -88,7 +88,8 @@ function parseFastjudgeMode(raw: string | undefined): 'jev' | 'local' | 'dual' {
 }
 
 function parseFastjudgeRoute(raw: string | undefined): 'jev' | 'local' {
-  const v = (raw ?? 'jev').trim().toLowerCase();
+  // 与 MODE=local 的产品决策对齐：dual 调试忘配 ROUTE 时也应路由本地（92e3311b 漏改，R4）
+  const v = (raw ?? 'local').trim().toLowerCase();
   return v === 'local' ? 'local' : 'jev';
 }
 
