@@ -80,7 +80,7 @@ describe('env', () => {
       TYPESAFE_API_KEY: '',
       JEV_MODEL: 'jev-latest',
       JEV_TIMEOUT_MS: 3_000,
-      FASTJUDGE_MODE: 'jev',
+      FASTJUDGE_MODE: 'local',
       FASTJUDGE_ROUTE: 'jev',
       LOCAL_JEV_MODEL_PATH: '',
       FASTJUDGE_ROOT: '',

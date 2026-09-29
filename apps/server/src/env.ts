@@ -81,9 +81,10 @@ function positiveNum(raw: string | undefined, fallback: number): number {
 
 /** 从一组环境变量算出 env（纯函数，测试直接喂对象，不依赖真实 process.env / .env） */
 function parseFastjudgeMode(raw: string | undefined): 'jev' | 'local' | 'dual' {
-  const v = (raw ?? 'jev').trim().toLowerCase();
-  if (v === 'local' || v === 'dual') return v;
-  return 'jev';
+  // 产品决策（2026-09-29）：默认只用本地模型；'jev'/'dual' 仍可显式选（对照/回退）
+  const v = (raw ?? 'local').trim().toLowerCase();
+  if (v === 'jev' || v === 'dual') return v;
+  return 'local';
 }
 
 function parseFastjudgeRoute(raw: string | undefined): 'jev' | 'local' {
