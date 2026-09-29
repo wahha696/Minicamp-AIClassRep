@@ -218,6 +218,16 @@ export interface HealthDTO extends PipelineStats {
   qq: ConnectState;
   uptime: number;       // 秒
   pending: number;      // 待整理（processed=0 且未被过滤）的消息数，只算启用的群
+  /** DEMO_MODE 且账号就绪时附带：最近 dual 批摘要（无原文） */
+  dual_score_log?: Array<{
+    at: number;
+    groupName: string;
+    n: number;
+    remote: number[] | null;
+    local: number[] | null;
+    routed: number[] | null;
+    routeBackend: 'jev' | 'local';
+  }>;
 }
 
 // ===== 以下为前端补充（§7 里只写在表格中、§4 没有命名的返回类型）
