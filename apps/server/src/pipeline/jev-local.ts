@@ -62,7 +62,7 @@ export function resetLocalJevBackoff(): void {
 }
 
 /** spawn 子进程时只传最小必要环境，避免把 LLM_API_KEY 等密钥带进 Python */
-function spawnEnv(): NodeJS.ProcessEnv {
+export function spawnEnv(): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = {};
   if (process.env.PATH) out.PATH = process.env.PATH;
   if (process.env.Path) out.Path = process.env.Path;
@@ -74,7 +74,10 @@ function spawnEnv(): NodeJS.ProcessEnv {
   if (process.env.LANG) out.LANG = process.env.LANG;
   if (process.env.LC_ALL) out.LC_ALL = process.env.LC_ALL;
   if (process.env.PYTHONPATH) out.PYTHONPATH = process.env.PYTHONPATH;
-  if (process.env.PYTHONIOENCODING) out.PYTHONIOENCODING = process.env.PYTHONIOENCODING;
+  // zh-CN Windows 默认 stdin 为 gbk：Node 写 UTF-8 JSON 会被解成乱码，分数静默算错。
+  // 必须强制 UTF-8，不能依赖父进程是否碰巧设置了 PYTHONIOENCODING。
+  out.PYTHONUTF8 = '1';
+  out.PYTHONIOENCODING = 'utf-8';
   // Windows 下 python launcher / 编码常见依赖
   if (process.env.PATHEXT) out.PATHEXT = process.env.PATHEXT;
   if (process.env.COMSPEC) out.COMSPEC = process.env.COMSPEC;

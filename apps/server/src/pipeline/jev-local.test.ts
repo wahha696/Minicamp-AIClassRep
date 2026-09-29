@@ -6,6 +6,7 @@ import {
   getLocalModelPath,
   localJevAvailable,
   resetLocalJevBackoff,
+  spawnEnv,
 } from './jev-local.js';
 
 const original = {
@@ -47,5 +48,24 @@ describe('jev-local paths (Windows-first, fail-closed)', () => {
   it('未设 PYTHON 时回落平台默认解释器名（不假装存在 venv）', () => {
     const py = getFastjudgePython();
     expect(py === 'python' || py === 'python3').toBe(true);
+  });
+});
+
+describe('spawnEnv encoding (zh-CN Windows)', () => {
+  it('强制 PYTHONUTF8 / PYTHONIOENCODING=utf-8，不依赖父进程', () => {
+    const prevIo = process.env.PYTHONIOENCODING;
+    const prevUtf8 = process.env.PYTHONUTF8;
+    delete process.env.PYTHONIOENCODING;
+    delete process.env.PYTHONUTF8;
+    try {
+      const e = spawnEnv();
+      expect(e.PYTHONUTF8).toBe('1');
+      expect(e.PYTHONIOENCODING).toBe('utf-8');
+    } finally {
+      if (prevIo === undefined) delete process.env.PYTHONIOENCODING;
+      else process.env.PYTHONIOENCODING = prevIo;
+      if (prevUtf8 === undefined) delete process.env.PYTHONUTF8;
+      else process.env.PYTHONUTF8 = prevUtf8;
+    }
   });
 });
