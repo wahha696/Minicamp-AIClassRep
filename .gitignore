@@ -48,5 +48,8 @@ release/
 
 # 本地 AI 工具的技能文件与生成的架构图（不进仓库）
 .agents/
+
+# 本地快判工作区（模型文件 + .venv，从训练机拷来放根目录即自动启用，不进仓库）
+classrep-fastjudge/
 skills-lock.json
 docs/architecture/

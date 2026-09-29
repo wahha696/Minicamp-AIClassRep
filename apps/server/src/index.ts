@@ -14,6 +14,7 @@ import { startNapcat, stopNapcat } from './napcat/index.js';
 import { getConnectStatus } from './napcat/state.js';
 import { getPipelineStats, startScheduler } from './pipeline/index.js';
 import { getDualScoreLog } from './pipeline/jev.js';
+import { getFastjudgeRoot, localJevAvailable } from './pipeline/jev-local.js';
 import { startCleanupJob } from './jobs/cleanup.js';
 import { accessGuard } from './lan-guard.js';
 import { currentLanToken, lanEnabledAtBoot } from './lan-settings.js';
@@ -203,6 +204,12 @@ await initAccounts();
 const port = await listenWithFallback();
 listenPort = port;
 console.log(`ClassRep 已启动：http://localhost:${port}${LISTEN_LAN ? '（已开启局域网只读访问）' : ''}`);
+if (env.FASTJUDGE_MODE !== 'jev') {
+  const fjRoot = getFastjudgeRoot();
+  console.log(`本地快判：${!fjRoot
+    ? '未配置（把 classrep-fastjudge 放到项目根目录即自动启用）'
+    : localJevAvailable() ? `就绪（${fjRoot}）` : `已找到 ${fjRoot}，但模型文件缺失`}`);
+}
 
 startScheduler();
 await startNapcat();

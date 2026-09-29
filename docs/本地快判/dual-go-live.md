@@ -12,6 +12,12 @@ FASTJUDGE_MODE=local
 # TYPESAFE_API_KEY 在 local 模式下可不填（不走远端 Jev）
 ```
 
+### 零配置约定
+
+把 `classrep-fastjudge` 目录（含 `src/infer.py`、`.venv`、`models/`）放到**项目根目录**即可：无需改 `.env`，启动自动启用，日志会打印 `本地快判：就绪（…）`。
+
+工作区放在别处时才需要显式配置：
+
 ### Windows 路径示例
 
 ```bash

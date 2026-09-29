@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { env } from '../env.js';
+import { ROOT } from '../paths.js';
 import type { Message } from '../types.js';
 
 const DEFAULT_MODEL = 'models/local-jev-v1.joblib';
@@ -15,7 +16,12 @@ export const LOCAL_JEV_BACKOFF_MS = 30_000;
 let localBackoffUntil = 0;
 
 export function getFastjudgeRoot(): string {
-  return env.FASTJUDGE_ROOT.trim();
+  const configured = env.FASTJUDGE_ROOT.trim();
+  if (configured) return configured;
+  // 免配置约定：把 classrep-fastjudge 放到项目根目录（含 src/infer.py）即自动启用，
+  // 不用改 .env；模型默认取 <root>/models/local-jev-v1.joblib，python 探测 .venv。
+  const conventional = join(ROOT, 'classrep-fastjudge');
+  return existsSync(join(conventional, 'src', 'infer.py')) ? conventional : '';
 }
 
 export function getLocalModelPath(): string {
