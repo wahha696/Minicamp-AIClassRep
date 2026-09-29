@@ -14,7 +14,7 @@ import { startNapcat, stopNapcat } from './napcat/index.js';
 import { getConnectStatus } from './napcat/state.js';
 import { getPipelineStats, startScheduler } from './pipeline/index.js';
 import { getDualScoreLog } from './pipeline/jev.js';
-import { ensureFastjudgeRuntime, getFastjudgeRoot, localJevAvailable } from './pipeline/jev-local.js';
+import { ensureFastjudgeRuntime, getFastjudgeRoot, localJevAvailable, stopLocalWorker } from './pipeline/jev-local.js';
 import { startCleanupJob } from './jobs/cleanup.js';
 import { accessGuard } from './lan-guard.js';
 import { currentLanToken, lanEnabledAtBoot } from './lan-settings.js';
@@ -227,6 +227,11 @@ let stopping = false;
 function shutdown(): void {
   if (stopping) return;
   stopping = true;
+  try {
+    stopLocalWorker(); // R1：常驻快判子进程随主进程回收
+  } catch {
+    // 退出路径上不再抛
+  }
   try {
     stopNapcat();
   } catch {

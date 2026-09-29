@@ -81,7 +81,7 @@ describe('env', () => {
       JEV_MODEL: 'jev-latest',
       JEV_TIMEOUT_MS: 3_000,
       FASTJUDGE_MODE: 'local',
-      FASTJUDGE_ROUTE: 'jev',
+      FASTJUDGE_ROUTE: 'local',
       LOCAL_JEV_MODEL_PATH: '',
       FASTJUDGE_ROOT: '',
       FASTJUDGE_PYTHON: '',

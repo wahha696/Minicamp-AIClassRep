@@ -987,7 +987,7 @@ function trashItems(): TrashItemDTO[] {
   return out.sort((a, b) => b.at - a.at);
 }
 
-let mockLlm: LlmSettingsDTO = { provider: 'deepseek', configured: false, key_hint: '', source: 'none' };
+let mockLlm: LlmSettingsDTO = { provider: 'deepseek', configured: false, key_hint: '', source: 'none', protection: 'none' };
 let mockJev: { configured: boolean; key_hint: string; source: 'web' | 'env' | 'none' } = {
   configured: false,
   key_hint: '',
@@ -1007,6 +1007,7 @@ function aiDto(): AiSettingsDTO {
       configured: mockLlm.configured,
       key_hint: mockLlm.key_hint,
       source: mockLlm.source,
+      protection: mockLlm.configured ? (mockLlm.protection ?? 'dpapi') : 'none',
     },
     jev: { ...mockJev, enabled: true, mode: 'jev', local_configured: false },
   };

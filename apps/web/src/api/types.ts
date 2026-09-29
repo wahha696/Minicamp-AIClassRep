@@ -253,6 +253,8 @@ export interface LlmSettingsDTO {
   configured: boolean;
   key_hint: string;                 // 例如 sk-****367f；没配为 ''
   source: 'web' | 'env' | 'none';   // web=网页保存的；env=.env 里的
+  /** 落盘保护态（R8）：dpapi=Windows 加密；plain=降级明文（界面须提示）；none=未配置/来自 env */
+  protection?: 'dpapi' | 'plain' | 'none';
 }
 
 // ===== /api/settings/ai（修复计划 3.2）：DeepSeek 必填 + Jev/TypeSafe 可选 =====
@@ -264,7 +266,7 @@ export interface AiKeyStatusDTO {
 }
 
 export interface AiSettingsDTO {
-  deepseek: AiKeyStatusDTO & { provider: LlmProvider };
+  deepseek: AiKeyStatusDTO & { provider: LlmProvider; protection?: 'dpapi' | 'plain' | 'none' };
   jev: AiKeyStatusDTO & { enabled: boolean; mode: 'jev' | 'local' | 'dual'; local_configured: boolean };
 }
 

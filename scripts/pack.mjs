@@ -111,7 +111,16 @@ if (existsSync(join(fjSrc, 'src', 'infer.py'))) {
     });
     if (setup.status !== 0) fail('fastjudge-setup.mjs 供给失败（也可手动 node scripts/fastjudge-setup.mjs 后重跑）');
   }
-  const FJ_SKIP = new Set(['.venv', '__pycache__', 'best']); // best/ 是 models/ 下重复的训练检查点
+  // R2：文件在 ≠ 可用。打包前必须验证便携 Python 能 import 快判依赖——
+  // 打包版没有 scripts/fastjudge-setup.mjs，残缺 py/ 进了包就是静默死亡（只剩 30s 退避日志）。
+  const fjPy = join(fjSrc, 'py', 'python.exe');
+  const usable = spawnSync(fjPy, ['-c', 'import sklearn,jieba,joblib,numpy;print("ok")'], {
+    encoding: 'utf8', timeout: 60_000, cwd: fjSrc,
+  });
+  if (usable.status !== 0 || !String(usable.stdout).includes('ok')) {
+    fail('classrep-fastjudge/py 便携 Python 依赖校验不过（删掉 py/ 后重跑 node scripts/fastjudge-setup.mjs）');
+  }
+  const FJ_SKIP = new Set(['.venv', '__pycache__', 'best', 'data', 'reports']); // best/ 是 models/ 下重复的训练检查点；data/reports 是本地训练产物（R3）
   function copyFastjudge(src, dst) {
     mkdirSync(dst, { recursive: true });
     for (const name of readdirSync(src)) {
