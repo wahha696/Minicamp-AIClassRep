@@ -183,7 +183,8 @@ function normalizeScenario(raw: unknown, tpl: string, tplDef: Template, seed: nu
     if (!Number.isFinite(off)) return 'offset_minutes 不是数';
     msgs.push({ offset_minutes: Math.max(-2880, Math.min(0, off)), sender, text });
   }
-  if (msgs.length < 35) return `有效消息太少：${msgs.length}（真实群聊中位 60 条，要求 ≥35）`;
+  // 与上面的 32 条下限保持一致（此前这里是 35，导致 32~34 条的场景过了第一关却被这一关判死）
+  if (msgs.length < 32) return `有效消息太少：${msgs.length}（真实群聊中位 60 条，闸门下限 32）`;
 
   const expected: ExpectedEventJson[] = (Array.isArray(r.expected) ? r.expected : [])
     .filter(

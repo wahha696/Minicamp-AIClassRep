@@ -29,6 +29,7 @@ param(
     [string]$ModelDir = "train\models\qwen3-1.7b-sft-real",
     [int]$Epochs = 1,
     [int]$MaxCandidates = 13,
+    [int]$Seed = 20000,
     [switch]$Yes,
     [switch]$Train
 )
@@ -63,8 +64,16 @@ if (-not $env:LLM_BASE_URL) { $env:LLM_BASE_URL = 'https://api.deepseek.com/v1' 
 if (-not $env:LLM_MODEL) { $env:LLM_MODEL = 'deepseek-chat' }
 
 Write-Host "`n=== [1/3] generate realism-aligned scenarios ===" -ForegroundColor Cyan
-node train\dist\train\gen-scenarios.js --n $Scenarios --concurrency 3 --seed 20000 --out $OutDir
-if ($LASTEXITCODE -ne 0) { throw "generation failed" }
+# The generator exits non-zero when ANY scenario is rejected - and ~1/3 rejections
+# are NORMAL (message-count gate). So non-zero is not fatal: only abort when it
+# produced (almost) nothing at all.
+$before = @(Get-ChildItem $OutDir -Filter *.json -ErrorAction SilentlyContinue).Count
+node train\dist\train\gen-scenarios.js --n $Scenarios --concurrency 3 --seed $Seed --out $OutDir
+$genExit = $LASTEXITCODE
+$after = @(Get-ChildItem $OutDir -Filter *.json -ErrorAction SilentlyContinue).Count
+Write-Host ("  generation exit={0}, scenarios now={1} (added {2})" -f $genExit, $after, ($after - $before))
+if ($after -eq 0) { throw "generation produced no scenarios (exit $genExit)" }
+if ($genExit -ne 0) { Write-Host "  NOTE: partial rejections are normal; continuing." -ForegroundColor DarkGray }
 
 Write-Host "`n=== [2/3] teacher distillation (same prompt builders as extract.ts) ===" -ForegroundColor Cyan
 node train\dist\train\gen-sft-data.js --dir $OutDir --out $SftOut --max-candidates $MaxCandidates
