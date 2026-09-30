@@ -109,9 +109,17 @@ train\llama.cpp\build\bin\llama-server.exe -m train\models\extract-Q4_K_M.gguf -
 $env:PYTHONPATH="$PWD\train\pylibs-gpu"; python train\extract\04_smoke_gguf.py --n 20
 # 精度验收（eval 考卷：6 剧本 × 7 天，期望全绿）
 pnpm --filter server exec tsx src/pipeline/eval.ts --week
+# 测量"代码侧日期归一化"的增益（默认关闭；开启后对同一批模型输出再用来源消息补/正时间）
+pnpm --filter server exec tsx src/pipeline/eval.ts --dates
 # Jev 阈值重校准（rbt3 本地推理接入后）
 pnpm --filter server exec tsx src/pipeline/jev-calibrate.ts
 ```
+
+> `--dates` 用的是 `src/pipeline/date-normalize.ts`（考卷日期用例 10/10、15 项单测）：
+> `prefer` 策略下，只要事件的**来源消息**能解析出强信号（周X / X月Y号 / 明天后天今晚 / 截止语）
+> 就以代码结果为准，否则保留模型给的值；闲聊里的弱信号（「一点没看」「四点左右」）一律跳过。
+> 它只改 `start_at`/`deadline_at` 两个字段，不碰标题/类型/状态，也不改 prompt——
+> 因此不会让 `PROMPT_VERSION` 变更、既有训练数据不作废。**两条臂用同一批模型输出，可直接对比。**
 
 **llama-server 被墙时的替代**（`train/env/serve_hf.py`，transformers 版 OpenAI 兼容服务器，
 动态批处理 ≤6 请求/批，6 路并发全落在 60s 客户端超时内；**并实现 `response_format=json_object`
