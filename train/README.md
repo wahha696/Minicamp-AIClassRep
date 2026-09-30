@@ -193,6 +193,12 @@ pnpm --filter server exec tsx src/pipeline/eval.ts
 - 客户端 60s 超时 + 6 群并发 = 服务器必须批处理：单请求串行时第 4 个请求起就会超时
   （实测 ConnectionResetError）；**推理服务器与训练不可同时驻留 8GB 显存**（实测训练卡死：
   GPU 利用率掉到 4%，功耗 28W，进度停在同一步）。
+- **长链路用任务计划串起来（本机实测可用）**：跑多轮"训练 → 验收 → 下一轮训练"时，
+  每段都写成 `.cmd`（末尾 `echo EXITCODE=%ERRORLEVEL%` 落进自己的日志），
+  下一段用 `findstr /C:"EXITCODE" <上一段日志>` 轮询等待，再用
+  `schtasks /create /tn <名> /tr "cmd.exe /c <wrapper.cmd>" /sc once /st 23:59 /f` + `/run` 启动。
+  这样会话重置、终端关闭都不会中断；本次 v3→验收→v4→验收 四个阶段就是这么串的。
+  注意：**日志跨轮次会累积**，等待条件必须只看当轮标记（同一文件多轮跑时先删旧日志）。
 - **笔电休眠会静默吞掉训练进度**（实测两次）：`powercfg /change standby-timeout-ac 0` 只管
   空闲超时，**合盖动作**会覆盖它 → 必须另设 `powercfg /setacvalueindex SCHEME_CURRENT
   SUB_BUTTONS LIDACTION 0` + `/setactive`。休眠期间进度条只在恢复后跳一大步（表现为
