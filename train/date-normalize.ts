@@ -11,6 +11,8 @@
 //
 // 运行自测：node train/dist/train/date-normalize.js
 import { fmtShanghai } from '../apps/server/src/pipeline/extract.js';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 const HOUR = 3600_000;
 const DAY = 86400_000;
@@ -37,6 +39,13 @@ export interface Resolved {
   hasTime: boolean;
   /** true = 文本带「之前/前/截止」这类截止语义 */
   isDeadline: boolean;
+  /**
+   * true = 含"日期级"信号（周X / X月Y号 / 明天后天今晚明晚 / 截止语）。
+   * 只有时刻（「四点左右」）或只有泛指的「今天」不算强信号——实测这类在闲聊里大量出现，
+   * 放开会把 chatter 误当事件时间（审计样本：「第三章我一点没看」→ 01:00）。
+   * 落地时建议**只接受 strong 的结果**。
+   */
+  strong: boolean;
 }
 
 /**
@@ -55,6 +64,7 @@ export function resolveWhen(
   let pmContext = false;
   let hour = 0;
   let minute = 0;
+  let strong = false; // 日期级信号：周X / X月Y号 / 明天后天今晚明晚 / 截止语
 
   // ---- 1. 相对日 ----
   const rel = /(大后天|后天|明天|今天|明晚|今晚)/.exec(t);
@@ -63,6 +73,8 @@ export function resolveWhen(
     const sh = new Date(now + 8 * HOUR);
     dayStart = Date.UTC(sh.getUTCFullYear(), sh.getUTCMonth(), sh.getUTCDate() + offset) - 8 * HOUR;
     if (rel[1] === '今晚' || rel[1] === '明晚') pmContext = true;
+    // 「今天」单独出现太泛（闲聊里到处都是），只有带上时刻才算强信号
+    if (rel[1] !== '今天') strong = true;
   }
 
   // ---- 2. 周X / 本周X / 下周X ----
@@ -73,6 +85,7 @@ export function resolveWhen(
       let weekOffset = 0;
       if (/^下{1,2}/.test(wk[1]!)) weekOffset = wk[1]!.startsWith('下下') ? 2 : 1;
       dayStart = base + (weekOffset * 7 + WEEKDAY[wk[2]!]!) * DAY;
+      strong = true;
     }
   }
 
@@ -85,6 +98,7 @@ export function resolveWhen(
       const cand = Date.UTC(year, Number(md[1]) - 1, Number(md[2])) - 8 * HOUR;
       if (cand < now - 30 * DAY) year += 1; // 明显过去的日期按下一年算
       dayStart = Date.UTC(year, Number(md[1]) - 1, Number(md[2])) - 8 * HOUR;
+      strong = true;
     }
   }
 
@@ -115,11 +129,20 @@ export function resolveWhen(
 
   if (dayStart === null && !hasTime) return null;
   const base = dayStart ?? atShanghai(now, 0, 0);
-  const isDeadline = /(之前|以前|前|截止|deadline)/.test(t) || (!hasTime && defaultKind === 'deadline');
+  const hasDeadlineWord = /(之前|以前|前|截止|deadline)/.test(t);
+  if (hasDeadlineWord && dayStart !== null) strong = true;
+  const isDeadline = hasDeadlineWord || (!hasTime && defaultKind === 'deadline');
+  // 兜底时刻：截止语义 → 当天 23:59；「今晚/明晚」这类本身含时段 → 当晚 19:00；其余 → 当天 00:00
+  let fallbackHour = isDeadline ? 23 : 0;
+  let fallbackMinute = isDeadline ? 59 : 0;
+  if (!hasTime && !isDeadline && pmContext) {
+    fallbackHour = 19;
+    fallbackMinute = 0;
+  }
   const at = hasTime
     ? atShanghai(base, hour, minute)
-    : atShanghai(base, isDeadline ? 23 : 0, isDeadline ? 59 : 0);
-  return { at, hasTime, isDeadline };
+    : atShanghai(base, fallbackHour, fallbackMinute);
+  return { at, hasTime, isDeadline, strong };
 }
 
 // ---------------- 落地形态：只填空值的输出补全 ----------------
@@ -147,9 +170,13 @@ const DEADLINE_TYPES = new Set(['assignment', 'announcement', 'other']);
  *
  * 两种策略（`mode`）：
  * - `fill`（保守）：只补 `null`，绝不覆盖模型给出的非空值。适合先上线观察。
- * - `prefer`（推荐用于本考卷）：只要来源消息能解析出时间，就以代码结果为准；
+ * - `prefer`（推荐用于本考卷）：只要来源消息能解析出**强信号**时间，就以代码结果为准；
  *   模型仍负责"识别出这件事"，代码负责"把口语时间换算成时间戳"（手册的 code owns the workflow）。
  *   依据：本模块在考卷全部 10 个日期用例上 10/10，而学生模型在这一维度系统性出错。
+ *
+ * 两种模式都只接受 `strong`（含周X/绝对日期/明天后天今晚/截止语）的解析结果——
+ * 审计发现闲聊里的弱信号（「一点没看」「四点左右」「今天有炸鸡」）会被解析成时间，
+ * 放开会把 chatter 写成事件时间。弱信号直接跳过，宁可留 null 交给人工/后续流程。
  *
  * 不触碰 prompt，因此不会让 PROMPT_VERSION 作废。
  */
@@ -172,7 +199,7 @@ export function completeTimes(
       const m = byId.get(id);
       if (!m) continue;
       const r = resolveWhen(m.text, now, kind);
-      if (!r) continue;
+      if (!r || !r.strong) continue; // 弱信号跳过：宁可留 null，也不把闲聊当成事件时间
       if (current == null) filled++;
       else if (r.at !== current) corrected++;
       e[field] = r.at;
@@ -244,4 +271,63 @@ function main(): void {
   if (pass !== CASES.length) process.exit(1);
 }
 
-if (process.argv[1]?.endsWith('date-normalize.js')) main();
+// ---------------- 误报审计（--audit）：扫全部真实剧本与生成剧本的消息 ----------------
+
+/** 审计用：把一批剧本目录里的消息过一遍 resolveWhen，统计解析率与可疑结果 */
+function audit(): void {
+  const dirs = ['data/mock', 'train/data/scenarios'];
+  const DAY = 86400_000;
+  let total = 0;
+  let resolved = 0;
+  let past = 0;
+  let farFuture = 0;
+  let weak = 0;
+  const samples: string[] = [];
+
+  for (const dir of dirs) {
+    let files: string[] = [];
+    try {
+      files = readdirSync(dir).filter((f) => f.endsWith('.json'));
+    } catch {
+      continue;
+    }
+    for (const f of files) {
+      let obj: { messages?: { text?: string }[] };
+      try {
+        obj = JSON.parse(readFileSync(join(dir, f), 'utf8'));
+      } catch {
+        continue;
+      }
+      const now = Date.now(); // 近似当前的"回放时刻"：审计只关心量级，不追求逐剧本精确
+      for (const m of obj.messages ?? []) {
+        const text = (m.text ?? '').trim();
+        if (!text) continue;
+        total++;
+        const r = resolveWhen(text, now);
+        if (!r) continue;
+        resolved++;
+        if (!r.strong) {
+          weak++;
+          continue; // 弱信号会被 completeTimes 跳过，不计入误报
+        }
+        if (r.at < now - 6 * 3600_000) {
+          past++;
+          if (samples.length < 8) samples.push(`过去 | ${text.slice(0, 34)} → ${fmtShanghai(r.at)}`);
+        } else if (r.at > now + 120 * DAY) {
+          farFuture++;
+          if (samples.length < 16) samples.push(`超远 | ${text.slice(0, 34)} → ${fmtShanghai(r.at)}`);
+        }
+      }
+    }
+  }
+  console.log(`审计：扫描 ${total} 条消息，解析出时间 ${resolved} 条（${((resolved / Math.max(1, total)) * 100).toFixed(1)}%）`);
+  console.log(`  · 其中弱信号 ${weak} 条（${((weak / Math.max(1, resolved)) * 100).toFixed(1)}%）→ completeTimes 会跳过，不写进事件`);
+  console.log(`  · 强信号里解析成「过去」${past} 条（${((past / Math.max(1, resolved - weak)) * 100).toFixed(1)}%）— prefer 模式下会写错，需人工看`);
+  console.log(`  · 强信号里解析成「120 天以后」${farFuture} 条（${((farFuture / Math.max(1, resolved - weak)) * 100).toFixed(1)}%）`);
+  for (const s of samples) console.log(`    ${s}`);
+}
+
+if (process.argv[1]?.endsWith('date-normalize.js')) {
+  if (process.argv.includes('--audit')) audit();
+  else main();
+}
