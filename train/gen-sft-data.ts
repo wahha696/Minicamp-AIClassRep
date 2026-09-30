@@ -73,6 +73,8 @@ interface SftRow {
     scenario: string;
     template: string;
     batch: number;
+    /** 回放时刻偏移档位（0 = 旧行为，键格式与历史数据一致） */
+    now_offset?: number;
     prompt_version: number;
     replay_now: number;
     teacher_model: string;
@@ -109,6 +111,9 @@ const LIMIT = numArg('limit', 0);
 const CONC = Math.max(1, Math.min(8, numArg('concurrency', 3)));
 const MAX_CAND = Math.max(3, Math.min(30, numArg('max-candidates', 30)));
 const MIN_CONF = Math.min(1, Math.max(0.5, Number(flagOf('min-confidence')) || 0.8));
+/** 同一批剧本换几个回放时刻各蒸一遍（扩样本的省钱档位；1 = 旧行为，键格式不变） */
+const NOW_OFFSETS = Math.max(1, Math.min(6, numArg('now-offsets', 1)));
+const OFFSET_DAYS = Math.max(1, numArg('offset-days', 7));
 const OUT_FILE = flagOf('out') ?? 'sft-v1.jsonl';
 const REJECT_FILE = `${OUT_FILE.replace(/\.jsonl$/, '')}-rejects.jsonl`;
 /** 剧本目录可用 --dir 覆盖（冒烟测试用）；默认 train/data/scenarios/，绝不指向 data/mock/ */
@@ -122,9 +127,15 @@ async function main(): Promise<void> {
   }
 
   // 1) 展开全部训练任务
+  // --now-offsets N：同一批剧本换 N 个"回放时刻"各蒸一遍（默认 1 = 旧行为）。
+  // 这是最省钱的扩样本方式：剧本生成按输出计费（¥8/百万），换 now 只花输入侧且命中缓存（¥0.5/百万）。
   const jobs: BatchJob[] = [];
   for (const s of scenarios) {
-    jobs.push(...planScenario(s.json, s.name, replayNowFor(s.name), MAX_CAND));
+    const base = replayNowFor(s.name);
+    for (let k = 0; k < NOW_OFFSETS; k++) {
+      const planned = planScenario(s.json, s.name, base + k * OFFSET_DAYS * 86400_000, MAX_CAND);
+      for (const j of planned) jobs.push(k === 0 ? j : { ...j, nowOffset: k });
+    }
   }
   const tokList = jobs.map((j) => estTokens(j.pair.system + j.pair.user)).sort((a, b) => a - b);
   const negCount = jobs.filter((j) => j.negative).length;
@@ -160,7 +171,12 @@ async function main(): Promise<void> {
   const teacher = teacherConfig();
   console.log(`教师：${teacher.model} @ ${teacher.baseURL} | 并发 ${CONC} | confidence ≥ ${MIN_CONF}`);
 
-  const writer = new JsonlWriter<SftRow>(join(DATA_DIR, OUT_FILE), (r) => `${r.meta.scenario}#${r.meta.batch}`);
+  // 去重键：offset 0 保持旧格式（scenario#batch），否则追加 @k —— 这样已有的已付费数据
+  // 仍会被增量跳过，只有新偏移量才会真正调用教师。
+  const writer = new JsonlWriter<SftRow>(
+    join(DATA_DIR, OUT_FILE),
+    (r) => (r.meta.now_offset ? `${r.meta.scenario}#${r.meta.batch}@${r.meta.now_offset}` : `${r.meta.scenario}#${r.meta.batch}`),
+  );
   const rejects = new JsonlWriter<RejectRow>(
     join(DATA_DIR, REJECT_FILE),
     (r) => `${r.scenario}#${r.batch}:${r.reason.slice(0, 40)}`,
@@ -216,6 +232,7 @@ async function main(): Promise<void> {
             scenario: job.scenario,
             template: job.template,
             batch: job.batchIndex,
+            now_offset: job.nowOffset ?? 0,
             prompt_version: job.pair.prompt_version,
             replay_now: job.replayNow,
             teacher_model: res.model,

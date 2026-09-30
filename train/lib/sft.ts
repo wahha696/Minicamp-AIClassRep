@@ -16,6 +16,8 @@ export interface BatchJob {
   template: string;
   /** 剧本内批次序号（断点续跑的去重 key 用） */
   batchIndex: number;
+  /** 回放时刻偏移档位（同一剧本换 now 再蒸时 >0；0/undefined = 旧行为，键格式不变） */
+  nowOffset?: number;
   replayNow: number;
   pair: PromptPair;
   /** 纯负样本剧本（期望 {"events":[]}） */
