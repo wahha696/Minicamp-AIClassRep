@@ -197,13 +197,6 @@ function calendar(now: number, earliest = now): string {
   }).join('\n');
 }
 
-/**
- * prompt 版本号（训练数据管道铁律，见 docs/本地训练小模型操作手册.md §2.2）：
- * buildSystemPrompt / buildUserPrompt 的输出文案只要有一个字节的变化就 +1，
- * 旧版本号产出的训练/导出数据随之作废。数据文件的 meta.prompt_version 与这里对不上 = 不能进训练集。
- */
-export const PROMPT_VERSION = 1;
-
 export function buildSystemPrompt(now: number, earliest = now): string {
   return `你是大学班级群里的「AI 课代表」，负责从群消息里找出需要同学行动或到场的事项。
 当前时间：${fmtShanghai(now)}（Asia/Shanghai）。

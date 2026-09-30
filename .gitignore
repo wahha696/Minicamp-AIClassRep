@@ -61,9 +61,3 @@ classrep-fastjudge/**/*.cache
 /classrep-fastjudge/reports/
 skills-lock.json
 docs/architecture/
-
-# unsloth JIT cache
-unsloth_compiled_cache/
-
-# 服务端运行时产物（jev-calibrate / eval 跑批会写日志与缓存）
-/apps/server/data/

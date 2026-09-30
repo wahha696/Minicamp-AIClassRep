@@ -10,7 +10,6 @@ import { buildDemoMessages, listScenarios } from '../ingest/demo.js';
 import { ingestMessages } from '../ingest/index.js';
 import type { EventStatus, EventType, Message } from '../types.js';
 import { fmtShanghai, parseTime } from './extract.js';
-import { completeTimes } from './date-normalize.js';
 import { runPipelineNow } from './index.js';
 import { llmStats } from './stats.js';
 
@@ -160,36 +159,12 @@ async function runOnce(now: number, names: string[]): Promise<Map<string, string
          FROM events WHERE group_id = ? ORDER BY id`,
       )
       .all(msgs[0]!.group_id) as unknown as Row[];
-
-    // --dates：评测"代码侧日期归一化"能救回多少（默认关闭，行为与原来完全一致）。
-    // 只用来源消息补/正时间字段，不改标题/类型/状态，也不改模型输出本身——
-    // 因此同一批模型输出可以同时给出"模型裸分"和"模型+代码"两条臂的对比。
-    let graded = rows;
-    if (useDates) {
-      const srcStmt = db.prepare('SELECT message_id FROM event_sources WHERE event_id = ?');
-      const input = rows.map((r) => ({
-        id: r.id,
-        type: r.type,
-        start_at: r.start_at,
-        deadline_at: r.deadline_at,
-        source_message_ids: (srcStmt.all(r.id) as unknown as { message_id: string }[]).map((x) => x.message_id),
-      }));
-      const texts = msgs.map((m) => ({ message_id: m.message_id, text: m.text }));
-      const { events, filled, corrected } = completeTimes(input, texts, now, 'prefer');
-      graded = rows.map((r, i) => ({
-        ...r,
-        start_at: events[i]!.start_at ?? null,
-        deadline_at: events[i]!.deadline_at ?? null,
-      }));
-      console.log(`     [dates] 按来源消息补全 ${filled} 处 / 校正 ${corrected} 处`);
-    }
-
-    const problems = check(name, msgs, graded);
+    const problems = check(name, msgs, rows);
     out.set(name, problems);
     console.log(`${problems.length ? '❌' : '✅'} ${name}`);
     for (const p of problems) console.log(`     ${p}`);
     if (problems.length || verbose) {
-      for (const r of graded) {
+      for (const r of rows) {
         console.log(
           `     · #${r.id} ${r.status} v${r.version} [${r.type}] ${r.title} | 开始 ${show(r.start_at)} | 截止 ${show(r.deadline_at)} | ${r.location ?? '-'} | 要求 ${r.action_required ?? '-'} | conf ${r.confidence}`,
         );
@@ -203,7 +178,6 @@ async function runOnce(now: number, names: string[]): Promise<Map<string, string
 const args = process.argv.slice(2);
 const flag = (f: string) => args.includes(f);
 const verbose = flag('-v');
-const useDates = flag('--dates'); // 评测"代码侧日期归一化"的增益（默认关闭）
 const nowIdx = args.indexOf('--now');
 const base = nowIdx >= 0 ? parseTime(args[nowIdx + 1] ?? '') : realNow();
 if (Number.isNaN(base)) throw new Error('--now 的格式：2026-10-02T14:00');
