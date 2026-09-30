@@ -3,6 +3,36 @@
 > 按《本地训练小模型操作手册》在本机（RTX 5070 Laptop 8GB / Windows / 原生）完成的两个模型交付。
 > 全部数字为本机实测，非估算。
 
+## 执行摘要（先看这一节）
+
+**交付了什么**：两套可本地运行的模型 + 一条可复现的数据/训练/验收流水线，以及两份写给队友的接入文档。
+TypeSafe Key 依赖在运行时已由本地快判替代（产品决策 `FASTJUDGE_MODE=local`）。
+
+**能用的**：
+- **快判位**：队友的 `classrep-fastjudge`（jieba+TF-IDF+CalibratedLR，4.9MB，2ms/条）——
+  **本工作区的 rbt3-ONNX 在同口径实测中落后于它**（召回 68~80% vs 88~92%），
+  因此**不建议替换、也不建议做级联**（级联救回 0 条、反丢 5 条）。详见 `ALIGNMENT-fastjudge.md`。
+- **验收门**：`eval.ts`（教师基线 6/6）与 `jev-calibrate`（已能在无 TypeSafe key 的本地模式下运行，
+  支持 `--dump` 存档做同口径横向对比）。
+- **流水线**：教师数据制备（prompt 与 `extract.ts` 逐字节同源 + `PROMPT_VERSION` 闸门）、
+  QLoRA 训练（bnb 4bit，8GB 显存配方）、bnb→bf16 反量化、GGUF 导出、本地 OpenAI 兼容服务器、一键验收脚本。
+- **事件提取模型**：schema 正确、JSON 首轮合法率 15/15（掩码修复 + 服务端 JSON 约束后）——
+  但**未通过 eval 的六剧本全绿门**（见下）。
+
+**不能用的（诚实结论）**：
+- 事件提取模型的**日期/时间推理**仍不达标：考卷 0/6，失败集中在"下周三"这类相对日期换算
+  与流内更新合并。根因不是链路（教师同卷 6/6），而是**训练数据与真实分布有三处系统性偏差**：
+  噪声 20% vs 真实 78%、字/消息 18 vs 5.9、含时间消息 27% vs 6%。
+  生成器已按实测改好（改后探针四项指标全部对齐），但**尚未用新数据重训**。
+- 因此当前交付版提取模型应视为**可用但未达验收**：适合小规模试用，不适合替掉教师。
+
+**下一步（一条命令，成本先报价）**：
+```powershell
+powershell -File train\rebuild-realistic-data.ps1 -Scenarios 800            # 只打印计划与花费
+powershell -File train\rebuild-realistic-data.ps1 -Scenarios 800 -Yes -Train # 生成+蒸馏+训练（约 ¥18 / 4h）
+```
+详见 `BATCH-SHAPE.md`（错配量化与修法）与 `COST.md`（成本结构与省钱杠杆）。
+
 ## 交付物一览
 
 | # | 交付物 | 路径 | 体积 | 状态 |
