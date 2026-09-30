@@ -9,6 +9,11 @@ import { groupCourseName, occurrences } from '../timetable.js';
 import type { EventType, Level, Message } from '../types.js';
 import { memoryEnabled, preferenceRules } from './preferences.js';
 import { llmStats } from './stats.js';
+import { env } from '../env.js';
+import {
+  localExtractReady,
+  requestLocalExtract,
+} from './extract-local.js';
 
 export interface ExtractedEvent {
   action: 'create' | 'update' | 'cancel';
@@ -349,11 +354,13 @@ export async function extractEvents(
   status: ExtractStatus = { llmFailed: false },
 ): Promise<ExtractedEvent[]> {
   if (input.candidates.length === 0) return [];
-  if (!client && !getLlmConfig().apiKey) {
+  const useLocal = env.EXTRACT_MODE === 'local';
+  if (!useLocal && !client && !getLlmConfig().apiKey) {
     llmStats.llm = 'unconfigured';
     return [];
   }
-  const llm = client ?? getClient();
+  // local 模式不强制 LLM key；worker 不可用时标记失败留给调度重试
+  const llm = useLocal ? (client as LlmClient | undefined) : (client ?? getClient());
   const r = await extractOnce(input, llm, status);
   if (r !== 'truncated') return r;
   // 输出被 max_tokens 截断（一批事项太多，历史补齐时常见）：对半拆开各跑一次，而不是整批丢掉
@@ -376,9 +383,18 @@ export async function extractEvents(
 /** 调一次（格式不合法时带着错误再试一次）。输出被截断时返回 'truncated'。 */
 async function extractOnce(
   input: ExtractInput,
-  llm: LlmClient,
+  llm: LlmClient | undefined,
   status: ExtractStatus,
 ): Promise<ExtractedEvent[] | 'truncated'> {
+  // 本地 v4-DFG：prompt/postprocess 在 Python；这里只做协议 + parseExtraction
+  if (env.EXTRACT_MODE === 'local') {
+    return extractOnceLocal(input, status);
+  }
+  if (!llm) {
+    status.llmFailed = true;
+    llmStats.llm = 'unconfigured';
+    return [];
+  }
   const validIds = new Set(input.candidates.map((m) => m.message_id));
   const prefs = preferenceSection();
   const earliest = input.candidates[0]?.sent_at ?? input.now;
@@ -422,5 +438,43 @@ async function extractOnce(
       { role: 'user', content: `上面的输出不合法：${r.error}\n请严格按要求的 JSON 格式重新输出。` },
     );
   }
+  return [];
+}
+
+/** EXTRACT_MODE=local：走常驻 infer_serve，不使用本文件的 TypeScript prompt。 */
+async function extractOnceLocal(
+  input: ExtractInput,
+  status: ExtractStatus,
+): Promise<ExtractedEvent[] | 'truncated'> {
+  const validIds = new Set(input.candidates.map((m) => m.message_id));
+  if (!localExtractReady()) {
+    status.llmFailed = true;
+    llmStats.llm = 'error';
+    llmStats.failed++;
+    console.warn('[extract-local] 未就绪（缺 EXTRACTOR_ROOT/adapter 或退避中）');
+    return [];
+  }
+  llmStats.called++;
+  const t0 = Date.now();
+  const result = await requestLocalExtract(input);
+  llmStats.lastMs = Date.now() - t0;
+  if (!result.json) {
+    status.llmFailed = true;
+    llmStats.llm = 'error';
+    llmStats.failed++;
+    console.warn(`[extract-local] 调用失败：${result.error || 'null_json'}`);
+    return [];
+  }
+  if (result.truncated) {
+    llmStats.llm = 'ok';
+    return 'truncated';
+  }
+  const r = parseExtraction(result.json, validIds);
+  if (r.ok) {
+    llmStats.llm = 'ok';
+    return r.events;
+  }
+  console.warn(`[extract-local] 输出不合法：${r.error}`);
+  llmStats.llm = 'ok';
   return [];
 }
