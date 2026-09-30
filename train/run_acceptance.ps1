@@ -9,7 +9,10 @@ param(
     [string]$Model = "qwen3-1.7b-sft-v2",
     [int]$Port = 8080,
     [switch]$SkipGguf,
-    [switch]$Week
+    [switch]$Week,
+    # Also run a second eval pass with the code-side date normalizer enabled
+    # (eval.ts --dates) so the report shows both arms from the same model output.
+    [switch]$Dates
 )
 
 $ErrorActionPreference = "Stop"
@@ -39,17 +42,35 @@ if (-not $SkipGguf) {
 
 Write-Host "=== [3/4] start local OpenAI-compatible server on port $Port" -ForegroundColor Cyan
 Write-Host "  NOTE: stop any training first - 8GB VRAM cannot hold both." -ForegroundColor Yellow
+# Server stdout/stderr go to files: without this, a load failure is invisible
+# (the process dies in its own console) and the eval ends as a deceptive llm=error 0/6.
+# Measured 2026-09-30: exactly that happened, and the false negative looked like a model failure.
+$srvOut = Join-Path $root "train\artifacts\server-$Model.log"
+$srvErr = Join-Path $root "train\artifacts\server-$Model.err"
 $srv = Start-Process -FilePath "python" -ArgumentList @(
     "train\env\serve_hf.py", "--model", $bf16, "--port", "$Port"
-) -PassThru -WindowStyle Minimized
-# bf16 3.4GB 模型加载 + torch 首次导入实测 20~70s；给足余量再探活。
-# 探活失败不影响流程，但若服务器还没起来，eval 会以连接失败收场、得到假的 llm=error。
-Start-Sleep -Seconds 75
-try {
-    $probe = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/v1/models" -TimeoutSec 20
-    Write-Host "  server up: $($probe.data[0].id)"
-} catch {
-    Write-Host "  server probe failed: $($_.Exception.Message)" -ForegroundColor Red
+) -PassThru -WindowStyle Hidden -RedirectStandardOutput $srvOut -RedirectStandardError $srvErr
+Write-Host "  server logs: $srvOut / $srvErr" -ForegroundColor DarkGray
+# bf16 3.4GB load + torch import measured 20~70s; probe with retries instead of one fixed sleep,
+# and fail loudly if the server never comes up (a connection error must not be graded as 0/6).
+$up = $false
+for ($i = 1; $i -le 15; $i++) {
+    Start-Sleep -Seconds 10
+    if ($srv.HasExited) {
+        Write-Host "  server exited early (code $($srv.ExitCode)) - see $srvErr" -ForegroundColor Red
+        break
+    }
+    try {
+        $probe = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/v1/models" -TimeoutSec 10
+        Write-Host "  server up after $($i * 10)s: $($probe.data[0].id)" -ForegroundColor Green
+        $up = $true
+        break
+    } catch { }
+}
+if (-not $up) {
+    Write-Host "  SERVER NEVER CAME UP - aborting before eval (a connection failure is not a model result)" -ForegroundColor Red
+    Stop-Process -Id $srv.Id -Force -ErrorAction SilentlyContinue
+    exit 3
 }
 
 Write-Host "=== [4/4] eval.ts (zero-code acceptance via .env)" -ForegroundColor Cyan
@@ -58,6 +79,14 @@ $evalArgs = @("--filter", "server", "exec", "tsx", "src/pipeline/eval.ts")
 if ($Week) { $evalArgs += "--week" }
 & pnpm.cmd @evalArgs
 $code = $LASTEXITCODE
+
+if ($Dates) {
+    Write-Host "=== [4b/4] eval.ts --dates (same model output, code-side date normalization on)" -ForegroundColor Cyan
+    $evalArgs2 = @("--filter", "server", "exec", "tsx", "src/pipeline/eval.ts", "--dates")
+    if ($Week) { $evalArgs2 += "--week" }
+    & pnpm.cmd @evalArgs2
+    Write-Host "  (dates arm exit $LASTEXITCODE - reported for comparison, not part of the pass/fail gate)" -ForegroundColor DarkGray
+}
 
 Write-Host "=== stopping server (pid $($srv.Id))" -ForegroundColor DarkGray
 Stop-Process -Id $srv.Id -Force -ErrorAction SilentlyContinue
