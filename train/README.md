@@ -124,6 +124,11 @@ python train\env\serve_hf.py --model train\models\qwen3-1.7b-sft-bf16 --port 808
 pnpm --filter server exec tsx src/pipeline/eval.ts
 ```
 
+> ⚠️ **验收跑完记得切回教师端点再跑数据脚本**：`.env` 指向本地端点时，`gen-sft-data.js` /
+> `gen-scenarios.js` 会直接连接失败（也是防误花钱的天然闸门）。要调教师就显式覆盖环境变量：
+> `$env:LLM_BASE_URL='https://api.deepseek.com/v1'`（真实环境变量优先于 `.env`）。
+> 成本自查与省钱杠杆见 `train/COST.md`。
+
 > **QLoRA 导出实录（bnb 4bit 双坑）**：
 > 1. `merge_and_unload()` 后模型仍是 bnb 4bit 格式（safetensors 含 U8 packed + absmax，
 >    转换器无法映射 `absmax` 张量）→ `train/extract/03a_dequantize.py` 把 196 层
