@@ -300,6 +300,23 @@ async function main(): Promise<void> {
     plan.push(chosen);
   }
 
+  // --dryrun：只打印计划，不调用教师 API（生成按输出计费，误跑一次就花钱）。
+  // 成本按本机实测单价旁注，便于跑前决策。注意区分两个口径：
+  //   · 本脚本的 --n = 调用次数（教师可能产出不合闸门的剧本，会重试/算失败）
+  //   · 想要 N 个"可用"剧本，大约要 N/0.67 次调用
+  if (args.includes('--dryrun')) {
+    const perCall = 0.011; // 元/次（实测：15 次 ¥0.16，缓存命中 ~63%）
+    const yieldRate = 0.67; // 消息数闸门 32~80 下的实测产出率
+    console.log(
+      `\n[dryrun] 未调用教师 API。\n` +
+        `  调用 ${plan.length} 次 ≈ ¥${(plan.length * perCall).toFixed(1)}；` +
+        `按产出率 ${(yieldRate * 100).toFixed(0)}% 预计得到 ${Math.round(plan.length * yieldRate)} 个可用剧本。\n` +
+        `  反过来说：想要 ${plan.length} 个可用剧本，需要约 ${Math.ceil(plan.length / yieldRate)} 次调用 ≈ ¥${((plan.length / yieldRate) * perCall).toFixed(1)}。`,
+    );
+    console.log(`[dryrun] 去掉 --dryrun 即真正执行；成本自查见 train/COST.md`);
+    return;
+  }
+
   mkdirSync(OUT_DIR, { recursive: true });
   console.log(
     `生成 ${plan.length} 个剧本 → ${OUT_DIR}` +
