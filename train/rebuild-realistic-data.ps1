@@ -12,8 +12,9 @@
 # Measured yield is about 67% (message-count gate 32..80), so 800 calls -> ~536
 # usable scenarios -> ~1,300 training pairs.
 #
-# Cost (measured on this machine, deepseek-chat, cache hit ~63%):
-#   generation  RMB 0.011 per call
+# Cost (measured on this machine, deepseek-chat):
+#   generation  RMB 0.016 per call (cache hit ~64%; ~2,000 output tokens per call,
+#               and OUTPUT dominates: ~92% of generation cost)
 #   distillation RMB 0.0016 per pair
 # Run with -Yes to actually spend money; otherwise it only prints the plan.
 #
@@ -39,7 +40,7 @@ $env:PYTHONPATH = Join-Path $root "train\pylibs-gpu"
 
 $usable = [math]::Round($Scenarios * 0.67)
 $pairs = [math]::Round($Scenarios * 0.67 * 2.4)
-$genCost = [math]::Round($Scenarios * 0.011, 1)
+$genCost = [math]::Round($Scenarios * 0.016, 1)
 $distCost = [math]::Round($pairs * 0.0016, 1)
 $trainHours = [math]::Round($pairs / 16 * 105 / 3600, 1)
 
@@ -47,7 +48,7 @@ Write-Host "=== plan ===" -ForegroundColor Cyan
 Write-Host ("  generate  : {0} teacher calls -> ~{1} usable scenarios in {2}   (est ~RMB {3})" -f $Scenarios, $usable, $OutDir, $genCost)
 Write-Host ("  distill   : -> train\data\{0}   (~{1} training pairs, est ~RMB {2})" -f $SftOut, $pairs, $distCost)
 Write-Host ("  train     : {0}  (1 epoch ~ {1}h on RTX 5070 Laptop)" -f $ModelDir, $trainHours)
-Write-Host "  measured units: generation RMB 0.011/call (cache hit ~63%), yield ~67% at a 32-80 message gate" -ForegroundColor DarkGray
+Write-Host "  measured units: generation RMB 0.016/call (cache hit ~64%, output-dominated), yield ~67% at a 32-80 message gate" -ForegroundColor DarkGray
 Write-Host "                  distillation RMB 0.0016/pair (cache hit ~65%), ~2.4 pairs per usable scenario" -ForegroundColor DarkGray
 
 if (-not $Yes) {
