@@ -82,6 +82,13 @@ export default function Demo() {
 
   const cancelReset = useCallback(() => setConfirmReset(false), []);
   const h = health.data;
+  // 快判模式展示：jev/local/dual，未启用时沿用旧文案
+  const jevName = h?.jev_mode === 'local' ? '本地快判' : h?.jev_mode === 'dual' ? '双路快判' : '快判';
+  const jevHint = h?.jev_mode === 'local'
+    ? '本地模型判断为无日程信息的消息'
+    : h?.jev_mode === 'dual'
+      ? '双路打分后按路由结果判断为无日程信息的消息'
+      : '本次启动后快判判断为无日程信息的消息';
 
   return (
     <section className="space-y-6">
@@ -103,10 +110,30 @@ export default function Demo() {
       {/* 统计卡（FR-3.2） */}
       <div className="grid grid-cols-2 gap-3">
         <Stat label="累计过滤" value={h?.filtered_count} unit="条" hint="规则与 Jev 合计" />
-        <Stat label="Jev 快判过滤" value={h?.jev_filtered_count} unit="条" hint="本次启动后 Jev 判断为无日程信息的消息" />
-        <Stat label="Jev 累计调用" value={h?.jev_called_count} unit="次" hint="每批候选消息一起判断" />
+        <Stat label={`${jevName}过滤`} value={h?.jev_filtered_count} unit="条" hint={jevHint} />
+        <Stat label="快判累计调用" value={h?.jev_called_count} unit="次" hint="每批候选消息一起判断" />
         <Stat label="AI 累计调用" value={h?.llm_called_count} unit="次" hint="快判保留的消息交给 AI 提取日程" />
       </div>
+
+      {/* 双路对照：DEMO_MODE 下 /health 附带最近批的两侧分数摘要（无原文） */}
+      {h?.dual_score_log && h.dual_score_log.length > 0 && (
+        <Card title="双路快判对照">
+          <ul className="divide-y divide-slate-100">
+            {h.dual_score_log.map((e) => (
+              <li key={e.at} className="flex flex-wrap items-center gap-x-4 gap-y-1 py-2 text-xs text-slate-600">
+                <span className="tabular-nums text-slate-400">{new Date(e.at).toLocaleTimeString()}</span>
+                <span className="max-w-32 truncate">{e.groupName}</span>
+                <span className="text-slate-400">{e.n} 条</span>
+                <span>远端 <ScoreList s={e.remote} /></span>
+                <span>本地 <ScoreList s={e.local} /></span>
+                <span className="rounded bg-slate-100 px-1.5 py-0.5 font-medium text-slate-700">
+                  路由={e.routeBackend === 'local' ? '本地' : '远端'}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
 
       <Card title="回放剧本">
         {scenarios.error && !scenarios.data && <p className="text-sm text-rose-600">{scenarios.error.message}</p>}
@@ -204,6 +231,13 @@ export default function Demo() {
       </ConfirmDialog>
     </section>
   );
+}
+
+/** 一侧后端的分数摘要：null 显示「—」，超过 4 个截断 */
+function ScoreList({ s }: { s: number[] | null }) {
+  if (!s) return <span className="text-slate-400">—</span>;
+  const head = s.slice(0, 4).map((x) => x.toFixed(2)).join(' ');
+  return <span className="tabular-nums">{head}{s.length > 4 ? ' …' : ''}</span>;
 }
 
 function Card({ title, children }: { title: string; children: ReactNode }) {

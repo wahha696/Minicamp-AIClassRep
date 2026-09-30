@@ -138,6 +138,9 @@ export function parseExtraction(
     level: ev.level as Level | null,
     source_message_ids: [...new Set(ev.source_message_ids)].filter((id) => validIds.has(id)),
   }));
+  if (events.some((event) => event.source_message_ids.length === 0)) {
+    return { ok: false, error: '每个事件必须至少引用一条本批次的有效 source_message_ids' };
+  }
   return { ok: true, events };
 }
 

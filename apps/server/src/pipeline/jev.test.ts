@@ -9,12 +9,14 @@ const messages: Message[] = [
   { message_id: '2', group_id: 'g', group_name: '课程群', sender_name: '同学', text: '今天的奶茶很好喝', sent_at: 2 },
 ];
 
-const original = { enabled: env.ENABLE_JEV, key: env.TYPESAFE_API_KEY, model: env.JEV_MODEL };
+const original = { enabled: env.ENABLE_JEV, key: env.TYPESAFE_API_KEY, model: env.JEV_MODEL, mode: env.FASTJUDGE_MODE, route: env.FASTJUDGE_ROUTE };
 
 beforeEach(() => {
   env.ENABLE_JEV = true;
   env.TYPESAFE_API_KEY = 'test-key';
   env.JEV_MODEL = 'jev-latest';
+  env.FASTJUDGE_MODE = 'jev';
+  env.FASTJUDGE_ROUTE = 'jev';
   jevStats.state = 'ok';
   resetJevBackoff();
 });
@@ -23,6 +25,8 @@ afterEach(() => {
   env.ENABLE_JEV = original.enabled;
   env.TYPESAFE_API_KEY = original.key;
   env.JEV_MODEL = original.model;
+  env.FASTJUDGE_MODE = original.mode;
+  env.FASTJUDGE_ROUTE = original.route;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });

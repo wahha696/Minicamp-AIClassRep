@@ -9,13 +9,16 @@ import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { env } from './env.js';
 import { db } from './db/index.js';
-import { initAccounts } from './accounts.js';
+import { accountDataState, initAccounts } from './accounts.js';
 import { startNapcat, stopNapcat } from './napcat/index.js';
 import { getConnectStatus } from './napcat/state.js';
 import { getPipelineStats, startScheduler } from './pipeline/index.js';
+import { getDualScoreLog } from './pipeline/jev.js';
+import { ensureFastjudgeRuntime, getFastjudgeRoot, localJevAvailable, stopLocalWorker } from './pipeline/jev-local.js';
 import { startCleanupJob } from './jobs/cleanup.js';
 import { accessGuard } from './lan-guard.js';
 import { currentLanToken, lanEnabledAtBoot } from './lan-settings.js';
+import { accountMutationGuard } from './account-request-guard.js';
 import { installCrashHandlers } from './crash-log.js';
 import { trustSystemCertificates } from './system-ca.js';
 import { registerBusinessRoutes } from './routes/business.js';
@@ -47,11 +50,14 @@ const app = new Hono();
 // 局域网只读中间件：非 loopback 且方法不是 GET/HEAD → 403。
 // 来源 IP 取不到时按「非本机」处理（宁可只读，也不放行写操作）。
 app.use('*', accessGuard({ lanToken: currentLanToken }));
+app.use('*', accountMutationGuard());
 
 app.get('/health', (c) => {
+  const accountReady = accountDataState() === 'ready';
   let dbState: HealthDTO['db'] = 'ok';
   let pending = 0;
   try {
+    if (!accountReady) throw new Error('account database unavailable');
     db.prepare('SELECT 1').get();
     // 待整理 = 未处理且未被过滤的消息，只算启用的群（群行不存在按启用算）
     pending = (
@@ -66,7 +72,8 @@ app.get('/health', (c) => {
   } catch {
     dbState = 'error';
   }
-  const stats = getPipelineStats();
+  // 恢复入口无需 epoch，但切换/挂库失败时绝不能从仍挂着的旧账号库或内存统计泄露聚合信息。
+  const stats = getPipelineStats(accountReady);
   const qq = getConnectStatus().state;
   const body: HealthDTO = {
     status: dbState === 'ok' && qq === 'online' && stats.llm !== 'error' ? 'ok' : 'degraded',
@@ -74,6 +81,9 @@ app.get('/health', (c) => {
     qq,
     llm: stats.llm,
     jev: stats.jev,
+    jev_mode: stats.jev_mode,
+    jev_route: stats.jev_route,
+    jev_local: stats.jev_local,
     filtered_count: stats.filtered_count,
     jev_filtered_count: stats.jev_filtered_count,
     jev_called_count: stats.jev_called_count,
@@ -81,6 +91,10 @@ app.get('/health', (c) => {
     uptime: Math.round((Date.now() - STARTED_AT) / 1000),
     pending,
   };
+  // DEMO + 账号就绪时附带 dual 批摘要（无原文）；非 DEMO / 未就绪不暴露
+  if (env.DEMO_MODE && accountReady) {
+    body.dual_score_log = getDualScoreLog(10);
+  }
   return c.json(body);
 });
 
@@ -190,6 +204,13 @@ await initAccounts();
 const port = await listenWithFallback();
 listenPort = port;
 console.log(`ClassRep 已启动：http://localhost:${port}${LISTEN_LAN ? '（已开启局域网只读访问）' : ''}`);
+if (env.FASTJUDGE_MODE !== 'jev') {
+  const fjRoot = getFastjudgeRoot();
+  console.log(`本地快判：${!fjRoot
+    ? '未配置（把 classrep-fastjudge 放到项目根目录即自动启用）'
+    : localJevAvailable() ? `就绪（${fjRoot}）` : `已找到 ${fjRoot}，但模型文件缺失`}`);
+  ensureFastjudgeRuntime(); // 模型在、python 环境缺时后台供给（克隆版开箱即用）
+}
 
 startScheduler();
 await startNapcat();
@@ -206,6 +227,11 @@ let stopping = false;
 function shutdown(): void {
   if (stopping) return;
   stopping = true;
+  try {
+    stopLocalWorker(); // R1：常驻快判子进程随主进程回收
+  } catch {
+    // 退出路径上不再抛
+  }
   try {
     stopNapcat();
   } catch {

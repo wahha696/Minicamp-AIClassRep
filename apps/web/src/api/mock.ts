@@ -4,6 +4,7 @@
 //   localStorage.mockConnectState = 'waiting_qr'   // 任一 ConnectState，默认 online
 //   localStorage.mockFirstRun = '1'                // 模拟首次使用（守卫拦到 /connect）
 import type { Api } from './client';
+import { normalizeCourses, reconcileCourses, type TimetableVersion } from '../../../../shared/timetable';
 import { ApiError } from './error';
 import { isTodo } from '../lib/todo';
 import type {
@@ -15,6 +16,8 @@ import type {
   CourseDTO,
   EventDetailDTO,
   EventDTO,
+  EventEditableField,
+  EventProposalDTO,
   EventStatus,
   GroupDTO,
   HealthDTO,
@@ -66,6 +69,7 @@ const groups: (Omit<GroupDTO, 'event_count'>)[] = [
 type MockEvent = Omit<EventDTO, 'group_name'> & {
   sources: SourceMessageDTO[];
   history: HistoryDTO[];
+  pending_proposals: EventProposalDTO[];
 };
 
 function makeEvent(
@@ -83,11 +87,13 @@ function makeEvent(
     confidence: 0.9,
     level: 2,
     level_locked: false,
+    manual_locked_fields: [],
     version: 1,
     created_at: created,
     updated_at: created,
     sources: [],
     history: [],
+    pending_proposals: [],
     ...e,
   };
 }
@@ -195,6 +201,29 @@ let events: MockEvent[] = [
     status: 'pending_confirm',
     confidence: 0.55,
     level: 1,
+    sources: [
+      {
+        message_id: 'demo-club-9',
+        sender_name: '社长',
+        text: '招新宣讲可能改到周日下午七点，在学生活动中心 305',
+        sent_at: bootAt - 10 * MIN,
+      },
+    ],
+    pending_proposals: [
+      {
+        id: 501,
+        kind: 'update',
+        reason: 'low_confidence',
+        changes: {
+          start_at: { from: at(3, 18, 30), to: at(4, 19) },
+          location: { from: '学生活动中心 201', to: '学生活动中心 305' },
+        },
+        source_message_ids: ['demo-club-9'],
+        confidence: 0.55,
+        base_version: 1,
+        created_at: bootAt - 10 * MIN,
+      },
+    ],
   }),
   makeEvent({
     id: 6,
@@ -295,6 +324,14 @@ const mockTimetable: TimetableDTO = {
   ],
 };
 
+mockTimetable.courses=normalizeCourses(mockTimetable.courses);
+mockTimetable.revision=0;
+const timetableHistory:TimetableVersion[]=[];
+let timetableVersionId=0;
+function snapshotTimetable(reason:string) {
+  timetableHistory.unshift({id:++timetableVersionId,created_at:Date.now(),reason,timetable:structuredClone(mockTimetable)});
+  timetableHistory.splice(20);
+}
 function range(a: number, b: number): number[] {
   return Array.from({ length: b - a + 1 }, (_, i) => a + i);
 }
@@ -332,6 +369,7 @@ function toDTO(e: MockEvent): EventDTO {
   const dto: EventDTO & Partial<MockEvent> = { ...e, group_name: '' };
   delete dto.sources;
   delete dto.history;
+  delete dto.pending_proposals;
   dto.group_name = groups.find((g) => g.group_id === e.group_id)?.name ?? e.group_id;
   return dto;
 }
@@ -385,14 +423,94 @@ export const mockApi: Api = {
   getEvent(id) {
     const e = events.find((x) => x.id === id);
     if (!e) return fail('事件不存在', 404);
-    const detail: EventDetailDTO = { ...toDTO(e), sources: e.sources, history: e.history };
+    const detail: EventDetailDTO = {
+      ...toDTO(e),
+      sources: e.sources,
+      history: e.history,
+      pending_proposals: e.pending_proposals,
+    };
     return delay(detail);
   },
 
   patchEvent(id, patch) {
     const e = events.find((x) => x.id === id);
     if (!e) return fail('事件不存在', 404);
-    if (patch.status !== undefined && patch.status !== e.status) {
+    if (patch.expected_version !== undefined && patch.expected_version !== e.version) {
+      return fail('事件已发生变化，请刷新后重试', 409);
+    }
+    if (patch.expected_updated_at !== undefined && patch.expected_updated_at !== e.updated_at) {
+      return fail('事件已发生变化，请刷新后重试', 409);
+    }
+
+    const editableFields: EventEditableField[] = [
+      'title',
+      'description',
+      'start_at',
+      'end_at',
+      'deadline_at',
+      'location',
+      'action_required',
+    ];
+    const changes: HistoryDTO['changed_fields'] = {};
+    const submittedFields: EventEditableField[] = [];
+    for (const field of editableFields) {
+      if (patch[field] === undefined) continue;
+      submittedFields.push(field);
+      const to =
+        (field === 'location' || field === 'action_required') && patch[field] === ''
+          ? null
+          : patch[field];
+      if (e[field] !== to) {
+        changes[field] = { from: e[field], to };
+        (e as unknown as Record<EventEditableField, unknown>)[field] = to;
+      }
+      if (!e.manual_locked_fields.includes(field)) e.manual_locked_fields.push(field);
+    }
+    if (patch.unlock_fields) {
+      e.manual_locked_fields = e.manual_locked_fields.filter((field) => !patch.unlock_fields!.includes(field));
+    }
+
+    if (submittedFields.length > 0 && e.pending_proposals.length > 0) {
+      if (patch.status === 'cancelled' || patch.status === 'done') {
+        e.pending_proposals = [];
+      } else {
+        e.pending_proposals = e.pending_proposals.flatMap((proposal) => {
+          if (proposal.kind !== 'update') return [proposal];
+          const remaining = { ...proposal.changes };
+          for (const field of submittedFields) delete remaining[field];
+          return Object.keys(remaining).length === 0 ? [] : [{ ...proposal, changes: remaining }];
+        });
+      }
+      if (e.status === 'pending_confirm') {
+        const nextStatus = e.pending_proposals.length > 0
+          ? 'pending_confirm'
+          : patch.status ?? 'active';
+        if (nextStatus !== e.status) changes.status = { from: e.status, to: nextStatus };
+        e.status = nextStatus;
+      }
+    }
+    if (
+      submittedFields.length > 0 && patch.status !== undefined && patch.status !== e.status &&
+      !(patch.status === 'active' && e.pending_proposals.length > 0)
+    ) {
+      changes.status = { from: e.status, to: patch.status };
+      e.status = patch.status;
+    }
+    const edited = Object.keys(changes).length > 0;
+    if (edited) {
+      e.version++;
+      e.history = [
+        ...e.history,
+        {
+          version: e.version,
+          changed_fields: changes,
+          source_message_id: null,
+          changed_at: Date.now(),
+        },
+      ];
+    }
+
+    if (!edited && patch.status !== undefined && patch.status !== e.status) {
       // 与后端一致：手动改状态也写一条 history（不升 version），回收站靠它认出「你取消的」
       e.history = [
         ...e.history,
@@ -404,6 +522,7 @@ export const mockApi: Api = {
         },
       ];
       e.status = patch.status;
+      e.pending_proposals = [];
     }
     if (patch.level !== undefined) {
       if (patch.level === null) {
@@ -425,9 +544,70 @@ export const mockApi: Api = {
         ];
       }
     }
-    e.updated_at = Date.now();
-    const detail: EventDetailDTO = { ...toDTO(e), sources: e.sources, history: e.history };
+    e.updated_at = Math.max(Date.now(), e.updated_at + 1);
+    const detail: EventDetailDTO = {
+      ...toDTO(e),
+      sources: e.sources,
+      history: e.history,
+      pending_proposals: e.pending_proposals,
+    };
     return delay(detail);
+  },
+
+  resolveEventProposal(eventId, proposalId, decision, expectedVersion, expectedUpdatedAt) {
+    const e = events.find((x) => x.id === eventId);
+    if (!e) return fail('事件不存在', 404);
+    if (e.version !== expectedVersion) return fail('事件已发生变化，请刷新后重新核对', 409);
+    if (expectedUpdatedAt !== undefined && e.updated_at !== expectedUpdatedAt) {
+      return fail('事件已发生变化，请刷新后重新核对', 409);
+    }
+    const proposal = e.pending_proposals.find((x) => x.id === proposalId);
+    if (!proposal) return fail('事件或提案不存在', 404);
+
+    const changed: HistoryDTO['changed_fields'] = {};
+    if (decision === 'accept' && proposal.kind === 'update') {
+      for (const [field, change] of Object.entries(proposal.changes)) {
+        if (field === 'status' || field === 'level') continue;
+        changed[field] = { from: (e as unknown as Record<string, unknown>)[field], to: change!.to };
+      }
+      const nextStart = 'start_at' in changed ? changed.start_at?.to : e.start_at;
+      const nextEnd = 'end_at' in changed ? changed.end_at?.to : e.end_at;
+      if (nextStart !== null && nextEnd !== null && Number(nextEnd) <= Number(nextStart)) {
+        return fail('接受后结束时间不会晚于开始时间，请改用人工修正', 400);
+      }
+      for (const [field, change] of Object.entries(changed)) {
+        (e as unknown as Record<string, unknown>)[field] = change!.to;
+      }
+    }
+    const fromStatus = e.status;
+    const terminal =
+      (decision === 'accept' && proposal.kind === 'cancel') ||
+      (decision === 'reject' && proposal.kind === 'create');
+    // 与真实服务一致：终止决定会一并关闭该事件的其余待确认提案。
+    e.pending_proposals = terminal
+      ? []
+      : e.pending_proposals.filter((x) => x.id !== proposalId);
+    e.status = terminal ? 'cancelled' : e.pending_proposals.length > 0 ? 'pending_confirm' : 'active';
+    if (fromStatus !== e.status) changed.status = { from: fromStatus, to: e.status };
+    if (Object.keys(changed).length > 0) {
+      e.version++;
+      e.history = [
+        ...e.history,
+        {
+          version: e.version,
+          changed_fields: changed,
+          source_message_id: proposal.source_message_ids[0] ?? null,
+          changed_at: Date.now(),
+        },
+      ];
+    }
+    e.updated_at = Math.max(Date.now(), e.updated_at + 1);
+    return delay({
+      ...toDTO(e),
+      sources: e.sources,
+      history: e.history,
+      pending_proposals: e.pending_proposals,
+    });
   },
 
   getGroups() {
@@ -492,6 +672,7 @@ export const mockApi: Api = {
     const state = connectState();
     const status: ConnectStatusDTO = {
       state,
+      account_epoch: '10001:1',
       since: bootAt,
       first_run: localStorage.getItem('mockFirstRun') === '1',
       ...(state === 'online' ? { uin: '10001', nickname: '演示同学' } : {}),
@@ -657,14 +838,30 @@ export const mockApi: Api = {
   },
 
   saveTimetable(t) {
-    mockTimetable.semester_start = t.semester_start;
-    mockTimetable.courses = t.courses as CourseDTO[];
+    if(t.expected_revision!==undefined && t.expected_revision!==mockTimetable.revision)return fail('课表已更新，请重新载入',409);
+    const courses=reconcileCourses(mockTimetable.courses,t.courses,t.mode??'replace').courses;
+    snapshotTimetable('保存课表');
+    Object.assign(mockTimetable, t, {courses,revision:(mockTimetable.revision??0)+1});
     return delay(structuredClone(mockTimetable));
   },
 
-  clearTimetable() {
+  clearTimetable(expectedRevision) {
+    if(expectedRevision!==undefined&&expectedRevision!==mockTimetable.revision)return fail('课表已更新，请重新载入',409);
+    snapshotTimetable('清空课表');
     mockTimetable.courses = [];
+    mockTimetable.exceptions=[];
+    mockTimetable.import_items=[];
+    mockTimetable.revision=(mockTimetable.revision??0)+1;
     return delay({ ok: true as const });
+  },
+  getTimetableVersions() { return delay(timetableHistory); },
+  restoreTimetable(id,revision) {
+    if(revision!==mockTimetable.revision)return fail('课表已更新，请重新载入',409);
+    const version=timetableHistory.find(v=>v.id===id);
+    if(!version)return fail('版本不存在',404);
+    snapshotTimetable('恢复版本');
+    Object.assign(mockTimetable,structuredClone(version.timetable),{revision:revision+1});
+    return delay(mockTimetable);
   },
 
   // 教务系统直连导入:假的验证码图 + 复用 mockTimetable 的课程
@@ -790,7 +987,7 @@ function trashItems(): TrashItemDTO[] {
   return out.sort((a, b) => b.at - a.at);
 }
 
-let mockLlm: LlmSettingsDTO = { provider: 'deepseek', configured: false, key_hint: '', source: 'none' };
+let mockLlm: LlmSettingsDTO = { provider: 'deepseek', configured: false, key_hint: '', source: 'none', protection: 'none' };
 let mockJev: { configured: boolean; key_hint: string; source: 'web' | 'env' | 'none' } = {
   configured: false,
   key_hint: '',
@@ -810,8 +1007,9 @@ function aiDto(): AiSettingsDTO {
       configured: mockLlm.configured,
       key_hint: mockLlm.key_hint,
       source: mockLlm.source,
+      protection: mockLlm.configured ? (mockLlm.protection ?? 'dpapi') : 'none',
     },
-    jev: { ...mockJev, enabled: true },
+    jev: { ...mockJev, enabled: true, mode: 'jev', local_configured: false },
   };
 }
 
@@ -820,6 +1018,7 @@ function lanDto(): LanSettingsDTO {
     enabled: mockLanEnabled,
     // 开了之后要重启后端才开始监听局域网（与后端一致）
     restart_required: mockLanEnabled,
+    account_rebind_required: false,
     urls: mockLanEnabled ? [`http://192.168.1.23:8000/?token=mock-token-${lanSeq}`] : [],
   };
 }

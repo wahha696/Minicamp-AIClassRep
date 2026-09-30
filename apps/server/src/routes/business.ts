@@ -1,7 +1,20 @@
 // 业务路由：今日 / 事件查询 / 事件详情 / 改状态 / 导出 .ics / 群管理 / 演示。主人是 B。
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
+import { currentAccount } from '../accounts.js';
 import { beginTx, commitTx, db, rollbackTx } from '../db/index.js';
+import {
+  EDITABLE_EVENT_FIELDS,
+  listPendingEventProposals,
+  parseLockedFields,
+  proposalBaseStatus,
+  resolveEventProposal,
+  hasPendingEventProposals,
+  supersedePendingProposalFields,
+  type EditableEventField,
+  type ProposedChanges,
+  type ProposedField,
+} from '../event-proposals.js';
 import { env } from '../env.js';
 import { buildIcs } from '../ics.js';
 import { buildDemoMessages, listScenarios, parseImportedText, scenarioGroupId } from '../ingest/demo.js';
@@ -72,6 +85,7 @@ interface EventRow {
   confidence: number;
   level: number;
   level_locked: number;
+  manual_locked_fields: string;
   version: number;
   created_at: number;
   updated_at: number;
@@ -81,7 +95,8 @@ interface EventRow {
 const EVENT_COLUMNS = `
   e.id, e.group_id, g.name AS group_name, e.type, e.title, e.description,
   e.start_at, e.end_at, e.deadline_at, e.location, e.action_required,
-  e.status, e.confidence, e.level, e.level_locked, e.version, e.created_at, e.updated_at
+  e.status, e.confidence, e.level, e.level_locked, e.manual_locked_fields,
+  e.version, e.created_at, e.updated_at
 `;
 const EVENT_FROM = 'FROM events e LEFT JOIN groups g ON g.group_id = e.group_id';
 const EVENT_ORDER = 'ORDER BY COALESCE(e.start_at, e.deadline_at) IS NULL, COALESCE(e.start_at, e.deadline_at), e.id';
@@ -103,6 +118,7 @@ function toEventDTO(row: EventRow): EventDTO {
     confidence: row.confidence,
     level: row.level as Level,
     level_locked: row.level_locked !== 0,
+    manual_locked_fields: parseLockedFields(row.manual_locked_fields),
     version: row.version,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -170,13 +186,13 @@ function getEventDetail(id: number): EventDetailDTO | null {
     changed_at: h.changed_at,
   }));
 
-  return { ...event, sources, history };
+  return { ...event, sources, history, pending_proposals: listPendingEventProposals(id) };
 }
 
 /** 手动调级 / 交还 AI（level === null）。调级记 level_feedback 并防抖触发偏好总结（FR-12）。 */
 function applyManualLevel(row: EventRow, level: number | null, now: number): void {
   if (level === null) {
-    db.prepare('UPDATE events SET level_locked = 0, updated_at = ? WHERE id = ?').run(now, row.id);
+    db.prepare('UPDATE events SET level_locked = 0, updated_at = MAX(updated_at + 1, ?) WHERE id = ?').run(now, row.id);
     return;
   }
   // AI 原级：取上一条 feedback 的 ai_level——除非那之后 AI 又按群消息改过等级（交还 AI 后才可能），
@@ -199,14 +215,14 @@ function applyManualLevel(row: EventRow, level: number | null, now: number): voi
     // 手动调级不升 version：version>1 表示「按群里新通知改过」，卡片据此显示「已按最新通知更新」。
     // 仍写一条 history（沿用当前 version、source_message_id 为 NULL），详情页按 id 排序展示。
     db.prepare(
-      'UPDATE events SET level = ?, level_locked = 1, updated_at = ? WHERE id = ?',
+      'UPDATE events SET level = ?, level_locked = 1, updated_at = MAX(updated_at + 1, ?) WHERE id = ?',
     ).run(level, now, row.id);
     db.prepare(
       `INSERT INTO event_history (event_id, version, changed_fields, source_message_id, changed_at)
        VALUES (?, ?, ?, NULL, ?)`,
     ).run(row.id, row.version, JSON.stringify({ level: { from: row.level, to: level } }), now);
   } else {
-    db.prepare('UPDATE events SET level_locked = 1, updated_at = ? WHERE id = ?').run(now, row.id);
+    db.prepare('UPDATE events SET level_locked = 1, updated_at = MAX(updated_at + 1, ?) WHERE id = ?').run(now, row.id);
   }
 
   db.prepare(
@@ -235,15 +251,36 @@ function buildSummary(events: EventDTO[], now: number): string {
 // ===== 校验
 
 const EVENT_STATUSES = ['active', 'cancelled', 'done', 'pending_confirm'] as const;
+const timestamp = z.number().int().nonnegative().safe().nullable();
 const patchEventSchema = z
   .object({
     status: z.enum(EVENT_STATUSES).optional(),
     // 1~4 手动设级；null = 解除锁定交还 AI
     level: z.number().int().min(1).max(4).nullable().optional(),
+    title: z.string().trim().min(1).max(200).optional(),
+    description: z.string().max(4000).optional(),
+    start_at: timestamp.optional(),
+    end_at: timestamp.optional(),
+    deadline_at: timestamp.optional(),
+    location: z.string().trim().max(300).nullable().optional(),
+    action_required: z.string().trim().max(1000).nullable().optional(),
+    /** 人工保护可按字段解除；解除后后续 AI 通知才允许覆盖。 */
+    unlock_fields: z.array(z.enum(EDITABLE_EVENT_FIELDS)).max(EDITABLE_EVENT_FIELDS.length).optional(),
+    /** 乐观并发检查；旧客户端可省略，新详情页始终带上。 */
+    expected_version: z.number().int().positive().optional(),
+    /** version 保留“群通知版本”语义；updated_at 是每次详情变更都会前进的并发令牌。 */
+    expected_updated_at: z.number().int().nonnegative().safe().optional(),
   })
-  .refine((o) => o.status !== undefined || o.level !== undefined, {
-    message: 'status 或 level 至少给一个',
+  .refine((o) =>
+    o.status !== undefined || o.level !== undefined || o.unlock_fields !== undefined ||
+    EDITABLE_EVENT_FIELDS.some((field) => o[field] !== undefined), {
+    message: '至少提供一个需要修改或解除保护的字段',
   });
+const resolveProposalSchema = z.object({
+  decision: z.enum(['accept', 'reject']),
+  expected_version: z.number().int().positive().optional(),
+  expected_updated_at: z.number().int().nonnegative().safe().optional(),
+});
 const patchGroupSchema = z
   .object({
     enabled: z.boolean().optional(),
@@ -333,7 +370,7 @@ const ICS_HEADERS = {
 
 /** 事件 → .ics 响应（区间里没有事件时是合法的空日历，照样 200 下载） */
 function icsResponse(c: Context, events: EventDTO[]): Response {
-  return c.body(buildIcs(events), 200, ICS_HEADERS);
+  return c.body(buildIcs(events, Date.now(), currentAccount() ?? 'local'), 200, ICS_HEADERS);
 }
 
 // ===== 路由
@@ -394,7 +431,7 @@ export function registerBusinessRoutes(app: Hono): void {
     return c.json(detail);
   });
 
-  // 手动改状态 / 调危机等级。level: null 表示解除锁定交还 AI。
+  // 手动改状态/字段/危机等级。人工改过的业务字段会锁定，后续 AI 只生成差异提案。
   app.patch('/api/events/:id', async (c) => {
     const id = parseId(c.req.param('id'));
     if (id === null) return c.json({ error: '事件 id 不合法' }, 400);
@@ -407,36 +444,119 @@ export function registerBusinessRoutes(app: Hono): void {
     }
     const parsed = patchEventSchema.safeParse(raw);
     if (!parsed.success) {
-      return c.json({ error: 'status 或 level 不合法' }, 400);
+      return c.json({ error: parsed.error.issues[0]?.message ?? '事件修改内容不合法' }, 400);
     }
 
     const row = db
       .prepare(`SELECT ${EVENT_COLUMNS} ${EVENT_FROM} WHERE e.id = ?`)
       .get(id) as unknown as EventRow | undefined;
     if (row === undefined) return c.json({ error: '事件不存在' }, 404);
+    if (parsed.data.expected_version !== undefined && parsed.data.expected_version !== row.version) {
+      return c.json({ error: '事件已发生变化，请刷新后重新编辑' }, 409);
+    }
+    if (parsed.data.expected_updated_at !== undefined && parsed.data.expected_updated_at !== row.updated_at) {
+      return c.json({ error: '事件已发生变化，请刷新后重新编辑' }, 409);
+    }
 
     const now = Date.now();
     const data = parsed.data;
-    // 改状态、改等级、写 history / feedback 放一个事务里，中途出错不留半截
+    const editedFields = EDITABLE_EVENT_FIELDS.filter((field) => data[field] !== undefined);
+    const normalized = Object.fromEntries(editedFields.map((field) => {
+      const value = data[field];
+      return [field, (field === 'location' || field === 'action_required') && value === '' ? null : value];
+    })) as Partial<Record<EditableEventField, string | number | null>>;
+    const nextStart = normalized.start_at !== undefined ? normalized.start_at : row.start_at;
+    const nextEnd = normalized.end_at !== undefined ? normalized.end_at : row.end_at;
+    if (nextStart !== null && nextEnd !== null && nextEnd <= nextStart) {
+      return c.json({ error: '结束时间必须晚于开始时间' }, 400);
+    }
+    const hasPending = listPendingEventProposals(id).length > 0;
+    const manuallySetLevel = data.level !== undefined && data.level !== null;
+    const hasManualCorrection = editedFields.length > 0 || manuallySetLevel;
+    // v5 以前可能只有 pending_confirm 状态、没有结构化 proposal；同样不能经通用 PATCH
+    // 直接进入完成/取消，必须先接受、拒绝或保存人工修正。
+    if (row.status === 'pending_confirm' && (data.status === 'cancelled' || data.status === 'done')) {
+      return c.json({ error: '请先处理待确认修改，再标记完成或取消' }, 409);
+    }
+    if (hasPending && !hasManualCorrection && data.status === 'active') {
+      return c.json({ error: '这条事件有待确认修改，请选择接受、拒绝或保存人工修正' }, 409);
+    }
+    // 字段提案被人工修正全部消解后，应恢复提案原先的业务状态，
+    // 而不是粗暴地一律改成 active（遗留 pending_confirm 可能是真实基线）。
+    const baseStatusBeforeCorrection = hasPending && hasManualCorrection
+      ? proposalBaseStatus(id, row.status as EventStatus)
+      : row.status as EventStatus;
+
+    // 字段、状态、锁与 history 放在同一个事务里，中途出错不留半截。
     beginTx();
     try {
-      if (data.status !== undefined) {
-        db.prepare('UPDATE events SET status = ?, updated_at = ? WHERE id = ?').run(
-          data.status,
+      const locked = new Set(parseLockedFields(row.manual_locked_fields));
+      for (const field of editedFields) locked.add(field);
+      for (const field of data.unlock_fields ?? []) locked.delete(field);
+
+      const changes: ProposedChanges = {};
+      for (const field of editedFields) {
+        const to = normalized[field] ?? null;
+        if (row[field] !== to) changes[field] = { from: row[field], to };
+      }
+      if (hasPending && hasManualCorrection) {
+        supersedePendingProposalFields(id, editedFields, now, 'update');
+        // level 不在可编辑文本字段里，但人工选了等级（即使与现值相同）
+        // 就是对该差异的最终裁决；必须缩减/关闭对应提案，且保留其他差异。
+        if (manuallySetLevel) supersedePendingProposalFields(id, ['level'], now, 'update');
+        const pendingAfterCorrection = hasPendingEventProposals(id);
+        if (data.status === 'active' && pendingAfterCorrection) {
+          rollbackTx();
+          return c.json({ error: '仍有其他待确认修改，请逐条处理或继续人工修正' }, 409);
+        }
+        const desiredStatus: EventStatus = data.status === 'pending_confirm' || pendingAfterCorrection
+          ? 'pending_confirm'
+          : baseStatusBeforeCorrection;
+        if (row.status !== desiredStatus) changes.status = { from: row.status, to: desiredStatus };
+      } else if (hasManualCorrection && row.status === 'pending_confirm' && !hasPending) {
+        // v5 前遗留的无结构提案：保存人工正确值就是完成确认，不要求用户再点一次。
+        changes.status = { from: row.status, to: data.status ?? 'active' };
+      } else if (hasManualCorrection && data.status !== undefined && data.status !== row.status) {
+        changes.status = { from: row.status, to: data.status };
+      }
+
+      if (Object.keys(changes).length > 0 && editedFields.length > 0) {
+        const fields = Object.keys(changes) as ProposedField[];
+        const version = row.version + 1;
+        db.prepare(
+          `UPDATE events SET ${fields.map((field) => `${field} = ?`).join(', ')},
+             manual_locked_fields = ?, version = ?, updated_at = MAX(updated_at + 1, ?) WHERE id = ?`,
+        ).run(
+          ...fields.map((field) => changes[field]!.to as string | number | null),
+          JSON.stringify([...locked]),
+          version,
           now,
           id,
         );
-        // 手动改状态也记一条 history（不升 version，source_message_id 为 NULL，同手动调级）：
-        // 回收站靠它区分「自己取消」和「群消息取消」、知道取消前是什么状态
-        if (data.status !== row.status) {
-          db.prepare(
-            `INSERT INTO event_history (event_id, version, changed_fields, source_message_id, changed_at)
-             VALUES (?, ?, ?, NULL, ?)`,
-          ).run(id, row.version, JSON.stringify({ status: { from: row.status, to: data.status } }), now);
-        }
+        db.prepare(
+          `INSERT INTO event_history (event_id, version, changed_fields, source_message_id, changed_at)
+           VALUES (?, ?, ?, NULL, ?)`,
+        ).run(id, version, JSON.stringify(changes), now);
+      } else if (editedFields.length > 0 || data.unlock_fields !== undefined) {
+        db.prepare('UPDATE events SET manual_locked_fields = ?, updated_at = MAX(updated_at + 1, ?) WHERE id = ?').run(
+          JSON.stringify([...locked]), now, id,
+        );
+      }
+
+      // 单独改状态，或仅用人工 level 消解最后一个提案时，不改动“群通知版本”语义。
+      const standaloneStatus = editedFields.length === 0
+        ? ((changes.status?.to as EventStatus | undefined) ?? data.status)
+        : undefined;
+      if (standaloneStatus !== undefined && standaloneStatus !== row.status) {
+        db.prepare('UPDATE events SET status = ?, updated_at = MAX(updated_at + 1, ?) WHERE id = ?').run(standaloneStatus, now, id);
+        db.prepare(
+          `INSERT INTO event_history (event_id, version, changed_fields, source_message_id, changed_at)
+           VALUES (?, ?, ?, NULL, ?)`,
+        ).run(id, row.version, JSON.stringify({ status: { from: row.status, to: standaloneStatus } }), now);
       }
       if (data.level !== undefined) {
-        applyManualLevel(row, data.level, now);
+        const latest = db.prepare(`SELECT ${EVENT_COLUMNS} ${EVENT_FROM} WHERE e.id = ?`).get(id) as unknown as EventRow;
+        applyManualLevel(latest, data.level, now);
       }
       commitTx();
     } catch (err) {
@@ -447,6 +567,29 @@ export function registerBusinessRoutes(app: Hono): void {
     const detail = getEventDetail(id);
     if (detail === null) return c.json({ error: '事件不存在' }, 404);
     return c.json(detail);
+  });
+
+  // 接受/拒绝结构化待确认提案；同一决定重复提交是幂等的。
+  app.post('/api/events/:id/proposals/:proposalId/resolve', async (c) => {
+    const id = parseId(c.req.param('id'));
+    const proposalId = parseId(c.req.param('proposalId'));
+    if (id === null || proposalId === null) return c.json({ error: '事件或提案 id 不合法' }, 400);
+    const raw = await c.req.json().catch(() => null);
+    const parsed = resolveProposalSchema.safeParse(raw);
+    if (!parsed.success) return c.json({ error: 'decision 只能是 accept 或 reject' }, 400);
+    const result = resolveEventProposal(
+      id,
+      proposalId,
+      parsed.data.decision,
+      parsed.data.expected_version,
+      parsed.data.expected_updated_at,
+    );
+    if (result === 'not_found') return c.json({ error: '事件或提案不存在' }, 404);
+    if (result === 'already_resolved') return c.json({ error: '提案已经用另一种方式处理' }, 409);
+    if (result === 'conflict') return c.json({ error: '事件已发生变化，请刷新后重新核对' }, 409);
+    if (result === 'invalid_time') return c.json({ error: '接受后结束时间不会晚于开始时间，请改用人工修正' }, 400);
+    const detail = getEventDetail(id);
+    return detail === null ? c.json({ error: '事件不存在' }, 404) : c.json(detail);
   });
 
   // 群列表（FR-10.1）
@@ -500,6 +643,9 @@ export function registerBusinessRoutes(app: Hono): void {
     const markSeen = db.prepare(
       'INSERT OR IGNORE INTO message_seen (group_id, message_id, sent_at) SELECT group_id, message_id, sent_at FROM messages WHERE group_id = ?',
     );
+    const delProposals = db.prepare(
+      'DELETE FROM event_proposals WHERE event_id IN (SELECT id FROM events WHERE group_id = ?)',
+    );
     const delHistory = db.prepare(
       'DELETE FROM event_history WHERE event_id IN (SELECT id FROM events WHERE group_id = ?)',
     );
@@ -515,6 +661,7 @@ export function registerBusinessRoutes(app: Hono): void {
     beginTx();
     try {
       markSeen.run(group_id);
+      delProposals.run(group_id);
       delHistory.run(group_id);
       delSources.run(group_id);
       delEvents.run(group_id);
@@ -607,6 +754,9 @@ export function registerBusinessRoutes(app: Hono): void {
 
 /** 在一个事务里删掉若干群及其消息、事件、来源、变更记录（演示用：不写 message_seen，重放要能再入库） */
 function deleteGroupsData(groupIds: string[]): void {
+  const delProposals = db.prepare(
+    'DELETE FROM event_proposals WHERE event_id IN (SELECT id FROM events WHERE group_id = ?)',
+  );
   const delHistory = db.prepare(
     'DELETE FROM event_history WHERE event_id IN (SELECT id FROM events WHERE group_id = ?)',
   );
@@ -620,6 +770,7 @@ function deleteGroupsData(groupIds: string[]): void {
   beginTx();
   try {
     for (const id of groupIds) {
+      delProposals.run(id);
       delHistory.run(id);
       delSources.run(id);
       delEvents.run(id);

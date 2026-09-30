@@ -1,6 +1,22 @@
 // 事件合并（FR-6）：把 extract 的结果写进 events / event_sources / event_history。
 // 一批在一个事务里完成；改期只覆盖真正变了的字段，每次变化都留一条 history，来源存快照。
 import { db } from '../db/index.js';
+import {
+  createEventProposal,
+  EDITABLE_EVENT_FIELDS,
+  hasAnyEventProposalForSource,
+  hasEventProposalForSource,
+  hasGroupCreateProposalForEventSource,
+  hasGroupCreateProposalForSparseSource,
+  hasGroupCreateProposalForSource,
+  hasPendingEventProposals,
+  parseLockedFields,
+  proposalBaseStatus,
+  supersedePendingProposals,
+  supersedePendingProposalFields,
+  type CreateProposalFingerprint,
+  type ProposedChanges,
+} from '../event-proposals.js';
 import type { EventStatus, EventType, Message } from '../types.js';
 import type { ActiveEventBrief, ExtractedEvent } from './extract.js';
 
@@ -19,6 +35,7 @@ interface EventRow {
   confidence: number;
   level: number;
   level_locked: number;
+  manual_locked_fields: string;
   version: number;
 }
 
@@ -27,15 +44,7 @@ export const LIVE_STATUSES: readonly EventStatus[] = ['active', 'pending_confirm
 const LIVE_SQL = `status IN (${LIVE_STATUSES.map((s) => `'${s}'`).join(',')})`;
 
 /** update 时允许覆盖的字段。type 不改（LLM 对同一件事偶尔换分类），confidence 保持首次的值。 */
-const UPDATABLE = [
-  'title',
-  'description',
-  'start_at',
-  'end_at',
-  'deadline_at',
-  'location',
-  'action_required',
-] as const;
+const UPDATABLE = EDITABLE_EVENT_FIELDS;
 
 const FUZZY_THRESHOLD = 0.6;
 const PENDING_BELOW = 0.6;
@@ -137,6 +146,17 @@ function addSources(eventId: number, ids: string[], byId: Map<string, Message>):
   }
 }
 
+/** 同一事件已经完整消费过这组来源时，动作分类即使重跑成 update/cancel 也必须幂等。 */
+function hasAppliedSources(eventId: number, ids: string[]): boolean {
+  const unique = [...new Set(ids)];
+  if (unique.length === 0) return false;
+  const row = db.prepare(
+    `SELECT COUNT(DISTINCT message_id) AS n FROM event_sources
+      WHERE event_id = ? AND message_id IN (SELECT value FROM json_each(?))`,
+  ).get(eventId, JSON.stringify(unique)) as { n: number };
+  return row.n === unique.length || hasAnyEventProposalForSource(eventId, unique);
+}
+
 function writeChange(
   row: EventRow,
   changes: Record<string, { from: unknown; to: unknown }>,
@@ -146,7 +166,7 @@ function writeChange(
   const fields = Object.keys(changes);
   const version = row.version + 1;
   const sets = fields.map((f) => `${f} = ?`).join(', ');
-  db.prepare(`UPDATE events SET ${sets}, version = ?, updated_at = ? WHERE id = ?`).run(
+  db.prepare(`UPDATE events SET ${sets}, version = ?, updated_at = MAX(updated_at + 1, ?) WHERE id = ?`).run(
     ...fields.map((f) => changes[f]!.to as string | number | null),
     version,
     now,
@@ -155,9 +175,62 @@ function writeChange(
   q.history().run(row.id, version, JSON.stringify(changes), sourceId, now);
 }
 
+function sparseCreateFingerprintConstraints(ev: ExtractedEvent): Partial<CreateProposalFingerprint> {
+  const constraints: Partial<CreateProposalFingerprint> = {};
+  // type 是 ExtractedEvent 的必填非空字段；其余字段遵循 update/cancel 的稀疏合约。
+  if (ev.type) constraints.type = ev.type;
+  if (ev.title) constraints.title = ev.title;
+  if (ev.description) constraints.description = ev.description;
+  if (ev.start_at !== null) constraints.start_at = ev.start_at;
+  if (ev.end_at !== null) constraints.end_at = ev.end_at;
+  if (ev.deadline_at !== null) constraints.deadline_at = ev.deadline_at;
+  if (ev.location !== null && ev.location !== '') constraints.location = ev.location;
+  if (ev.action_required !== null && ev.action_required !== '') {
+    constraints.action_required = ev.action_required;
+  }
+  if (ev.level !== null) constraints.level = ev.level;
+  return constraints;
+}
+
 function applyOne(groupId: string, ev: ExtractedEvent, byId: Map<string, Message>, now: number): void {
-  const target = findTarget(groupId, ev, byId);
   const sourceId = ev.source_message_ids[0] ?? null;
+  // update_of 即使指向已拒绝（cancelled）或已被人工改名的 create，也要先于模糊匹配判重；
+  // 否则可能错误命中同名的另一个 LIVE 事件并将它改写。
+  if (
+    ev.update_of !== null &&
+    hasGroupCreateProposalForEventSource(groupId, ev.update_of, ev.source_message_ids)
+  ) return;
+
+  const target = findTarget(groupId, ev, byId);
+  const createFingerprint = {
+    type: ev.type,
+    title: ev.title,
+    description: ev.description,
+    start_at: ev.start_at,
+    end_at: ev.end_at,
+    deadline_at: ev.deadline_at,
+    location: ev.location,
+    action_required: ev.action_required,
+    level: ev.level ?? 2,
+  };
+
+  // 低置信 create 被接受/拒绝后，事件可能已取消或被人工改得无法再匹配。create 用完整
+  // 指纹；update/cancel 则按 extract 的稀疏字段约束匹配，不把 null/空串误当原始值。
+  if (!target) {
+    const replayedCreate = ev.action === 'create'
+      ? hasGroupCreateProposalForSource(groupId, ev.source_message_ids, createFingerprint)
+      : hasGroupCreateProposalForSparseSource(
+          groupId,
+          ev.source_message_ids,
+          sparseCreateFingerprintConstraints(ev),
+        );
+    if (replayedCreate) return;
+  }
+
+  if (target && hasAppliedSources(target.id, ev.source_message_ids)) {
+    addSources(target.id, ev.source_message_ids, byId);
+    return;
+  }
 
   // 历史补齐进来的旧消息比已经处理过的新消息晚进流水线：
   // 如果本条的来源消息全都早于目标事件已有的最新来源，只追加来源、不改字段（避免把新信息改回旧的）
@@ -171,21 +244,117 @@ function applyOne(groupId: string, ev: ExtractedEvent, byId: Map<string, Message
       console.warn(`[reconcile] 取消找不到对应事件，忽略：${ev.title || `#${ev.update_of}`}`);
       return;
     }
-    writeChange(target, { status: { from: target.status, to: 'cancelled' } }, sourceId, now);
     addSources(target.id, ev.source_message_ids, byId);
+    if (ev.confidence < PENDING_BELOW) {
+      // 同一消息可能在事件已落库、processed 尚未落库时进程退出而重放。已见过的提案不能再次挂起事件。
+      if (hasEventProposalForSource(target.id, 'cancel', ev.source_message_ids)) return;
+      let baseVersion = target.version;
+      const baseStatus = proposalBaseStatus(target.id, target.status);
+      if (target.status !== 'pending_confirm') {
+        writeChange(target, { status: { from: target.status, to: 'pending_confirm' } }, sourceId, now);
+        baseVersion++;
+      }
+      createEventProposal({
+        eventId: target.id,
+        kind: 'cancel',
+        reason: 'low_confidence',
+        changes: { status: { from: target.status, to: 'cancelled' } },
+        sourceMessageIds: ev.source_message_ids,
+        confidence: ev.confidence,
+        baseVersion,
+        baseStatus,
+        now,
+      });
+      return;
+    }
+    supersedePendingProposals(target.id, now);
+    if (target.status !== 'cancelled') {
+      writeChange(target, { status: { from: target.status, to: 'cancelled' } }, sourceId, now);
+    }
     return;
   }
 
   if (target) {
-    const changes: Record<string, { from: unknown; to: unknown }> = {};
+    const changes: ProposedChanges = {};
+    const lockedChanges: ProposedChanges = {};
+    const locked = new Set(parseLockedFields(target.manual_locked_fields));
     for (const f of UPDATABLE) {
       const to = ev[f];
       if (to == null || to === '' || to === target[f]) continue;
-      changes[f] = { from: target[f], to };
+      const change = { from: target[f], to };
+      if (locked.has(f)) lockedChanges[f] = change;
+      else changes[f] = change;
     }
     // 用户手动锁过的等级，AI 更新不覆盖（FR-12：手动调级锁定）
     if (ev.level !== null && target.level_locked === 0 && ev.level !== target.level) {
       changes.level = { from: target.level, to: ev.level };
+    }
+    const proposed = { ...changes, ...lockedChanges };
+    // 低置信度的任何实际变化都保存成结构化提案；现值保持不动，等用户接受、拒绝或手动修正。
+    if (ev.confidence < PENDING_BELOW && Object.keys(proposed).length > 0) {
+      if (hasEventProposalForSource(target.id, 'update', ev.source_message_ids)) {
+        addSources(target.id, ev.source_message_ids, byId);
+        return;
+      }
+      let baseVersion = target.version;
+      const baseStatus = proposalBaseStatus(target.id, target.status);
+      if (target.status === 'active') {
+        writeChange(target, { status: { from: 'active', to: 'pending_confirm' } }, sourceId, now);
+        baseVersion++;
+      }
+      addSources(target.id, ev.source_message_ids, byId);
+      createEventProposal({
+        eventId: target.id,
+        kind: 'update',
+        reason: 'low_confidence',
+        changes: proposed,
+        sourceMessageIds: ev.source_message_ids,
+        confidence: ev.confidence,
+        baseVersion,
+        baseStatus,
+        now,
+      });
+      return;
+    }
+
+    // 用户锁过的字段，即使 AI 很确定也不覆盖；把差异交给用户比较。未锁字段仍可正常更新。
+    if (Object.keys(lockedChanges).length > 0) {
+      if (hasEventProposalForSource(target.id, 'update', ev.source_message_ids)) {
+        addSources(target.id, ev.source_message_ids, byId);
+        return;
+      }
+      let baseVersion = target.version;
+      const baseStatus = proposalBaseStatus(target.id, target.status);
+      if (target.status === 'active') changes.status = { from: 'active', to: 'pending_confirm' };
+      if (Object.keys(changes).length > 0) {
+        writeChange(target, changes, sourceId, now);
+        baseVersion++;
+      }
+      addSources(target.id, ev.source_message_ids, byId);
+      createEventProposal({
+        eventId: target.id,
+        kind: 'update',
+        reason: 'manual_lock_conflict',
+        changes: lockedChanges,
+        sourceMessageIds: ev.source_message_ids,
+        confidence: ev.confidence,
+        baseVersion,
+        baseStatus,
+        now,
+      });
+      return;
+    }
+
+    if (ev.confidence >= PENDING_BELOW && Object.keys(changes).length > 0) {
+      supersedePendingProposalFields(
+        target.id,
+        Object.keys(changes) as Array<keyof typeof changes>,
+        now,
+        'update',
+      );
+      if (target.status === 'pending_confirm' && !hasPendingEventProposals(target.id)) {
+        changes.status = { from: 'pending_confirm', to: 'active' };
+      }
     }
     if (Object.keys(changes).length) writeChange(target, changes, sourceId, now);
     addSources(target.id, ev.source_message_ids, byId);
@@ -213,7 +382,22 @@ function applyOne(groupId: string, ev: ExtractedEvent, byId: Map<string, Message
     now,
     now,
   );
-  addSources(Number(lastInsertRowid), ev.source_message_ids, byId);
+  const eventId = Number(lastInsertRowid);
+  addSources(eventId, ev.source_message_ids, byId);
+  if (status === 'pending_confirm') {
+    createEventProposal({
+      eventId,
+      kind: 'create',
+      reason: 'low_confidence',
+      changes: { status: { from: 'pending_confirm', to: 'active' } },
+      sourceMessageIds: ev.source_message_ids,
+      confidence: ev.confidence,
+      eventFingerprint: createFingerprint,
+      baseVersion: 1,
+      baseStatus: 'pending_confirm',
+      now,
+    });
+  }
 }
 
 /**

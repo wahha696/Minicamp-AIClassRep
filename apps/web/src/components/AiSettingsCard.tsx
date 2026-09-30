@@ -35,22 +35,13 @@ export default function AiSettingsCard() {
         }}
         onTest={async () => (await testAiSettings('deepseek')).deepseek ?? { ok: false, error: '没有返回结果' }}
       />
-      <div className="my-5 border-t border-slate-100" />
-      <KeyRow
-        title="Jev / TypeSafe（可选）"
-        canClear
-        hintText="填了先用快判过滤群消息，省 AI 调用、更快"
-        hintUrl="https://typesafe.ai"
-        placeholder="jev key..."
-        status={info?.jev}
-        sourceNote={info?.jev.source === 'env'}
-        disabledNote={info && !info.jev.enabled ? '已被 ENABLE_JEV 关闭（.env）' : undefined}
-        onSave={async (key) => {
-          const next = await saveAiSettings({ jev_key: key });
-          setInfo(next);
-        }}
-        onTest={async () => (await testAiSettings('jev')).jev ?? { ok: false, error: '没有返回结果' }}
-      />
+      <p className="mt-4 text-xs text-slate-400">群消息经本地快判模型过滤后再交 AI 整理，无需配置。</p>
+      {info?.deepseek.protection === 'plain' && (
+        <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800">
+          当前系统加密（DPAPI）不可用，密钥正以明文保存在这台电脑的 data 目录下。请勿把 data 目录拷给他人；
+          更换 Windows 用户或重装系统后需要重新填写。
+        </p>
+      )}
     </div>
   );
 }
@@ -176,9 +167,13 @@ function KeyRow({
             className="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm outline-none focus:border-slate-500"
           />
           <p className="mt-1.5 text-xs text-slate-400">
-            <a href={hintUrl} target="_blank" rel="noreferrer" className="underline">
-              {hintText}
-            </a>
+            {hintUrl ? (
+              <a href={hintUrl} target="_blank" rel="noreferrer" className="underline">
+                {hintText}
+              </a>
+            ) : (
+              hintText
+            )}
             。只保存在这台电脑上。
           </p>
           <div className="mt-3 flex items-center justify-end gap-2">

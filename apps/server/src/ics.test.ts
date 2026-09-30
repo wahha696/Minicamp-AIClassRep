@@ -24,6 +24,7 @@ function ev(over: Partial<EventDTO> = {}): EventDTO {
     confidence: 0.9,
     level: 2,
     level_locked: false,
+    manual_locked_fields: [],
     version: 1,
     created_at: NOW,
     updated_at: NOW,
@@ -115,7 +116,8 @@ describe('buildIcs', () => {
   it('有 start_at：DTSTART 带 TZID，DTEND 缺省为 start_at + 1 小时', () => {
     const ics = buildIcs([ev({ start_at: SHANGHAI_1400, location: 'A301' })], NOW);
     const ls = lines(ics);
-    expect(ls).toContain('UID:classrep-1@local');
+    expect(ls).toContain('UID:classrep-local-1@classrep');
+    expect(ls).toContain('SEQUENCE:0');
     expect(ls).toContain('DTSTAMP:20260926T060000Z');
     expect(ls).toContain('DTSTART;TZID=Asia/Shanghai:20260926T140000');
     expect(ls).toContain('DTEND;TZID=Asia/Shanghai:20260926T150000');
@@ -140,8 +142,8 @@ describe('buildIcs', () => {
     const ics = buildIcs([ev({ start_at: SHANGHAI_1400 }), ev({ id: 2, title: '没时间的事' })], NOW);
     const ls = lines(ics);
     expect(ls.filter((l) => l === 'BEGIN:VEVENT')).toHaveLength(1);
-    expect(ls).toContain('UID:classrep-1@local');
-    expect(ls).not.toContain('UID:classrep-2@local');
+    expect(ls).toContain('UID:classrep-local-1@classrep');
+    expect(ls).not.toContain('UID:classrep-local-2@classrep');
     // 没有可导出的事件：合法的空日历（有骨架和 VTIMEZONE，没有 VEVENT）
     for (const empty of [buildIcs([ev({ title: '没时间的事' })], NOW), buildIcs([], NOW)]) {
       const el = lines(empty);
@@ -210,7 +212,26 @@ describe('buildIcs', () => {
       NOW,
     );
     const uids = lines(ics).filter((l) => l.startsWith('UID:'));
-    expect(uids).toEqual(['UID:classrep-1@local', 'UID:classrep-2@local', 'UID:classrep-3@local']);
+    expect(uids).toEqual([
+      'UID:classrep-local-1@classrep',
+      'UID:classrep-local-2@classrep',
+      'UID:classrep-local-3@classrep',
+    ]);
+  });
+
+  it('R02：UID 带账号命名空间——同一 id 在不同账号导出的 UID 不同', () => {
+    const a = buildIcs([ev({ start_at: SHANGHAI_1400 })], NOW, '123456');
+    const b = buildIcs([ev({ start_at: SHANGHAI_1400 })], NOW, '789012');
+    expect(lines(a)).toContain('UID:classrep-123456-1@classrep');
+    expect(lines(b)).toContain('UID:classrep-789012-1@classrep');
+    expect(a).not.toBe(b);
+  });
+
+  it('R02：SEQUENCE = version - 1，改期后日历客户端能识别成更新', () => {
+    const ics = buildIcs([ev({ start_at: SHANGHAI_1400, version: 3 })], NOW);
+    const ls = lines(ics);
+    const uidIdx = ls.indexOf('UID:classrep-local-1@classrep');
+    expect(ls[uidIdx + 1]).toBe('SEQUENCE:2');
   });
 
   it('每个事件一个 VEVENT，BEGIN/END 配平', () => {

@@ -19,6 +19,7 @@ import {
   startServerChild,
 } from './lib/start-server.mjs';
 import { webBuildFresh } from './lib/build-cache.mjs';
+import { corepackEnv, resolvePnpm } from './lib/pnpm.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const argv = process.argv.slice(2);
@@ -41,14 +42,14 @@ try {
 step(1, `Node ${process.version} 可用`);
 
 // ---------- [2/5] 包管理器与依赖 ----------
-const pnpm = resolvePnpm();
+const pnpm = await resolvePnpm(ROOT, log);
 if (!pnpm) {
-  console.error('[ClassRep] ❌ pnpm 不可用（corepack 下载失败？）。可手动安装：npm i -g pnpm，再重新启动。');
+  console.error('[ClassRep] ❌ pnpm 不可用（PATH/corepack/自动下载都失败）。可手动安装：npm i -g pnpm，再重新启动。');
   process.exit(1);
 }
 if (!depsFresh() || forceDeps) {
   step(2, '安装依赖（首次较慢，之后秒级）…');
-  const r = spawnSync(pnpm.cmd, ['install', '--frozen-lockfile'], {
+  const r = spawnSync(pnpm.cmd, [...pnpm.args, 'install', '--frozen-lockfile'], {
     cwd: ROOT,
     stdio: background ? bgLog.stdio : 'inherit',
     shell: pnpm.shell,
@@ -83,7 +84,7 @@ if (isWin() && !existsSync(join(ROOT, 'napcat', 'NapCatWinBootMain.exe'))) {
 // ---------- [4/5] 前端产物（增量构建缓存） ----------
 if (!webBuildFresh(ROOT) || forceBuild) {
   step(4, '前端产物缺失或源码有更新，重新构建…');
-  const r = spawnSync(pnpm.cmd, ['--filter', 'web', 'build'], {
+  const r = spawnSync(pnpm.cmd, [...pnpm.args, '--filter', 'web', 'build'], {
     cwd: ROOT,
     stdio: background ? bgLog.stdio : 'inherit',
     shell: pnpm.shell,
@@ -119,42 +120,6 @@ child.on('exit', (code) => {
 
 function isWin() {
   return process.platform === 'win32';
-}
-
-/** pnpm 可用性解析：PATH 里的 pnpm → Node 自带 corepack 装到 .corepack/bin（免管理员）。 */
-function resolvePnpm() {
-  const probe = (cmd, shell) => {
-    try {
-      const r = spawnSync(cmd, ['--version'], { stdio: 'ignore', shell, windowsHide: true, timeout: 30_000 });
-      return r.status === 0;
-    } catch {
-      return false;
-    }
-  };
-  if (probe('pnpm', true)) {
-    return { cmd: 'pnpm', shell: true, label: 'PATH 里的 pnpm' };
-  }
-  // corepack：nodejs.org 发行版自带（<node>/node_modules/corepack）。装到仓库内目录，不动系统。
-  const corepackJs = join(dirname(process.execPath), 'node_modules', 'corepack', 'dist', 'corepack.js');
-  if (existsSync(corepackJs)) {
-    const bin = join(ROOT, '.corepack', 'bin');
-    spawnSync(process.execPath, [corepackJs, 'enable', '--install-directory', bin], {
-      stdio: 'inherit',
-      windowsHide: true,
-      env: { ...process.env, COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' },
-    });
-    const shim = isWin() ? join(bin, 'pnpm.cmd') : join(bin, 'pnpm');
-    // 仓库路径可能带空格（如 Desktop\Class Rep），shell 模式下必须整体加引号
-    const quoted = `"${shim}"`;
-    if (existsSync(shim) && probe(quoted, true)) {
-      return { cmd: quoted, shell: true, label: 'corepack 安装的 pnpm（.corepack/bin）' };
-    }
-  }
-  return null;
-}
-
-function corepackEnv() {
-  return { COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' };
 }
 
 /** node_modules 比 pnpm-lock.yaml 旧（或不存在）→ 需要安装 */

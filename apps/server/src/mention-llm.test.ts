@@ -55,7 +55,14 @@ describe('/api/settings/llm', () => {
     const r = await put({ provider: 'deepseek', api_key: ' sk-abcdef1234567890 ' });
     expect(r.status).toBe(200);
     const dto = await r.json();
-    expect(dto).toEqual({ provider: 'deepseek', configured: true, key_hint: 'sk-****7890', source: 'web' });
+    expect(dto).toEqual({
+      provider: 'deepseek',
+      configured: true,
+      key_hint: 'sk-****7890',
+      source: 'web',
+      // R8：保护态如实上报——Windows+DPAPI 为 dpapi，其余为 plain
+      protection: expect.stringMatching(/^(dpapi|plain)$/),
+    });
     expect(JSON.stringify(await (await app.request('/api/settings/llm')).json())).not.toContain('abcdef');
     const cfg = getLlmConfig();
     expect(cfg.apiKey).toBe('sk-abcdef1234567890');
@@ -72,7 +79,11 @@ describe('/api/settings/llm', () => {
     const d = mkdtempSync(join(dir, 'f-'));
     setLlmSettingsDir(d);
     await put({ provider: 'deepseek', api_key: 'sk-22222222bbbb' });
-    expect(JSON.parse(readFileSync(join(d, 'llm.json'), 'utf8'))).toEqual({ provider: 'deepseek', api_key: 'sk-22222222bbbb' });
+    const raw = JSON.parse(readFileSync(join(d, 'llm.json'), 'utf8')) as Record<string, unknown>;
+    expect(raw.provider).toBe('deepseek');
+    // Windows 下 key 走 DPAPI 密文字段（S06）；非 Windows / 加密不可用时是明文 api_key
+    expect(raw.api_key === 'sk-22222222bbbb' || typeof raw.api_key_dpapi === 'string').toBe(true);
+    expect(getLlmConfig().apiKey).toBe('sk-22222222bbbb');
   });
 
   it('空 key / 格式不对 / 不支持的服务商 → 400 + 中文 error', async () => {

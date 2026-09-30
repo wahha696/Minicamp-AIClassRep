@@ -9,9 +9,12 @@
 //   ClassRep/app/update.mjs           ← scripts/update.mjs（下次启动应用自更新包）
 //   ClassRep/app/version.json         ← { version, repo }：后端检查更新 / update.mjs 用
 //   ClassRep/data/mock/               ← 仿真剧本（data/mock 本来就进 git）
+//   ClassRep/classrep-fastjudge/      ← 本地快判：src + models + py/ 便携 python（无 python 无网也能跑）
+//                                     排除 .venv（机器绝对路径）、__pycache__、models/best（重复检查点）
 // 不打 .env.release：API Key 由用户首次启动时在向导页填（修复计划 3.2），密钥绝不进发布包。
 // 真机验收：没装过 Node 的 Windows 电脑、解压到含中文+空格路径、双击 启动.bat 走完修复计划的目标体验。
 import { spawnSync, execSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
@@ -63,11 +66,11 @@ mkdirSync(cacheDir, { recursive: true });
 cpSync(join(REPO, '启动.bat'), join(outDir, '启动.bat'));
 
 // ---------- 4. runtime/node.exe（lib/fetch-node.mjs：查最新 LTS + 缓存，与 bootstrap 共用） ----------
-const { version } = await ensureNodeExe(join(outDir, 'runtime', 'node.exe'), {
+const { version: nodeVersion } = await ensureNodeExe(join(outDir, 'runtime', 'node.exe'), {
   cacheDir,
   log: (m) => log(m),
 });
-log(`runtime/node.exe = ${version}`);
+log(`runtime/node.exe = ${nodeVersion}`);
 
 // ---------- 5. napcat/（排除规则与 .gitignore 一致：账号数据、运行时生成文件、非 win32-x64 原生库） ----------
 const napcatSrc = join(REPO, 'napcat');
@@ -97,6 +100,43 @@ function copyNapcat(src, dst) {
 copyNapcat(napcatSrc, napcatOut);
 if (!existsSync(join(napcatOut, 'NapCatWinBootMain.exe'))) fail('napcat/ 缺 NapCatWinBootMain.exe');
 
+// ---------- 5.5 classrep-fastjudge/（本地快判：源码+模型+便携 python，开箱即用） ----------
+// py/ 便携运行时必须随包预装（用户无 python、可能无网）；缺了就现场供给一次。
+const fjSrc = join(REPO, 'classrep-fastjudge');
+if (existsSync(join(fjSrc, 'src', 'infer.py'))) {
+  if (!existsSync(join(fjSrc, 'py', 'python.exe'))) {
+    log('classrep-fastjudge/py 便携 Python 缺失，先跑 fastjudge-setup.mjs 供给…');
+    const setup = spawnSync(process.execPath, [join(REPO, 'scripts', 'fastjudge-setup.mjs')], {
+      cwd: REPO, stdio: 'inherit',
+    });
+    if (setup.status !== 0) fail('fastjudge-setup.mjs 供给失败（也可手动 node scripts/fastjudge-setup.mjs 后重跑）');
+  }
+  // R2：文件在 ≠ 可用。打包前必须验证便携 Python 能 import 快判依赖——
+  // 打包版没有 scripts/fastjudge-setup.mjs，残缺 py/ 进了包就是静默死亡（只剩 30s 退避日志）。
+  const fjPy = join(fjSrc, 'py', 'python.exe');
+  const usable = spawnSync(fjPy, ['-c', 'import sklearn,jieba,joblib,numpy;print("ok")'], {
+    encoding: 'utf8', timeout: 60_000, cwd: fjSrc,
+  });
+  if (usable.status !== 0 || !String(usable.stdout).includes('ok')) {
+    fail('classrep-fastjudge/py 便携 Python 依赖校验不过（删掉 py/ 后重跑 node scripts/fastjudge-setup.mjs）');
+  }
+  const FJ_SKIP = new Set(['.venv', '__pycache__', 'best', 'data', 'reports']); // best/ 是 models/ 下重复的训练检查点；data/reports 是本地训练产物（R3）
+  function copyFastjudge(src, dst) {
+    mkdirSync(dst, { recursive: true });
+    for (const name of readdirSync(src)) {
+      if (FJ_SKIP.has(name)) continue;
+      if (name.endsWith('.cache') || name === 'get-pip.py' || name.startsWith('python-') && name.endsWith('.zip')) continue;
+      const s = join(src, name);
+      if (statSync(s).isDirectory()) copyFastjudge(s, join(dst, name));
+      else cpSync(s, join(dst, name));
+    }
+  }
+  copyFastjudge(fjSrc, join(outDir, 'classrep-fastjudge'));
+  log(`classrep-fastjudge → 包内（含 py/ 便携运行时 ${mb(dirSize(join(outDir, 'classrep-fastjudge')))}）`);
+} else {
+  log('⚠️ 缺 classrep-fastjudge/src/infer.py：本包不带本地快判（用户可自行放入项目根目录自动启用）');
+}
+
 // ---------- 6. app/ 与 data/mock/ ----------
 cpSync(join(REPO, 'apps', 'server', 'dist', 'index.js'), join(outDir, 'app', 'server', 'dist', 'index.js'));
 cpSync(join(REPO, 'apps', 'web', 'dist'), join(outDir, 'app', 'web', 'dist'), { recursive: true });
@@ -107,8 +147,13 @@ if (existsSync(mockSrc)) {
 }
 
 // ---------- 6.5 自更新器 + 版本信息（update.mjs 每次启动前由 启动.bat 调用） ----------
+// --version <v> 或 PACK_VERSION：CI 里 tag 必须在 zip 之前就写进 version.json（成熟度评估 D04）
 cpSync(join(REPO, 'scripts', 'update.mjs'), join(outDir, 'app', 'update.mjs'));
 const pkg = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8'));
+const argVersionIdx = process.argv.indexOf('--version');
+const packVersion = (argVersionIdx >= 0 ? process.argv[argVersionIdx + 1] : process.env.PACK_VERSION ?? '')
+  .replace(/^v/i, '');
+const version = packVersion || pkg.version || '0.0.0';
 let repo = 'wahha696/Minicamp-AIClassRep';
 try {
   const url = execSync('git remote get-url origin', { cwd: REPO, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
@@ -122,10 +167,10 @@ try {
 }
 writeFileSync(
   join(outDir, 'app', 'version.json'),
-  `${JSON.stringify({ version: pkg.version ?? '0.0.0', repo, packed_at: new Date().toISOString() }, null, 2)}\n`,
+  `${JSON.stringify({ version, repo, packed_at: new Date().toISOString() }, null, 2)}\n`,
   'utf8',
 );
-log(`app/version.json = v${pkg.version ?? '0.0.0'}（${repo}）`);
+log(`app/version.json = v${version}（${repo}）`);
 
 // ---------- 7. 压缩 release/ClassRep.zip ----------
 const zipPath = join(releaseDir, 'ClassRep.zip');
@@ -138,6 +183,17 @@ const tar = spawnSync('tar', ['-a', '-c', '-f', 'ClassRep.zip', 'ClassRep'], {
   cwd: releaseDir,
 });
 if (tar.status !== 0) fail('tar 压缩失败（需要 Windows 10 1803+ 或自行安装 bsdtar）');
+
+// ---------- 8. 发布清单（成熟度评估 S05）：自更新按它校验 SHA-256 + 大小，校验不过不更新 ----------
+const zipSize = statSync(zipPath).size;
+const zipSha256 = createHash('sha256').update(readFileSync(zipPath)).digest('hex');
+const manifestPath = join(releaseDir, 'ClassRep.manifest.json');
+writeFileSync(
+  manifestPath,
+  `${JSON.stringify({ version, zip: 'ClassRep.zip', sha256: zipSha256, size: zipSize }, null, 2)}\n`,
+  'utf8',
+);
+log(`发布清单 ${manifestPath}（sha256=${zipSha256.slice(0, 12)}…）`);
 
 log('打包完成 ✅');
 log(`  ${outDir}（${mb(dirSize(outDir))}）`);

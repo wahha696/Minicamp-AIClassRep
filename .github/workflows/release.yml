@@ -41,25 +41,24 @@ jobs:
       - name: 补齐 NapCat 运行包（仓库已带；缺失时按 napcat.version.json 下载并校验 SHA-256）
         run: node scripts/fetch-napcat.mjs
 
-      - name: 打包 Windows 免安装包
-        run: node scripts/pack.mjs
+      - name: 打包 Windows 免安装包（版本随 tag 写进包内 version.json，同时产出 sha256 发布清单）
+        run: node scripts/pack.mjs --version "${{ github.ref_name }}"
         # API Key 不打进包里（修复计划 3.2）：用户首次启动在向导页填，CI 也不读 .env.release。
 
-      - name: 打标版本号（用 tag 改写包内 version.json）
+      - name: 校验 zip 内版本号与 tag 一致（version.json 必须在压缩前写好）
         shell: pwsh
         run: |
-          $tag = '${{ github.ref_name }}'
-          $p = 'release/ClassRep/app/version.json'
-          if (Test-Path $p) {
-            $j = Get-Content $p -Raw | ConvertFrom-Json
-            $j.version = $tag.TrimStart('v')
-            $j | ConvertTo-Json | Set-Content $p -Encoding UTF8
-          }
+          $want = '${{ github.ref_name }}'.TrimStart('v')
+          tar -x -f release/ClassRep.zip -C release ClassRep/app/version.json
+          $got = (Get-Content release/ClassRep/app/version.json -Raw | ConvertFrom-Json).version
+          if ($got -ne $want) { throw "包内版本号 $got != tag $want" }
 
       - name: 创建/更新 GitHub Release 并上传
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           name: ClassRep ${{ github.ref_name }}
-          files: release/ClassRep.zip
+          files: |
+            release/ClassRep.zip
+            release/ClassRep.manifest.json
           generate_release_notes: true

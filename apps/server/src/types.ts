@@ -4,11 +4,21 @@
 
 export type EventType = 'exam' | 'assignment' | 'meeting' | 'activity' | 'announcement' | 'other';
 export type EventStatus = 'active' | 'cancelled' | 'done' | 'pending_confirm';
+export type EventProposalKind = 'create' | 'update' | 'cancel';
+export type EventProposalReason = 'low_confidence' | 'manual_lock_conflict';
+export type EventEditableField =
+  | 'title'
+  | 'description'
+  | 'start_at'
+  | 'end_at'
+  | 'deadline_at'
+  | 'location'
+  | 'action_required';
 /** 危机等级：1 低、2 中、3 高、4 紧急 */
 export type Level = 1 | 2 | 3 | 4;
 export type ConnectState =
   | 'qq_conflict' | 'error' | 'kicked' | 'online' | 'waiting_qr' | 'reconnecting' | 'starting';
-export type MessageSource = 'onebot' | 'history' | 'demo' | 'import';
+export type MessageSource = 'onebot' | 'history' | 'demo' | 'import' | 'forward';
 
 /** 所有来源最终都转成它再入库 */
 export interface Message {
@@ -36,6 +46,7 @@ export interface EventDTO {
   confidence: number;   // 0~1
   level: Level;
   level_locked: boolean; // 用户手动设过 = true；AI 更新时不改 level
+  manual_locked_fields: EventEditableField[]; // 用户手动修正后，AI 不再覆盖这些字段
   version: number;
   created_at: number;
   updated_at: number;
@@ -55,9 +66,21 @@ export interface HistoryDTO {
   changed_at: number;
 }
 
+export interface EventProposalDTO {
+  id: number;
+  kind: EventProposalKind;
+  reason: EventProposalReason;
+  changes: Partial<Record<EventEditableField | 'level' | 'status', { from: unknown; to: unknown }>>;
+  source_message_ids: string[];
+  confidence: number;
+  base_version: number;
+  created_at: number;
+}
+
 export interface EventDetailDTO extends EventDTO {
   sources: SourceMessageDTO[];
   history: HistoryDTO[];
+  pending_proposals: EventProposalDTO[];
 }
 
 /**
@@ -105,19 +128,7 @@ export interface TodosDTO {
   manual: TodoDTO[];  // 用户手动添加的待办（未完成的）
 }
 
-export interface CourseDTO {
-  name: string;
-  teacher: string;
-  location: string;
-  weekday: 1 | 2 | 3 | 4 | 5 | 6 | 7; // 1=周一…7=周日
-  block: 1 | 2 | 3 | 4 | 5;
-  weeks: number[];
-}
-
-export interface TimetableDTO {
-  semester_start: string; // 'YYYY-MM-DD'，本学期第一周的周一
-  courses: CourseDTO[];
-}
+export type { CourseDTO, TimetableDTO } from '../../../shared/timetable.js';
 
 export interface LevelRuleDTO {
   id: number;
@@ -133,6 +144,7 @@ export interface MemoryDTO {
 
 export interface ConnectStatusDTO {
   state: ConnectState;
+  account_epoch: string; // 不含账号信息的数据代次令牌；前端业务读写用它拒绝跨号请求
   uin?: string;
   nickname?: string;    // online 时登录者的 QQ 昵称（get_login_info；取不到就没有）
   since: number;        // 进入当前状态的时间
@@ -150,6 +162,12 @@ export interface PipelineStats {
   llm_called_count: number;  // 累计 LLM 调用次数
   llm: 'ok' | 'error' | 'unconfigured';  // 最近一次调用结果；没配 key 为 unconfigured
   jev: 'ok' | 'error' | 'unconfigured' | 'disabled';
+  /** 快判模式（FASTJUDGE_MODE）；ENABLE_JEV=false 时缺省 */
+  jev_mode?: 'jev' | 'local' | 'dual';
+  /** dual 下实际路由目标（FASTJUDGE_ROUTE） */
+  jev_route?: 'jev' | 'local';
+  /** 本地模型侧状态；仅 local/dual 模式给出 */
+  jev_local?: 'ok' | 'backoff' | 'unconfigured';
 }
 
 export interface HealthDTO extends PipelineStats {
@@ -158,4 +176,14 @@ export interface HealthDTO extends PipelineStats {
   qq: ConnectState;
   uptime: number;       // 秒
   pending: number;      // 待整理（processed=0 且未被过滤）的消息数，只算启用的群
+  /** DEMO_MODE 且账号就绪时附带：最近 dual 批摘要（无原文，不落库） */
+  dual_score_log?: Array<{
+    at: number;
+    groupName: string;
+    n: number;
+    remote: number[] | null;
+    local: number[] | null;
+    routed: number[] | null;
+    routeBackend: 'jev' | 'local';
+  }>;
 }

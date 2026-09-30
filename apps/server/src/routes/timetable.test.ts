@@ -11,6 +11,8 @@ const COURSE = {
   location: 'B座312',
   weekday: 2,
   block: 2,
+  start_period: 3,
+  end_period: 4,
   weeks: [3, 4, 5, 6],
 };
 
@@ -31,6 +33,7 @@ beforeAll(() => openDb(':memory:'));
 afterAll(() => db.close());
 beforeEach(() => {
   db.exec('DELETE FROM courses;');
+  db.exec("DELETE FROM timetable_versions; DELETE FROM kv WHERE key='timetable_config'");
   db.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES ('semester_start', '2026-09-07')").run();
 });
 
@@ -38,7 +41,7 @@ describe('GET /api/timetable', () => {
   it('未导入时 courses 是空数组，semester_start 有默认值', async () => {
     const res = await req(makeApp(), 'GET', '/api/timetable');
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ semester_start: '2026-09-07', courses: [] });
+    expect(await res.json()).toMatchObject({ semester_start: '2026-09-07', courses: [], revision:0 });
   });
 });
 
@@ -52,7 +55,7 @@ describe('PUT /api/timetable', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as TimetableDTO;
     expect(body.courses).toHaveLength(1);
-    expect(body.courses[0]).toMatchObject({ name: '概率论与数理统计A', weekday: 2, block: 2, weeks: [3, 4, 5, 6] });
+    expect(body.courses[0]).toMatchObject({ name: '概率论与数理统计A', weekday: 2, block: 2, start_period: 3, end_period: 4, weeks: [3, 4, 5, 6] });
 
     const res2 = await req(app, 'PUT', '/api/timetable', {
       semester_start: '2027-02-22', // 周一
@@ -70,6 +73,7 @@ describe('PUT /api/timetable', () => {
       { semester_start: '2026/09/07', courses: [] },
       { semester_start: '2026-09-07', courses: [{ ...COURSE, weekday: 8 }] },
       { semester_start: '2026-09-07', courses: [{ ...COURSE, block: 0 }] },
+      { semester_start: '2026-09-07', courses: [{ ...COURSE, start_period: 25 }] }, // 超出 1–24
       { semester_start: '2026-09-07', courses: [{ ...COURSE, weeks: [] }] },
       { semester_start: '2026-09-07', courses: [{ ...COURSE, name: '' }] },
     ];

@@ -4,7 +4,7 @@
 // error 的 message 用架构.md §7 原文案；非 Windows 按 00-总约定 §6 返回。
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { legacyDataExists } from '../accounts.js';
+import { accountDataState, accountEpoch, legacyDataExists } from '../accounts.js';
 import { getLlmConfig } from '../ai-settings.js';
 import type { ConnectState, ConnectStatusDTO } from '../types.js';
 import { getManagerFacts, getUin, type ManagerFacts } from './manager.js';
@@ -21,6 +21,7 @@ export const MSG_NO_NAPCAT = '采集端组件缺失。点「一键下载 NapCat 
 export const MSG_CRASH = '采集端异常。常见原因是 QQ 版本过旧，请更新到最新版 QQ 后重试';
 export const MSG_UNSUPPORTED = '当前系统不支持采集端（开发模式，可用演示回放）';
 export const MSG_NAPCAT_MISSING = '采集组件缺失（napcat 文件夹不完整），请重新克隆仓库或下载完整发布包';
+export const MSG_ACCOUNT_DB = '账号数据初始化失败（磁盘空间或权限问题）。消息暂不写入避免写错账号，请点「重新连接」或重启应用重试';
 
 let since = Date.now();
 let lastState: ConnectState | null = null;
@@ -28,7 +29,7 @@ let lastState: ConnectState | null = null;
 /** state.ts 判定所需的全部输入（抽出便于测试） */
 export interface ConnectInputs {
   manager: ManagerFacts;
-  onebot: { wsConnected: boolean; everOnline: boolean; selfId: string | null; kicked: boolean };
+  onebot: { wsConnected: boolean; everOnline: boolean; selfId: string | null; kicked: boolean; accountError?: string | null };
   qrcodeExists: boolean;
   uin: string | undefined;
   /** DeepSeek Key 是否已配置（网页或 .env） */
@@ -55,6 +56,10 @@ export function deriveConnectStatus(input: ConnectInputs): { state: ConnectState
   if (input.externalOnebot) {
     // 外部 OneBot（Docker）：QQ 与 NapCat 都不在本机，只根据 WS 连接给出状态
     if (o.kicked) return { state: 'kicked', first_run: firstRun, uin };
+    if (o.accountError) {
+      // 持久化账号或挂库失败后 WS 可能已经主动断开，仍必须显示错误而不是假装重连中。
+      return { state: 'error', message: MSG_ACCOUNT_DB, first_run: firstRun, uin };
+    }
     if (o.wsConnected && o.selfId !== null) return { state: 'online', first_run: firstRun, uin };
     if (o.everOnline && !o.wsConnected) return { state: 'reconnecting', first_run: firstRun, uin };
     return { state: 'starting', first_run: firstRun, uin };
@@ -83,6 +88,9 @@ export function deriveConnectStatus(input: ConnectInputs): { state: ConnectState
     // spawn 失败 / 进程 60s 内退出 ≥3 次（架构.md §7 反复崩溃文案）
     return { state: 'error', message: MSG_CRASH, first_run: firstRun, uin };
   }
+  if (o.accountError) {
+    return { state: 'error', message: MSG_ACCOUNT_DB, first_run: firstRun, uin };
+  }
   if (o.kicked) {
     // 收到 bot_offline 且进程树已被结束；等用户点「重新连接」，不自动重启
     return { state: 'kicked', first_run: firstRun, uin };
@@ -103,9 +111,14 @@ export function deriveConnectStatus(input: ConnectInputs): { state: ConnectState
 export function getConnectStatus(): ConnectStatusDTO {
   const deepseekConfigured = getLlmConfig().apiKey !== '';
   const external = EXTERNAL_ONEBOT; // Docker 等外部 OneBot 部署：不检查本机 QQ / NapCat 运行包
-  const derived = deriveConnectStatus({
+  const dataState = accountDataState();
+  const onebot = getOnebotFacts();
+  let derived = deriveConnectStatus({
     manager: getManagerFacts(),
-    onebot: getOnebotFacts(),
+    onebot: {
+      ...onebot,
+      accountError: onebot.accountError ?? (dataState === 'error' ? 'account database unavailable' : null),
+    },
     qrcodeExists: existsSync(QRCODE_PATH),
     uin: getUin(),
     deepseekConfigured,
@@ -113,12 +126,17 @@ export function getConnectStatus(): ConnectStatusDTO {
     napcatInstalled: external ? true : existsSync(NAPCAT_BOOT_EXE),
     externalOnebot: external,
   });
+  // lifecycle 已切成 B、数据库仍在等 A 的在途任务时，不得先向页面宣告 B online。
+  if (dataState === 'switching' && derived.state === 'online') {
+    derived = { ...derived, state: 'reconnecting' };
+  }
   if (derived.state !== lastState) {
     lastState = derived.state;
     since = Date.now();
   }
   const dto: ConnectStatusDTO = {
     state: derived.state,
+    account_epoch: accountEpoch(),
     since,
     first_run: derived.first_run,
     deepseek_configured: deepseekConfigured,

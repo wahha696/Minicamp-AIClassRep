@@ -51,9 +51,11 @@ export default function Connect() {
   }
 
   async function onRestart(killQQ = false) {
+    if (!data) return;
+    const context = { accountEpoch: data.account_epoch, uin: data.uin ?? null };
     setBusy(true);
     try {
-      await restartConnect(killQQ);
+      await restartConnect(context, killQQ);
       await refresh();
     } catch (e) {
       toastError(toast, e);
@@ -202,16 +204,17 @@ function AccountCard({ status, onLoggedOut }: { status: ConnectStatusDTO; onLogg
   const uin = status.uin!;
   const online = status.state === 'online';
   const [imgFailed, setImgFailed] = useState(false);
-  const [confirm, setConfirm] = useState(false);
+  const [confirmContext, setConfirmContext] = useState<{ accountEpoch: string; uin: string } | null>(null);
   const [erase, setErase] = useState(false);
   const [busy, setBusy] = useState(false);
 
   async function onLogout() {
+    if (confirmContext === null) return;
     setBusy(true);
     try {
-      await logoutConnect(erase);
+      await logoutConnect(confirmContext, erase);
       await onLoggedOut();
-      setConfirm(false);
+      setConfirmContext(null);
       setErase(false);
       toast(erase ? '已退出并删除本号数据' : '已退出登录，请用要登录的 QQ 扫码');
     } catch (e) {
@@ -255,25 +258,27 @@ function AccountCard({ status, onLoggedOut }: { status: ConnectStatusDTO; onLogg
       <p className="mt-1 text-xs text-slate-300">头像由 QQ 服务器提供，加载时会带上你的 QQ 号</p>
       <button
         type="button"
-        onClick={() => setConfirm(true)}
+        onClick={() => setConfirmContext({ accountEpoch: status.account_epoch, uin })}
         className="mt-6 w-full rounded-xl border border-rose-200 py-2.5 text-sm font-medium text-rose-600 hover:bg-rose-50"
       >
         退出登录
       </button>
 
       <ConfirmDialog
-        open={confirm}
+        open={confirmContext !== null}
         title="退出当前 QQ？"
         confirmText={erase ? '退出并删除数据' : '退出登录'}
         danger
         busy={busy}
         onConfirm={() => void onLogout()}
         onCancel={() => {
-          setConfirm(false);
+          setConfirmContext(null);
           setErase(false);
         }}
       >
-        <p>退出后回到扫码页，可以换另一个 QQ 号登录。已整理的群和日程会保留，换回来原样恢复。</p>
+        <p>
+          将退出 QQ {confirmContext?.uin ?? uin}。退出后回到扫码页，可以换另一个 QQ 号登录；已整理的群和日程会保留。
+        </p>
         <label className="mt-3 flex items-start gap-2 text-left text-sm text-rose-600">
           <input
             type="checkbox"
@@ -425,13 +430,17 @@ function AccountsCard() {
               {a.current && <span className="ml-2 text-xs text-emerald-600">当前登录</span>}
               <span className="ml-2 text-xs text-slate-400">{formatBytes(a.size_bytes)}</span>
             </span>
-            <button
-              type="button"
-              onClick={() => setConfirmUin(a.uin)}
-              className="shrink-0 text-xs font-medium text-rose-500 hover:underline"
-            >
-              删除数据
-            </button>
+            {a.current ? (
+              <span className="shrink-0 text-xs text-slate-400">请使用上方的退出并删除</span>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirmUin(a.uin)}
+                className="shrink-0 text-xs font-medium text-rose-500 hover:underline"
+              >
+                删除数据
+              </button>
+            )}
           </li>
         ))}
       </ul>

@@ -33,7 +33,7 @@ describe('生成的 loadNapCat.js 语法与行为(临时)', () => {
       }
 
     } finally {
-      rmSync(napcatDir, { recursive: true, force: true });
+      rmSync(napcatDir, { recursive: true, force: true, maxRetries: 8, retryDelay: 200 });
     }
   });
 });

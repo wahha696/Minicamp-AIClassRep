@@ -3,43 +3,33 @@
 // ② xls 文件导入：浏览器端解析（SheetJS 按需动态加载，不进首屏包），原始文件不上传服务器。
 // 两种来源都进「预览网格 + warnings → 确认保存」流程；已有课表时可「清空」（二次确认）。
 import { useRef, useState } from 'react';
-import { clearTimetable, csuFetchCourses, csuStartImport, getTimetable, saveTimetable } from '../api/client';
-import type { CourseDTO } from '../api/types';
+import {
+  clearTimetable,
+  csuFetchCourses,
+  csuStartImport,
+  getTimetable,
+  getTimetableVersions,
+  restoreTimetable,
+} from '../api/client';
+import type { TimetableDTO, TimetableVersion } from '../../../../shared/timetable';
+import TimetableEditor from './TimetableEditor';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useToast } from '../components/Toast';
-import WeekGrid from '../components/WeekGrid';
 import { usePolling } from '../hooks/usePolling';
 import { toastError } from '../lib/errors';
 import { parseTimetable, type ParsedTimetable } from '../lib/timetable';
-import { thisMonday } from '../lib/week';
 
-const DAY = 86_400_000;
-const TZ = 8 * 3_600_000;
-// 预览网格的基准周：只用来铺七列占位（列头是星期几），跟随本周，不写死日期（D2）
-function previewMonday(): number {
-  return thisMonday();
-}
-
-/** D2：没填「第一周周一」时默认本周一（按当前日期推算，不写死学期日期） */
-function defaultSemesterStart(): string {
-  return new Date(thisMonday() + TZ).toISOString().slice(0, 10);
-}
-
-/** 'YYYY-MM-DD' 是不是周一（上海时区） */
-function isMonday(dateStr: string): boolean {
-  const t = Date.parse(`${dateStr}T00:00:00+08:00`);
-  if (Number.isNaN(t)) return false;
-  return new Date(t + TZ).getUTCDay() === 1;
-}
-
-async function parseFile(file: File): Promise<ParsedTimetable> {
+async function parseFile(file: File): Promise<{ name: string; result: ParsedTimetable }[]> {
+  if (file.size > 10 * 1024 * 1024) throw new Error('课表文件不能超过 10 MB');
   const XLSX = await import('xlsx');
-  const buf = await file.arrayBuffer();
-  const wb = XLSX.read(buf, { type: 'array' });
-  const ws = wb.Sheets[wb.SheetNames[0]!];
-  if (!ws) return { courses: [], warnings: ['文件里没有工作表'] };
-  const rows = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1, defval: '' });
-  return parseTimetable(rows.map((r) => r.map((c) => (c === null || c === undefined ? '' : String(c)))));
+  const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: false });
+  return wb.SheetNames.map((name) => {
+    const ws = wb.Sheets[name]!;
+    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+    if (range.e.r > 10000 || range.e.c > 200) throw new Error('工作表范围过大，请只导出课表部分');
+    const rows = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1, defval: '', raw: false });
+    return { name, result: parseTimetable(rows, { sheet: name, merges: ws['!merges'] }) };
+  });
 }
 
 export default function TimetableSection() {
@@ -48,10 +38,15 @@ export default function TimetableSection() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [parsing, setParsing] = useState(false);
   const [draft, setDraft] = useState<ParsedTimetable | null>(null); // 待确认的解析结果
-  const [semesterStart, setSemesterStart] = useState('');
-  const [startErr, setStartErr] = useState('');
-  const [saving, setSaving] = useState(false);
+  const [sheets, setSheets] = useState<{ name: string; result: ParsedTimetable }[]>([]);
+  const [sheetIndex, setSheetIndex] = useState(0);
+  const [editing, setEditing] = useState(false);
+  const [baseline, setBaseline] = useState<TimetableDTO | null>(null);
+  const [editorKey, setEditorKey] = useState(0);
+  const [versions, setVersions] = useState<TimetableVersion[] | null>(null);
+  const [restoreChoice, setRestoreChoice] = useState<TimetableVersion | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [confirmedRevision, setConfirmedRevision] = useState(0);
   const [clearing, setClearing] = useState(false);
 
   // 教务系统(csujwc)直连导入状态:学号/密码只在本组件内存里,保存前即清空
@@ -71,45 +66,31 @@ export default function TimetableSection() {
     if (!file) return;
     setParsing(true);
     try {
-      const parsed = await parseFile(file);
+      const results = await parseFile(file);
+      if (!results.length) throw new Error('文件里没有工作表');
+      setSheets(results);
+      setSheetIndex(0);
+      setEditing(false);
+      setBaseline(saved);
+      setEditorKey((k) => k + 1);
+      const parsed = results[0]!.result;
       setDraft(parsed);
-      setSemesterStart(parsed.semesterStart || saved?.semester_start || defaultSemesterStart());
       if (parsed.courses.length === 0) {
         toast('没解析出课程，看看 warnings', 'error');
       }
-    } catch {
+    } catch (e) {
       // 本地解析失败（不是接口错误），只给一条友好提示，不再叠一条原始报错
-      toast('读不出来这个文件，确认是教务系统导出的课表 xls/xlsx', 'error');
+      toast(e instanceof Error ? e.message : '读不出来这个文件，确认是教务系统导出的课表 xls/xlsx', 'error');
     } finally {
       setParsing(false);
       if (fileRef.current) fileRef.current.value = '';
     }
   }
 
-  async function onSave() {
-    if (!draft) return;
-    if (!isMonday(semesterStart)) {
-      setStartErr('「第一周周一」必须是一个周一（上海时区）');
-      return;
-    }
-    setStartErr('');
-    setSaving(true);
-    try {
-      await saveTimetable({ semester_start: semesterStart, courses: draft.courses });
-      toast(`课表已保存：${draft.courses.length} 个课次`);
-      setDraft(null);
-      await refresh();
-    } catch (e) {
-      toastError(toast, e);
-    } finally {
-      setSaving(false);
-    }
-  }
-
   async function onClear() {
     setClearing(true);
     try {
-      await clearTimetable();
+      await clearTimetable(confirmedRevision);
       toast('课表已清空');
       setConfirmClear(false);
       await refresh();
@@ -152,8 +133,21 @@ export default function TimetableSection() {
     setCsuErr('');
     try {
       const parsed = await csuFetchCourses(csuSession, csuCode.trim());
-      setDraft(parsed);
-      setSemesterStart(saved?.semester_start || defaultSemesterStart());
+      const tableNames = [...new Set(parsed.items?.map((i) => i.sheet) ?? [])];
+      const alternatives = tableNames.map((name) => ({
+        name,
+        result: {
+          ...parsed,
+          courses: parsed.courses.filter((c) => c.source?.sheet === name),
+          items: parsed.items?.filter((i) => i.sheet === name),
+        },
+      }));
+      setDraft(alternatives.length > 1 ? alternatives[0]!.result : parsed);
+      setSheets(alternatives.length > 1 ? alternatives : []);
+      setSheetIndex(0);
+      setEditing(false);
+      setBaseline(saved);
+      setEditorKey((k) => k + 1);
       // 账号密码用完即清,不留在界面上
       setCsuPass('');
       setCsuSession('');
@@ -176,18 +170,12 @@ export default function TimetableSection() {
     }
   }
 
-  // 预览网格：把解析出的课程全部塞进去（不按周数过滤，便于人工核对）
-  const previewDays = Array.from({ length: 7 }, (_, i) => ({
-    from: previewMonday() + i * DAY,
-    isToday: false,
-  }));
-  const previewCourses: CourseDTO[] = draft?.courses ?? [];
-
   return (
     <section id="timetable">
       <h2 className="text-lg font-semibold text-slate-900">课表</h2>
       <p className="mt-1 text-sm text-slate-500">
-        两种导入:① 电脑连着校园网时,用教务系统学号一键拉取(下面);② 教务系统导出的 xls 文件(浏览器本地解析,不上传)。
+        两种导入:① 电脑连着校园网时,用教务系统学号一键拉取(下面);② 教务系统导出的 xls
+        文件(浏览器本地解析,不上传)。
       </p>
 
       {/* 教务系统(csujwc)直连导入 */}
@@ -196,7 +184,8 @@ export default function TimetableSection() {
           <div>
             <p className="text-sm font-semibold text-slate-700">从中南大学教务系统一键导入</p>
             <p className="mt-1 text-xs text-slate-400">
-              用统一身份认证的学号和密码(信息门户那套)→ 看图输验证码(需要时) → 自动拉课表。密码只用于本次登录,不保存。
+              用统一身份认证的学号和密码(信息门户那套)→ 看图输验证码(需要时) →
+              自动拉课表。密码只用于本次登录,不保存。
             </p>
           </div>
           <button
@@ -327,8 +316,8 @@ export default function TimetableSection() {
       {!loading && hasSaved && !draft && (
         <div className="mt-3 rounded-xl border border-slate-200 bg-white p-4">
           <p className="text-sm text-slate-700">
-            当前课表：第一周周一 <span className="font-medium">{saved!.semester_start}</span>，
-            共 <span className="font-medium">{saved!.courses.length}</span> 个课次。
+            当前课表：第一周周一 <span className="font-medium">{saved!.semester_start}</span>， 共{' '}
+            <span className="font-medium">{saved!.courses.length}</span> 个课次。
           </p>
           <div className="mt-3 flex gap-2">
             <button
@@ -340,7 +329,10 @@ export default function TimetableSection() {
             </button>
             <button
               type="button"
-              onClick={() => setConfirmClear(true)}
+              onClick={() => {
+                setConfirmedRevision(saved?.revision ?? 0);
+                setConfirmClear(true);
+              }}
               className="rounded-lg border border-rose-200 px-3 py-2 text-sm text-rose-600 hover:bg-rose-50"
             >
               清空课表
@@ -377,64 +369,125 @@ export default function TimetableSection() {
       />
 
       {/* 解析预览 + 确认 */}
-      {draft && (
-        <div className="mt-3">
-          <div className="rounded-xl border border-slate-200 bg-white p-4">
-            <h2 className="text-sm font-semibold text-slate-700">解析结果预览</h2>
-            <p className="mt-1 text-xs text-slate-400">
-              共 {draft.courses.length} 个课次。课程以灰底显示；核对无误后填「第一周周一」再保存。
-            </p>
-
-            {draft.warnings.length > 0 && (
-              <ul className="mt-3 space-y-1 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                {draft.warnings.map((w, i) => (
-                  <li key={i}>⚠️ {w}</li>
-                ))}
-              </ul>
-            )}
-
-            <div className="mt-4 flex flex-wrap items-center gap-3">
-              <label className="flex items-center gap-2 text-sm text-slate-600">
-                第一周周一
-                <input
-                  type="date"
-                  value={semesterStart}
-                  onChange={(e) => {
-                    setSemesterStart(e.target.value);
-                    setStartErr('');
-                  }}
-                  className="rounded-lg border border-slate-200 px-2 py-1.5 text-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                />
-              </label>
-              {startErr && <span className="text-xs text-rose-600">{startErr}</span>}
-            </div>
-
-            <div className="mt-4 flex gap-2">
+      <div className="mt-3 flex flex-wrap gap-2">
+        {!hasSaved && (
+          <button
+            className="rounded border px-3 py-2 text-sm"
+            onClick={() => {
+              setDraft({ courses: [], warnings: [] });
+              setBaseline(saved);
+              setEditing(true);
+              setSheets([]);
+              setEditorKey((k) => k + 1);
+            }}
+          >
+            手动创建课表
+          </button>
+        )}
+        {hasSaved && (
+          <button
+            className="rounded border px-3 py-2 text-sm"
+            onClick={() => {
+              setDraft({ courses: saved!.courses, warnings: [], items: saved!.import_items });
+              setBaseline(saved);
+              setEditing(true);
+              setSheets([]);
+              setEditorKey((k) => k + 1);
+            }}
+          >
+            编辑课程、作息与单次调课
+          </button>
+        )}
+        <button
+          className="rounded border px-3 py-2 text-sm"
+          onClick={() =>
+            void getTimetableVersions()
+              .then(setVersions)
+              .catch((e) => toastError(toast, e))
+          }
+        >
+          查看可恢复版本（最近 20 个）
+        </button>
+      </div>
+      {versions && (
+        <div className="mt-3 space-y-2 rounded border p-3 text-sm">
+          <h3>可恢复版本</h3>
+          {!versions.length && <p>暂无旧版本；每次保存、清空、恢复前都会保留上一版。</p>}
+          {versions.map((v) => (
+            <div key={v.id} className="flex flex-wrap items-center gap-2">
+              <span>
+                {new Date(v.created_at).toLocaleString()} · {v.reason}前 · {v.timetable.courses.length} 条规则
+              </span>
               <button
-                type="button"
-                onClick={() => void onSave()}
-                disabled={saving || draft.courses.length === 0}
-                className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-60"
+                className="rounded border px-2 py-1"
+                onClick={() => {
+                  setConfirmedRevision(saved?.revision ?? 0);
+                  setRestoreChoice(v);
+                }}
               >
-                {saving ? '保存中…' : '保存课表'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setDraft(null)}
-                disabled={saving}
-                className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-60"
-              >
-                放弃
+                恢复此版本
               </button>
             </div>
-          </div>
-
-          {/* 只读预览网格：所有课程都显示（不按周过滤），人工核对格子位置对不对 */}
-          <div className="mt-4 rounded-xl border border-slate-200 bg-white p-3">
-            <WeekGrid days={previewDays} courses={previewCourses} itemsByDay={[]} onPick={() => {}} readonly />
-          </div>
+          ))}
         </div>
       )}
+      {sheets.length > 1 && draft && (
+        <label className="mt-4 block text-sm">
+          选择工作表（不会自动丢弃或合并其他 sheet）
+          <select
+            className="ml-2 rounded border p-2"
+            value={sheetIndex}
+            onChange={(e) => {
+              const i = Number(e.target.value);
+              setSheetIndex(i);
+              setDraft(sheets[i]!.result);
+              setEditorKey((k) => k + 1);
+            }}
+          >
+            {sheets.map((s, i) => (
+              <option key={s.name} value={i}>
+                {s.name} · {s.result.courses.length} 条规则 ·{' '}
+                {s.result.items?.filter((x) => x.status === 'pending').length ?? 0} 待确认
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {draft && (
+        <TimetableEditor
+          key={editorKey}
+          parsed={draft}
+          saved={baseline}
+          editing={editing}
+          onCancel={() => setDraft(null)}
+          onSaved={() => {
+            setDraft(null);
+            setVersions(null);
+            toast('课表已保存；原始对账与上一版本已保留');
+            void refresh();
+          }}
+        />
+      )}
+      <ConfirmDialog
+        open={!!restoreChoice}
+        title="恢复此课表版本？"
+        confirmText="确认恢复"
+        onCancel={() => setRestoreChoice(null)}
+        onConfirm={() => {
+          if (restoreChoice)
+            void restoreTimetable(restoreChoice.id, confirmedRevision)
+              .then(() => {
+                setRestoreChoice(null);
+                setDraft(null);
+                setVersions(null);
+                void refresh();
+                toast('课表已恢复；恢复前版本也已保留');
+              })
+              .catch((e) => toastError(toast, e));
+        }}
+      >
+        这会替换当前课程、作息和调课例外；恢复前状态仍可撤销。
+      </ConfirmDialog>
 
       <ConfirmDialog
         open={confirmClear}
@@ -446,7 +499,7 @@ export default function TimetableSection() {
         onConfirm={() => void onClear()}
         onCancel={() => setConfirmClear(false)}
       >
-        将删除已保存的全部课次；群↔课程绑定不受影响（只是不再有课表上下文给 AI）。
+        将清空已保存课程；操作前会保留可恢复版本。群与课程绑定不受影响。
       </ConfirmDialog>
     </section>
   );

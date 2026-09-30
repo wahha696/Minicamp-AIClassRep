@@ -82,6 +82,53 @@ describe('mock 模式', () => {
     expect(unlocked.level_locked).toBe(false);
   });
 
+  it('待确认提案可接受或拒绝，决定后立即返回最新详情', async () => {
+    const c = await loadClient(true);
+    const before = await c.getEvent(5);
+    expect(before.pending_proposals[0]).toMatchObject({
+      id: 501,
+      kind: 'update',
+      reason: 'low_confidence',
+      changes: { location: { from: '学生活动中心 201', to: '学生活动中心 305' } },
+    });
+    const accepted = await c.resolveEventProposal(5, 501, 'accept', before.version);
+    expect(accepted).toMatchObject({
+      status: 'active',
+      location: '学生活动中心 305',
+      pending_proposals: [],
+    });
+
+    const fresh = await loadClient(true);
+    const again = await fresh.getEvent(5);
+    const rejected = await fresh.resolveEventProposal(5, 501, 'reject', again.version);
+    expect(rejected).toMatchObject({
+      status: 'active',
+      location: '学生活动中心 201',
+      pending_proposals: [],
+    });
+  });
+
+  it('人工修正时间地点会关闭待确认并保护改过的字段；旧版本写入返回 409', async () => {
+    const c = await loadClient(true);
+    const before = await c.getEvent(5);
+    const correctedStart = before.start_at! + 2 * 60 * 60_000;
+    const corrected = await c.patchEvent(5, {
+      start_at: correctedStart,
+      location: '艺术楼 102',
+      expected_version: before.version,
+    });
+    expect(corrected).toMatchObject({
+      status: 'active',
+      start_at: correctedStart,
+      location: '艺术楼 102',
+      pending_proposals: [],
+    });
+    expect(corrected.manual_locked_fields).toEqual(expect.arrayContaining(['start_at', 'location']));
+    await expect(c.patchEvent(5, { location: '过期修改', expected_version: before.version })).rejects.toMatchObject({
+      status: 409,
+    });
+  });
+
   it('不存在的事件抛 ApiError 404', async () => {
     const c = await loadClient(true);
     await expect(c.getEvent(999)).rejects.toMatchObject({ message: '事件不存在', status: 404 });
@@ -182,12 +229,12 @@ describe('mock 模式', () => {
     expect((await c.getHealth()).qq).toBe('waiting_qr');
     await expect(c.syncNow()).rejects.toMatchObject({ message: 'QQ 未连接', status: 409 });
 
-    await c.restartConnect();
+    await c.restartConnect({ accountEpoch: '10001:1', uin: '10001' });
     expect(await c.getConnectStatus()).toMatchObject({ state: 'online', nickname: '演示同学' });
 
-    await c.logoutConnect();
+    await c.logoutConnect({ accountEpoch: '10001:1', uin: '10001' });
     expect((await c.getConnectStatus()).state).toBe('waiting_qr');
-    await c.restartConnect();
+    await c.restartConnect({ accountEpoch: '10001:1', uin: null });
   });
 
   it('health 字段齐全，jev 为 disabled', async () => {
@@ -202,14 +249,25 @@ describe('mock 模式', () => {
 
 describe('真实模式（fetch 打桩）', () => {
   const calls: { url: string; method: string; body?: unknown }[] = [];
+  const requestHeaders: Headers[] = [];
   let reply: { status: number; body: unknown } = { status: 200, body: {} };
 
   beforeEach(() => {
     calls.length = 0;
+    requestHeaders.length = 0;
     reply = { status: 200, body: {} };
     vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
       calls.push({ url, method: init.method!, body: init.body ? JSON.parse(String(init.body)) : undefined });
-      return new Response(JSON.stringify(reply.body), { status: reply.status });
+      requestHeaders.push(new Headers(init.headers));
+      const hasExplicitConnectReply =
+        reply.body !== null && typeof reply.body === 'object' && 'account_epoch' in reply.body;
+      const response = url === '/api/connect/status' && !hasExplicitConnectReply
+        ? {
+            status: 200,
+            body: { state: 'online', account_epoch: '10001:1', since: 1, first_run: false },
+          }
+        : reply;
+      return new Response(JSON.stringify(response.body), { status: response.status });
     });
   });
   afterEach(() => vi.unstubAllGlobals());
@@ -217,10 +275,13 @@ describe('真实模式（fetch 打桩）', () => {
   it('每个函数的方法、路径、请求体都符合 §7', async () => {
     const c = await loadClient(false);
     expect(c.isMock).toBe(false);
+    await c.getConnectStatus();
     await c.getToday();
     await c.getEvents();
     await c.getEvents(1, 2);
     await c.getEvent(5);
+    await c.patchEvent(5, { location: 'A203', expected_version: 2 });
+    await c.resolveEventProposal(5, 17, 'accept', 2);
     await c.patchEvent(5, { status: 'done' });
     await c.patchEvent(5, { level: 3 });
     await c.patchEvent(5, { level: null });
@@ -233,9 +294,8 @@ describe('真实模式（fetch 打桩）', () => {
     await c.resetDemo();
     await c.undoReplay('reschedule');
     await c.importText('群', '文本');
-    await c.getConnectStatus();
-    await c.restartConnect();
-    await c.logoutConnect();
+    await c.restartConnect({ accountEpoch: '10001:1', uin: '10001' });
+    await c.logoutConnect({ accountEpoch: '10001:1', uin: '10001' });
     await c.syncNow();
     await c.syncNow(30);
     await c.getHealth();
@@ -254,26 +314,32 @@ describe('真实模式（fetch 打桩）', () => {
     await c.getTrash();
     await c.restoreTrash('change-12');
     expect(calls).toEqual([
+      { method: 'GET', url: '/api/connect/status' },
       { method: 'GET', url: '/api/today' },
       { method: 'GET', url: '/api/events' },
       { method: 'GET', url: '/api/events?from=1&to=2' },
       { method: 'GET', url: '/api/events/5' },
+      { method: 'PATCH', url: '/api/events/5', body: { location: 'A203', expected_version: 2 } },
+      { method: 'POST', url: '/api/events/5/proposals/17/resolve', body: { decision: 'accept', expected_version: 2 } },
       { method: 'PATCH', url: '/api/events/5', body: { status: 'done' } },
       { method: 'PATCH', url: '/api/events/5', body: { level: 3 } },
       { method: 'PATCH', url: '/api/events/5', body: { level: null } },
       { method: 'GET', url: '/api/groups' },
       { method: 'PATCH', url: '/api/groups/123', body: { enabled: true } },
       { method: 'PATCH', url: '/api/groups/123', body: { course_name: '线性代数' } },
-      { method: 'DELETE', url: '/api/groups/123/data' },
+      { method: 'DELETE', url: '/api/groups/123/data', body: {} },
       { method: 'GET', url: '/api/demo/scenarios' },
       { method: 'POST', url: '/api/demo/replay', body: { scenario: 'reschedule' } },
-      { method: 'POST', url: '/api/demo/reset' },
+      { method: 'POST', url: '/api/demo/reset', body: {} },
       { method: 'POST', url: '/api/demo/undo', body: { scenario: 'reschedule' } },
       { method: 'POST', url: '/api/import/text', body: { groupName: '群', text: '文本' } },
-      { method: 'GET', url: '/api/connect/status' },
-      { method: 'POST', url: '/api/connect/restart' },
-      { method: 'POST', url: '/api/connect/logout' },
-      { method: 'POST', url: '/api/sync' },
+      { method: 'POST', url: '/api/connect/restart', body: {
+        expected_account_epoch: '10001:1', expected_uin: '10001',
+      } },
+      { method: 'POST', url: '/api/connect/logout', body: {
+        expected_account_epoch: '10001:1', expected_uin: '10001',
+      } },
+      { method: 'POST', url: '/api/sync', body: {} },
       { method: 'POST', url: '/api/sync', body: { days: 30 } },
       { method: 'GET', url: '/health' },
       { method: 'GET', url: '/api/settings/llm' },
@@ -283,16 +349,51 @@ describe('真实模式（fetch 打桩）', () => {
       { method: 'PATCH', url: '/api/todos/1', body: { done: true } },
       { method: 'GET', url: '/api/timetable' },
       { method: 'PUT', url: '/api/timetable', body: { semester_start: '2026-09-07', courses: [] } },
-      { method: 'DELETE', url: '/api/timetable' },
+      { method: 'DELETE', url: '/api/timetable', body: {} },
       { method: 'GET', url: '/api/settings/memory' },
       { method: 'PUT', url: '/api/settings/memory', body: { enabled: true } },
-      { method: 'DELETE', url: '/api/settings/memory/rules/2' },
-      { method: 'DELETE', url: '/api/settings/memory' },
+      { method: 'DELETE', url: '/api/settings/memory/rules/2', body: {} },
+      { method: 'DELETE', url: '/api/settings/memory', body: {} },
       { method: 'GET', url: '/api/trash' },
-      { method: 'POST', url: '/api/trash/change-12/restore' },
+      { method: 'POST', url: '/api/trash/change-12/restore', body: {} },
     ]);
-    expect(c.exportIcsUrl(1, 2)).toBe('/api/export.ics?from=1&to=2');
-    expect(c.eventIcsUrl(5)).toBe('/api/events/5/export.ics');
+    expect(c.exportIcsUrl(1, 2)).toBe('/api/export.ics?from=1&to=2&account_epoch=10001%3A1');
+    expect(c.eventIcsUrl(5)).toBe('/api/events/5/export.ics?account_epoch=10001%3A1');
+    for (const [index, call] of calls.entries()) {
+      if (call.method !== 'GET' && call.method !== 'HEAD') {
+        expect(requestHeaders[index]!.get('Content-Type'), `${call.method} ${call.url}`).toBe('application/json');
+      }
+    }
+  });
+
+  it('读取连接状态后，后续账号业务读写都带账号库 epoch', async () => {
+    const c = await loadClient(false);
+    reply = {
+      status: 200,
+      body: { state: 'online', account_epoch: '10001:37', since: Date.now(), first_run: false },
+    };
+    await c.getConnectStatus();
+    reply = { status: 200, body: {} };
+    await c.getToday();
+    await c.patchEvent(1, { status: 'done', expected_version: 4 });
+    expect(requestHeaders[0]!.get('X-ClassRep-Account-Epoch')).toBeNull();
+    expect(requestHeaders[1]!.get('X-ClassRep-Account-Epoch')).toBe('10001:37');
+    expect(requestHeaders[2]!.get('X-ClassRep-Account-Epoch')).toBe('10001:37');
+  });
+
+  it('首个账号业务请求会先取 epoch，且直接 fetch 的桌宠通道也统一携带', async () => {
+    const c = await loadClient(false);
+    await c.getToday();
+    await c.accountScopedFetch('/api/pet/chat', { method: 'POST' });
+
+    expect(calls.map(({ method, url }) => ({ method, url }))).toEqual([
+      { method: 'GET', url: '/api/connect/status' },
+      { method: 'GET', url: '/api/today' },
+      { method: 'POST', url: '/api/pet/chat' },
+    ]);
+    expect(requestHeaders[0]!.get('X-ClassRep-Account-Epoch')).toBeNull();
+    expect(requestHeaders[1]!.get('X-ClassRep-Account-Epoch')).toBe('10001:1');
+    expect(requestHeaders[2]!.get('X-ClassRep-Account-Epoch')).toBe('10001:1');
   });
 
   it('出错时抛出响应里的 error 字段', async () => {
@@ -307,7 +408,11 @@ describe('真实模式（fetch 打桩）', () => {
 
   it('响应不是 JSON（旧后端的纯文本 404）时也给出可读错误', async () => {
     const c = await loadClient(false);
-    vi.stubGlobal('fetch', async () => new Response('404 Not Found', { status: 404 }));
+    vi.stubGlobal('fetch', async (url: string) =>
+      url === '/api/connect/status'
+        ? new Response(JSON.stringify({ state: 'online', account_epoch: '10001:1', since: 1, first_run: false }))
+        : new Response('404 Not Found', { status: 404 }),
+    );
     await expect(c.getToday()).rejects.toMatchObject({ message: '请求失败（404）', status: 404 });
   });
 

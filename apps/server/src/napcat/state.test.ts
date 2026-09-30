@@ -64,6 +64,23 @@ describe('deriveConnectStatus（架构.md §4，自上而下先命中为准）',
     expect(r.uin).toBe('10001');
   });
 
+  it('4b. online 但账号库挂载失败 → error（S04：不能假在线静默丢消息）', () => {
+    const r = deriveConnectStatus(base({
+      onebot: { wsConnected: true, everOnline: true, selfId: '10001', kicked: false, accountError: 'SQLITE_CANTOPEN' },
+      uin: '10001',
+    }));
+    expect(r.state).toBe('error');
+    expect(r.message).toContain('账号数据初始化失败');
+  });
+
+  it('账号初始化失败即使 WS 已断开也保持 error，不伪装成 reconnecting', () => {
+    const r = deriveConnectStatus(base({
+      onebot: { wsConnected: false, everOnline: true, selfId: '10001', kicked: false, accountError: 'SETTINGS_WRITE_FAILED' },
+      uin: '10001',
+    }));
+    expect(r.state).toBe('error');
+  });
+
   it('5. waiting_qr：进程在、WS 未连上、二维码已出现', () => {
     const r = deriveConnectStatus(base({ qrcodeExists: true }));
     expect(r.state).toBe('waiting_qr');

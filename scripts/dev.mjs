@@ -5,7 +5,7 @@
 //       2) 前端产物有更新才重新打包（增量缓存）  3) 启动后端并自动打开浏览器
 // 加 --no-update 跳过第 0 步；不在 main 分支（正在开发别的分支）或没网时也会跳过，照常启动。
 // 再运行一次就是「重启」。杀后端 / 起后端 / 健康检查共用 scripts/lib/start-server.mjs（bootstrap.mjs 同款）。
-import { execSync, spawn } from 'node:child_process';
+import { execSync, spawn, spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -16,6 +16,7 @@ import {
   startServerChild,
 } from './lib/start-server.mjs';
 import { webBuildFresh } from './lib/build-cache.mjs';
+import { corepackEnv, resolvePnpm } from './lib/pnpm.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const background = process.argv.includes('--background');
@@ -24,6 +25,23 @@ const noUpdate = process.argv.includes('--no-update');
 // 后台模式没有窗口，输出都写进日志文件，出问题时看 data/logs/background.log
 const bgLog = background ? openBackgroundLog(ROOT, !noUpdate) : null; // 更新后重跑时接着写
 const log = bgLog ? bgLog.log : ((msg) => console.log(msg));
+
+// pnpm 解析（D02，和 bootstrap.mjs 同一套）：PATH 里的坏 shim 会探活失败自动跳过
+// → corepack 装到 .corepack/bin → 再不行自动下载 pnpm dist 到 .pnpm-dist/ 用 node 跑。
+// 同学机器上 「npm 里的 pnpm 指到已删除的目录」这种半坏 PATH 就靠这层兜底自愈。
+const pnpm = await resolvePnpm(ROOT, log);
+/** 跑一个 pnpm 子命令。pnpm 不可用时返回 false（由调用方决定报错口径） */
+function runPnpm(args) {
+  if (pnpm === null) return false;
+  const r = spawnSync(pnpm.cmd, [...pnpm.args, ...args], {
+    cwd: ROOT,
+    stdio: bgLog ? bgLog.stdio : 'inherit',
+    shell: pnpm.shell,
+    windowsHide: true,
+    env: { ...process.env, ...corepackEnv() },
+  });
+  return r.status === 0;
+}
 
 /** 第 0 步：拉最新 main。返回 true 表示 dev.mjs 自己被更新了，需要用新版重新跑一遍 */
 function updateToLatest() {
@@ -55,9 +73,7 @@ function updateToLatest() {
   log(`[0/3] 已更新到最新版本 ${before.slice(0, 7)} → ${after.slice(0, 7)}（${changed.length} 个文件）`);
   if (changed.some((f) => /(^|\/)(package\.json|pnpm-lock\.yaml)$/.test(f))) {
     log('    依赖有变化，正在安装...');
-    try {
-      execSync('pnpm install --frozen-lockfile', { cwd: ROOT, stdio: bgLog ? bgLog.stdio : 'inherit', windowsHide: true });
-    } catch {
+    if (!runPnpm(['install', '--frozen-lockfile'])) {
       log('    安装依赖失败，继续尝试启动');
     }
   }
@@ -71,9 +87,7 @@ async function start() {
   log('[2/3] 检查前端产物...');
   if (!webBuildFresh(ROOT)) {
     log('    重新打包前端...');
-    try {
-      execSync('pnpm --filter web build', { cwd: ROOT, stdio: bgLog ? bgLog.stdio : 'inherit', windowsHide: true });
-    } catch {
+    if (!runPnpm(['--filter', 'web', 'build'])) {
       log('\n前端打包失败，请把上面的报错发给开发同学。');
       if (background) openBrowser(join(ROOT, 'data', 'logs', 'background.log'));
       process.exit(1);

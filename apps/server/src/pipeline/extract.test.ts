@@ -97,6 +97,15 @@ describe('parseExtraction', () => {
     expect(r.events[0]?.source_message_ids).toEqual(['m1']);
   });
 
+  it('事件过滤后没有任何有效来源时整个输出判为不合格，防止无法审计的重放重复', () => {
+    const r = parseExtraction(
+      JSON.stringify({ events: [ev({ source_message_ids: ['not-in-this-batch'] })] }),
+      ids,
+    );
+    expect(r).toMatchObject({ ok: false });
+    if (!r.ok) expect(r.error).toContain('source_message_ids');
+  });
+
   it('update 可以不给标题；空串字段当 null；update_of 容忍字符串数字', () => {
     const r = parseExtraction(
       JSON.stringify({ events: [ev({ action: 'update', update_of: '3', title: null, location: ' ', start_at: '' })] }),
@@ -272,7 +281,7 @@ describe('提示词附加段', () => {
           teacher: '彭丽华(副教授)',
           location: 'B座312',
           weekday: 2,
-          block: 2,
+          block: 2, start_period: 3, end_period: 4,
           weeks: [1, 2, 3, 4],
         },
       ],
@@ -299,7 +308,7 @@ describe('提示词附加段', () => {
     saveTimetable({
       semester_start: '2026-09-07',
       courses: [
-        { name: '大学物理', teacher: '', location: 'A101', weekday: 3, block: 1, weeks: [1, 2, 3, 4, 5, 6, 7, 8] },
+        { name: '大学物理', teacher: '', location: 'A101', weekday: 3, block: 1, start_period: 1, end_period: 2, weeks: [1, 2, 3, 4, 5, 6, 7, 8] },
       ],
     });
     // 最早一条 21 天前（第 0/1 周附近），最晚一条 10 分钟前（第 3 周）；第 4 周的课也要列出来

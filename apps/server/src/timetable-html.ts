@@ -1,11 +1,13 @@
 import * as cheerio from 'cheerio';
-import { parseTimetable, type ParsedTimetable } from '../../../shared/timetable-import.js';
+import { parseTimetable, type ParsedTimetable, type MergeRange } from '../../../shared/timetable-import.js';
 
 /** 只展开每张表自己的行；嵌套的校历/布局表不能混入课程行。 */
 export function parseTimetableHtml(html: string): ParsedTimetable | null {
   const $ = cheerio.load(html);
-  for (const table of $('table').toArray()) {
+  const results: ParsedTimetable[] = [];
+  for (const [tableIndex, table] of $('table').toArray().entries()) {
     const rows: string[][] = [];
+    const merges: MergeRange[] = [];
     const occupied = new Set<string>();
     $(table).find('tr').filter((_, tr) => $(tr).closest('table')[0] === table).each((r, tr) => {
       const row: string[] = [];
@@ -16,9 +18,19 @@ export function parseTimetableHtml(html: string): ParsedTimetable | null {
         const rowspan = Math.min(100, Math.max(1, Number($(cell).attr('rowspan')) || 1));
         const copy = $(cell).clone();
         copy.find('table,script,style').remove();
+        // 同一排课有简版和隐藏详情版，按页面的配对 id 只保留详情。
+        // 不能按课程名称去重：同名的不同排课必须保留。
+        copy.find('.kbcontent1').each((_, brief) => {
+          const id = $(brief).attr('id');
+          const detailId = id?.replace(/-1$/, '-2');
+          if (id && detailId !== id && copy.find('.kbcontent').toArray().some(el => $(el).attr('id') === detailId)) {
+            $(brief).remove();
+          }
+        });
         copy.find('br').replaceWith('\n');
         copy.find('div,p').append('\n');
         row[c] = copy.text().replace(/\u00a0/g, ' ').trim();
+        if (rowspan>1 || colspan>1) merges.push({s:{r,c},e:{r:r+rowspan-1,c:c+colspan-1}});
         for (let dr = 0; dr < rowspan; dr++) {
           for (let dc = 0; dc < colspan; dc++) {
             occupied.add(`${r + dr}:${c + dc}`);
@@ -35,12 +47,10 @@ export function parseTimetableHtml(html: string): ParsedTimetable | null {
     }));
     // 必须有完整星期表头或横排节次表头；不能仅凭 id=kbtable 接受校历。
     const transposed = normalized.findIndex(row => row.filter(c => /^\d{1,2}-\d{1,2}$/.test(c)).length >= 2);
-    const weekdays = normalized.findIndex(row => row.includes('星期一') && row.includes('星期日'));
+    const weekdays = normalized.findIndex(row => row.filter(c => /^(星期|周)[一二三四五六日天]$/.test(c)).length>=2);
     if (transposed < 0 && weekdays < 0) continue;
-    const header = transposed >= 0 ? transposed : weekdays;
-    const calendar = normalized.findIndex((row, i) => i > header && row.some(c => /^(校历|月份|作息时间)$/.test(c)));
-    const result = parseTimetable(calendar < 0 ? normalized : normalized.slice(0, calendar));
-    if (result.courses.length) return result;
+    results.push(parseTimetable(normalized, {sheet:`网页表 ${tableIndex+1}`,merges}));
   }
-  return null;
+  if (!results.length) return null;
+  return { courses:results.flatMap(r=>r.courses), warnings:results.flatMap(r=>r.warnings), items:results.flatMap(r=>r.items??[]), semesterStart:results.find(r=>r.semesterStart)?.semesterStart };
 }

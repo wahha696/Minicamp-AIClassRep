@@ -17,9 +17,11 @@ export default function ConnectBanner() {
   if (!banner) return null;
 
   async function onRestart() {
+    if (!data) return;
+    const context = { accountEpoch: data.account_epoch, uin: data.uin ?? null };
     setBusy(true);
     try {
-      await restartConnect();
+      await restartConnect(context);
       await refresh();
     } catch (e) {
       toastError(toast, e);

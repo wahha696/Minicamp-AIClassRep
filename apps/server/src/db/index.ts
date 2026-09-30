@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS events (
   confidence      REAL NOT NULL,
   level           INTEGER NOT NULL DEFAULT 2,   -- 危机等级 1 低 2 中 3 高 4 紧急
   level_locked    INTEGER NOT NULL DEFAULT 0, -- 用户手动设过 = 1，AI 更新不改 level
+  manual_locked_fields TEXT NOT NULL DEFAULT '[]', -- 用户手动修正过的业务字段，AI 不再覆盖
   version         INTEGER NOT NULL DEFAULT 1,
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
@@ -102,6 +103,26 @@ CREATE TABLE IF NOT EXISTS event_history (
   source_message_id TEXT,
   changed_at        INTEGER NOT NULL
 );
+-- 低置信度的新建/改期/取消先保存为结构化提案，由用户接受或拒绝。
+-- 每次新提案会把同事件旧的 pending 提案标为 superseded，历史仍保留可审计。
+CREATE TABLE IF NOT EXISTS event_proposals (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id          INTEGER NOT NULL,
+  kind              TEXT NOT NULL,       -- create | update | cancel
+  reason            TEXT NOT NULL DEFAULT 'low_confidence', -- low_confidence | manual_lock_conflict
+  proposed_changes  TEXT NOT NULL,       -- JSON：Record<字段, {from,to}>
+  source_message_ids TEXT NOT NULL DEFAULT '[]',
+  confidence        REAL NOT NULL,
+  event_fingerprint TEXT,                -- create 提案的原始完整事件快照；人工编辑后仍可稳定识别重放
+  base_version      INTEGER NOT NULL,
+  base_status       TEXT NOT NULL,
+  status            TEXT NOT NULL DEFAULT 'pending', -- pending | accepted | rejected | superseded
+  created_at        INTEGER NOT NULL,
+  resolved_at       INTEGER,
+  UNIQUE(event_id, kind, source_message_ids)
+);
+CREATE INDEX IF NOT EXISTS idx_event_proposals_event_status
+  ON event_proposals(event_id, status, id);
 CREATE TABLE IF NOT EXISTS todos (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   title      TEXT NOT NULL,
@@ -130,15 +151,26 @@ CREATE TABLE IF NOT EXISTS level_rules (
   feedback_ids TEXT NOT NULL,
   created_at   INTEGER NOT NULL
 );
--- 课表：weekday 1=周一…7=周日，block 1–5，weeks 是 JSON 数组如 [3,4,...,16]
+-- 课表（PR#31 模型）：weekday 1=周一…7=周日；block 是排序/显示提示（两节一块 1–6）；
+-- weeks 是 JSON 数组如 [3,4,...,16]；details 是整门课的 JSON（start_period/end_period 精确节次、
+-- 校区、来源、例外等都在这里，列表查询只按 weekday/block 粗筛，展示时读 details）
 CREATE TABLE IF NOT EXISTS courses (
-  id       INTEGER PRIMARY KEY AUTOINCREMENT,
-  name     TEXT NOT NULL,
-  teacher  TEXT NOT NULL DEFAULT '',
-  location TEXT NOT NULL DEFAULT '',
-  weekday  INTEGER NOT NULL,
-  block    INTEGER NOT NULL,
-  weeks    TEXT NOT NULL
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  name         TEXT NOT NULL,
+  teacher      TEXT NOT NULL DEFAULT '',
+  location     TEXT NOT NULL DEFAULT '',
+  weekday      INTEGER NOT NULL,
+  block        INTEGER NOT NULL,
+  weeks        TEXT NOT NULL,
+  details      TEXT NOT NULL DEFAULT '{}'
+);
+-- 每群历史补齐游标（R03）：补拉到哪、是否到顶、被页数上限截断没有，都留痕可展示
+CREATE TABLE IF NOT EXISTS group_sync (
+  group_id     TEXT PRIMARY KEY,
+  last_sync_at INTEGER NOT NULL,
+  oldest_at    INTEGER,
+  complete     INTEGER NOT NULL DEFAULT 0,
+  reason       TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS kv (
   key   TEXT PRIMARY KEY,
@@ -154,8 +186,8 @@ CREATE TABLE IF NOT EXISTS message_seen (
 );
 `;
 
-/** 当前 schema 版本（D3）：1 = 老库（单列 message_id 主键）；2 = (group_id, message_id) 复合主键 */
-const SCHEMA_VERSION = 2;
+/** 当前 schema 版本（D3）：v5 = 事件待确认提案与人工字段锁；v6 = create 提案原始指纹。 */
+const SCHEMA_VERSION = 6;
 
 function schemaVersion(): number {
   try {
@@ -219,13 +251,83 @@ function migrateToV2(): void {
   }
 }
 
+/**
+ * v3 → v4：PR#31 合并后的统一课表存储。courses 回到「block + details JSON」形状——
+ * block 只用于排序/显示，精确节次等完整信息在 details 里。
+ * 两种来源：
+ *   · v1/v2 老库（有 block 无 details）：ensureColumn 补 details 即可，不用重建
+ *   · v3 迁过的库（start_section/end_section、无 block）：重建表，block 由节次折回，
+ *     精确节次写进 details.start_period/end_period 保住原信息
+ */
+function migrateToV4(): void {
+  const cols = db.prepare('PRAGMA table_info(courses)').all() as Array<{ name: string }>;
+  if (cols.some((c) => c.name === 'block')) return; // v1/v2/v4 形状，无需重建
+  if (!cols.some((c) => c.name === 'start_section')) return; // 意外形状不动
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    db.exec(`
+      CREATE TABLE courses_v4 (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        name      TEXT NOT NULL,
+        teacher   TEXT NOT NULL DEFAULT '',
+        location  TEXT NOT NULL DEFAULT '',
+        weekday   INTEGER NOT NULL,
+        block     INTEGER NOT NULL,
+        weeks     TEXT NOT NULL,
+        details   TEXT NOT NULL DEFAULT '{}'
+      );
+      INSERT INTO courses_v4 (id, name, teacher, location, weekday, block, weeks, details)
+        SELECT id, name, teacher, location, weekday,
+               (start_section + 1) / 2, weeks,
+               json_object('start_period', start_section, 'end_period', end_section)
+        FROM courses;
+      DROP TABLE courses;
+      ALTER TABLE courses_v4 RENAME TO courses;
+    `);
+    db.exec('COMMIT');
+  } catch (e) {
+    rollbackTx();
+    throw e;
+  }
+}
+
 /** 老库自动升级：补列 + 版本化迁移（D3）。在 db.exec(SCHEMA) 之后调用。 */
 function migrate(): void {
+  ensureColumn('courses', 'details', "details TEXT NOT NULL DEFAULT '{}'");
+  db.exec(`CREATE TABLE IF NOT EXISTS timetable_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL,
+    reason TEXT NOT NULL, snapshot TEXT NOT NULL
+  )`);
   ensureColumn('events', 'level', 'level INTEGER NOT NULL DEFAULT 2');
   ensureColumn('events', 'level_locked', 'level_locked INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('events', 'manual_locked_fields', "manual_locked_fields TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn('event_proposals', 'reason', "reason TEXT NOT NULL DEFAULT 'low_confidence'");
+  ensureColumn('event_proposals', 'event_fingerprint', 'event_fingerprint TEXT');
+  // v5 的 create 提案没有独立快照：升级时只从当前事件行回填一次。之后人工编辑 events
+  // 不会再改变这个值；新提案则在 reconcile 创建时直接保存 LLM 的原始完整事件。
+  db.exec(`
+    UPDATE event_proposals
+       SET event_fingerprint = (
+         SELECT json_object(
+           'type', e.type,
+           'title', e.title,
+           'description', e.description,
+           'start_at', e.start_at,
+           'end_at', e.end_at,
+           'deadline_at', e.deadline_at,
+           'location', e.location,
+           'action_required', e.action_required,
+           'level', e.level
+         )
+           FROM events e
+          WHERE e.id = event_proposals.event_id
+       )
+     WHERE kind = 'create' AND event_fingerprint IS NULL
+  `);
   ensureColumn('groups', 'course_name', 'course_name TEXT');
   db.prepare("INSERT OR IGNORE INTO kv (key, value) VALUES ('memory_enabled', '1')").run();
   if (schemaVersion() < 2) migrateToV2();
+  if (schemaVersion() < 4) migrateToV4(); // v3 是过渡形状，直接统一到 v4
   db.prepare(
     "INSERT INTO kv (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
   ).run(String(SCHEMA_VERSION));
@@ -250,14 +352,32 @@ export function rollbackTx(): void {
 /**
  * 打开库并建表（幂等）。启动时由 accounts.ts 的 initAccounts 决定开哪个库，不要直接调这里
  * （accounts.ts 与测试除外）。传 ':memory:' 则是内存库（测试用），DATA_DIR 不会被创建。
- * 重复调用（测试切库 / 换号）时先关掉旧连接，避免句柄泄漏、Windows 上文件被锁。
+ * 新库先在候选连接上完整建表/迁移，全部成功后才替换全局连接。任何一步失败都关闭候选、
+ * 保留旧连接，避免出现“current 仍是 A，但全局 db 已指向半初始化 B”的串号窗口。
  */
 export function openDb(path: string): void {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
-  if (db?.isOpen) db.close();
-  db = new DatabaseSync(path);
-  db.exec('PRAGMA journal_mode=WAL');
-  db.exec(SCHEMA);
-  migrate();
+  const previous = db;
+  const candidate = new DatabaseSync(path);
+  try {
+    // migrate() 等旧代码通过模块级 live binding 访问 db；初始化全程同步，期间不会让出事件循环。
+    db = candidate;
+    db.exec('PRAGMA journal_mode=WAL');
+    db.exec(SCHEMA);
+    migrate();
+
+    // 候选已完整可用，再关闭旧库并提交替换；close 失败同样回滚到旧连接。
+    db = previous;
+    if (previous?.isOpen) previous.close();
+    db = candidate;
+  } catch (error) {
+    db = previous;
+    try {
+      if (candidate.isOpen) candidate.close();
+    } catch {
+      // 候选连接关闭失败不覆盖原始挂库错误；它从未发布给其它异步任务。
+    }
+    throw error;
+  }
   generation++;
 }

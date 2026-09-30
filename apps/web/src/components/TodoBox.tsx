@@ -4,7 +4,7 @@
 // 超过 8 条时只显示前 8 条（等级最高的），底部箭头展开 / 收起其余。
 import { useCallback, useState } from 'react';
 import { createTodo, patchEvent, patchTodo } from '../api/client';
-import type { EventStatus, Level, TodosDTO } from '../api/types';
+import type { EventDetailDTO, EventStatus, Level, TodosDTO } from '../api/types';
 import { toastError } from '../lib/errors';
 import { LEVEL_LABEL, levelStyle } from '../lib/eventMeta';
 import { SKIP_DONE_CONFIRM_KEY, readFlag, writeFlag } from '../lib/status';
@@ -28,6 +28,8 @@ type Row = {
   level: Level;
   type: string; // event 行的真实类型，决定徽标色相；手动待办固定 'other'
   status: EventStatus; // event 行勾选前的状态，撤销时恢复（待确认的不能撤销成进行中）；手动待办固定 'active'
+  version: number;
+  updated_at: number;
   created_at: number;
 };
 
@@ -44,6 +46,8 @@ function toRows(data: TodosDTO): Row[] {
       level: e.level,
       type: e.type as string,
       status: e.status,
+      version: e.version,
+      updated_at: e.updated_at,
       created_at: e.created_at,
     })),
     ...data.manual.map((t) => ({
@@ -54,6 +58,8 @@ function toRows(data: TodosDTO): Row[] {
       level: t.level,
       type: 'other',
       status: 'active' as const,
+      version: 0,
+      updated_at: t.created_at,
       created_at: t.created_at,
     })),
   ];
@@ -92,7 +98,14 @@ export default function TodoBox({ data, loading, onChanged, onOpenEvent }: Props
     const key = `${row.kind}-${row.id}`;
     setBusyId(key);
     try {
-      if (row.kind === 'event') await patchEvent(row.id, { status: 'done' });
+      let completedEvent: EventDetailDTO | undefined;
+      if (row.kind === 'event') {
+        completedEvent = await patchEvent(row.id, {
+          status: 'done',
+          expected_version: row.version,
+          expected_updated_at: row.updated_at,
+        });
+      }
       else await patchTodo(row.id, { done: true });
       onChanged();
       toast(`已完成「${row.title}」`, 'info', {
@@ -100,7 +113,13 @@ export default function TodoBox({ data, loading, onChanged, onOpenEvent }: Props
         onClick: () => {
           void (async () => {
             try {
-              if (row.kind === 'event') await patchEvent(row.id, { status: row.status });
+              if (row.kind === 'event') {
+                await patchEvent(row.id, {
+                  status: row.status,
+                  expected_version: completedEvent!.version,
+                  expected_updated_at: completedEvent!.updated_at,
+                });
+              }
               else await patchTodo(row.id, { done: false });
               onChanged();
             } catch (e) {
@@ -118,6 +137,11 @@ export default function TodoBox({ data, loading, onChanged, onOpenEvent }: Props
 
   /** 点勾：没关提醒就先弹确认，关了就直接完成 */
   function onCheck(row: Row) {
+    if (row.kind === 'event' && row.status === 'pending_confirm') {
+      toast('这条安排还有待确认修改，请先核对通知');
+      onOpenEvent(row.id);
+      return;
+    }
     if (readFlag(SKIP_DONE_CONFIRM_KEY) === '1') {
       void check(row);
       return;
@@ -225,7 +249,11 @@ export default function TodoBox({ data, loading, onChanged, onOpenEvent }: Props
                   checked={confirming !== null && `${confirming.kind}-${confirming.id}` === key}
                   disabled={busyId === key}
                   onChange={() => onCheck(row)}
-                  aria-label={`完成「${row.title}」`}
+                  aria-label={
+                    row.kind === 'event' && row.status === 'pending_confirm'
+                      ? `核对「${row.title}」的待确认修改`
+                      : `完成「${row.title}」`
+                  }
                   className="h-4 w-4 shrink-0 cursor-pointer rounded border-slate-300 accent-slate-700"
                 />
                 {editing ? (

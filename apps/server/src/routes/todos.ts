@@ -3,6 +3,7 @@
 import type { Hono } from 'hono';
 import { z } from 'zod';
 import { db } from '../db/index.js';
+import { parseLockedFields } from '../event-proposals.js';
 import type { EventDTO, EventStatus, EventType, Level, TodoDTO, TodosDTO } from '../types.js';
 
 /** 与 todo.ts 的 isTodo 完全等价的 SQL 条件（活跃 + 无截止 +（完全没时间 或 是作业）） */
@@ -27,6 +28,7 @@ interface EventRow {
   confidence: number;
   level: number;
   level_locked: number;
+  manual_locked_fields: string;
   version: number;
   created_at: number;
   updated_at: number;
@@ -49,6 +51,7 @@ function toEventDTO(row: EventRow): EventDTO {
     confidence: row.confidence,
     level: row.level as Level,
     level_locked: row.level_locked !== 0,
+    manual_locked_fields: parseLockedFields(row.manual_locked_fields),
     version: row.version,
     created_at: row.created_at,
     updated_at: row.updated_at,

@@ -7,7 +7,8 @@ import { exportIcsUrl, getEvents, getTimetable } from '../api/client';
 import type { EventDTO } from '../api/types';
 import EventDrawer from '../components/EventDrawer';
 import SlotStack from '../components/SlotStack';
-import WeekGrid from '../components/WeekGrid';
+import WeekGrid, { CourseCard } from '../components/WeekGrid';
+import { expandTimetable, findConflicts, DAY } from '../../../../shared/timetable';
 import { usePolling } from '../hooks/usePolling';
 import { isUpdated, levelStyle, typeMeta } from '../lib/eventMeta';
 import { hhmm, weekdayDate } from '../lib/time';
@@ -138,10 +139,9 @@ export default function Week() {
   const rangeText = `${new Date(from + 8 * 3_600_000).getUTCMonth() + 1}/${new Date(from + 8 * 3_600_000).getUTCDate()}–${new Date(to - 1 + 8 * 3_600_000).getUTCMonth() + 1}/${new Date(to - 1 + 8 * 3_600_000).getUTCDate()}`;
 
   // 课表形态要用的当周课程（按周数过滤）
-  const weekCourses = useMemo(() => {
-    if (!hasCourses || weekN === null) return [];
-    return timetable.data!.courses.filter((c) => c.weeks.includes(weekN));
-  }, [hasCourses, weekN, timetable.data]);
+  const courseOccurrences = useMemo(() => timetable.data ? expandTimetable(timetable.data,from,to) : [], [timetable.data,from,to]);
+  const courseConflicts = findConflicts(courseOccurrences, (data??[]).filter(e=>e.status!=='cancelled'&&e.status!=='done').map(e=>({id:`event-${e.id}`,start:e.start_at??NaN,end:e.end_at??NaN})));
+  const courseNames = new Map([...courseOccurrences.map(o=>[o.id,o.course.name] as const),...(data??[]).map(e=>[`event-${e.id}`,e.title] as const)]);
 
   const closeDrawer = useCallback(() => setSelectedId(null), []);
   const nav = (delta: number) => setMonday((m) => m + delta * WEEK_MS);
@@ -242,8 +242,10 @@ export default function Week() {
         <div className="mt-6">
           <WeekGrid
             days={days.map((d) => ({ from: d.from, isToday: d.isToday }))}
-            courses={weekCourses}
+            courses={timetable.data?.courses??[]}
+            timetable={timetable.data??undefined}
             itemsByDay={days.map((d) => d.items)}
+            allEvents={data??[]}
             onPick={setSelectedId}
           />
         </div>
@@ -264,10 +266,11 @@ export default function Week() {
                 <span>{weekdayDate(d.from)}</span>
                 {d.isToday && <span className="text-xs font-normal">今天</span>}
               </h2>
+              <div className="mb-2 space-y-2">{courseOccurrences.filter(o=>o.start<d.from+DAY&&o.end>d.from).map(o=><CourseCard key={o.id} occurrence={o} conflicts={courseConflicts} names={courseNames}/>)}</div>
 
               {loading ? (
                 <div className="h-12 animate-pulse rounded-lg bg-slate-200/60" />
-              ) : d.items.length === 0 ? (
+              ) : d.items.length === 0 && !courseOccurrences.some(o=>o.start<d.from+DAY&&o.end>d.from) ? (
                 <p className="px-2 py-1 text-xs text-slate-300">无安排</p>
               ) : (
                 <ul className="space-y-1.5">

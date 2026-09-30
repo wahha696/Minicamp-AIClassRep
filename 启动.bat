@@ -34,19 +34,39 @@ if exist "runtime\node.exe" (
 )
 if defined NODE_EXE goto :run
 
-echo [ClassRep] 没有找到可用的 Node.js（需要 22.13+），自动下载到 runtime\node.exe（约 80MB，只下载一次）...
+rem 之前下过完整 zip 版的话直接复用（runtime\node-v*-win-x64\node.exe）
+for /d %%d in ("runtime\node-v*-win-x64") do (
+  if not defined NODE_EXE (
+    "%%d\node.exe" -e "import('node:sqlite').then(()=>process.exit(0)).catch(()=>process.exit(1))" >nul 2>nul
+    if not errorlevel 1 set "NODE_EXE=%%d\node.exe"
+  )
+)
+if defined NODE_EXE goto :run
+
+echo [ClassRep] 没有找到可用的 Node.js（需要 22.13+），自动下载到 runtime\（约 40MB，只下载一次）...
 if not exist "runtime" mkdir "runtime"
+rem 先下完整发行包 zip（带 npm/corepack，bootstrap 才装得上依赖）
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $base=$env:NODE_MIRROR; if(-not $base){$base='https://nodejs.org/dist'}; Invoke-WebRequest -UseBasicParsing ($base.TrimEnd('/')+'/v24.19.0/node-v24.19.0-win-x64.zip') -OutFile 'runtime\node.zip'"
+if not errorlevel 1 (
+  tar -xf "runtime\node.zip" -C "runtime" >nul 2>nul
+  del /q "runtime\node.zip" >nul 2>nul
+)
+if exist "runtime\node-v24.19.0-win-x64\node.exe" goto :zipok
+rem zip 下载/解压失败 → 退回裸 node.exe（bootstrap 会自动下载 pnpm，照样能用）
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $base=$env:NODE_MIRROR; if(-not $base){$base='https://nodejs.org/dist'}; Invoke-WebRequest -UseBasicParsing ($base.TrimEnd('/')+'/v24.19.0/win-x64/node.exe') -OutFile 'runtime\node.exe'"
 if errorlevel 1 (
   echo.
   echo [ClassRep] ❌ Node 下载失败。
   echo    办法一：设置镜像后重试，例如  setx NODE_MIRROR "https://npmmirror.com/mirrors/node"
-  echo    办法二：手动下载 https://nodejs.org/dist/v24.19.0/win-x64/node.exe
-  echo            放到本目录的 runtime\node.exe，再重新双击 启动.bat
+  echo    办法二：手动下载 https://nodejs.org/dist/v24.19.0/node-v24.19.0-win-x64.zip
+  echo            解压后把 node-v24.19.0-win-x64 整个文件夹放进本目录的 runtime\，再重新双击 启动.bat
   pause
   exit /b 1
 )
 set "NODE_EXE=runtime\node.exe"
+goto :run
+:zipok
+set "NODE_EXE=runtime\node-v24.19.0-win-x64\node.exe"
 
 :run
 "%NODE_EXE%" "scripts\bootstrap.mjs" %*
