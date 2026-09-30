@@ -199,6 +199,13 @@ pnpm --filter server exec tsx src/pipeline/eval.ts
   `schtasks /create /tn <名> /tr "cmd.exe /c <wrapper.cmd>" /sc once /st 23:59 /f` + `/run` 启动。
   这样会话重置、终端关闭都不会中断；本次 v3→验收→v4→验收 四个阶段就是这么串的。
   注意：**日志跨轮次会累积**，等待条件必须只看当轮标记（同一文件多轮跑时先删旧日志）。
+- **⚠️ 控制台关闭会就地杀死训练进程（实测丢了 22 步 ≈ 40 分钟）**：任务计划以"登录时运行"
+  启动的进程**带控制台**，控制台一被关闭，子进程就会收到 `CTRL_CLOSE_EVENT`，
+  Intel Fortran 运行时直接中止并打印
+  `forrtl: error (200): program aborting due to window-CLOSE`（栈里是 ntdll/KERNEL32）。
+  v3 训练因此在 72/170 步死掉（`checkpoint-50` 还在，可 `--resume` 续）。
+  **规避**：用 `pythonw.exe` 跑训练（无控制台 → 收不到该事件），
+  或改为在本会话后台作业里跑（本机实测可持续数小时）；两者都比"前台 cmd 窗口"稳。
 - **笔电休眠会静默吞掉训练进度**（实测两次）：`powercfg /change standby-timeout-ac 0` 只管
   空闲超时，**合盖动作**会覆盖它 → 必须另设 `powercfg /setacvalueindex SCHEME_CURRENT
   SUB_BUTTONS LIDACTION 0` + `/setactive`。休眠期间进度条只在恢复后跳一大步（表现为
