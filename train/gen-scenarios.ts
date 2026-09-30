@@ -165,8 +165,10 @@ function normalizeScenario(raw: unknown, tpl: string, tplDef: Template, seed: nu
   if (typeof r.group_name !== 'string' || r.group_name.length < 2 || r.group_name.length > 30) {
     return 'group_name 不合法';
   }
-  // 消息数对齐真实群聊（data/mock 中位 60 条；旧上限 40 会把新要求下产出的剧本判死）
-  if (!Array.isArray(r.messages) || r.messages.length < 40 || r.messages.length > 80) {
+  // 消息数对齐真实群聊（data/mock 中位 60 条）。教师实测并不总照做"50~70 条"：
+  // 15 例探针里 7 例落在 19~36 条 → 下限压到 32 可把产出率从 ~53% 提到 ~67%（省 1/4 生成费），
+  // 同时仍比旧数据的 28 条更接近真实。上限 80 防止异常超长。
+  if (!Array.isArray(r.messages) || r.messages.length < 32 || r.messages.length > 80) {
     return `messages 数量不对：${Array.isArray(r.messages) ? r.messages.length : '非数组'}`;
   }
   const msgs: ScenarioMessageJson[] = [];

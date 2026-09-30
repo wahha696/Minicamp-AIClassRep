@@ -31,12 +31,14 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 $env:PYTHONPATH = Join-Path $root "train\pylibs-gpu"
 
-$genCost = [math]::Round($Scenarios * 0.017, 1)
+$genCost = [math]::Round($Scenarios * 0.016, 1)
 $distCost = [math]::Round($Scenarios * 0.005, 1)
 Write-Host "=== plan ===" -ForegroundColor Cyan
 Write-Host "  scenarios : $Scenarios -> $OutDir   (est ~RMB $genCost)"
 Write-Host "  distill   : $OutDir -> train\data\$SftOut   (est ~RMB $distCost)"
 Write-Host "  train     : $ModelDir  (1 epoch ~ $([math]::Round($Scenarios * 2.4 / 16 * 105 / 3600, 1))h on RTX 5070 Laptop)"
+Write-Host "  measured unit costs: generation RMB 0.011/call (cache hit ~63%), yield ~67% at a 32-80 message gate" -ForegroundColor DarkGray
+Write-Host "                       distillation RMB 0.003/call (cache hit ~65%), ~2.4 pairs per scenario" -ForegroundColor DarkGray
 if (-not $Yes) {
     Write-Host "`nDRY RUN. Add -Yes to spend about RMB $([math]::Round($genCost + $distCost, 1)) and actually run it." -ForegroundColor Yellow
     exit 0
