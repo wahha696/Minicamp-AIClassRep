@@ -241,6 +241,26 @@ def main() -> None:
     )
     trainer = Trainer(model=model, args=conf, train_dataset=SftRows(data), data_collator=collate)
 
+    # loss 直接落盘：PowerShell 的进度条渲染会吞掉 Trainer 打到 stdout 的日志行
+    # （实测某轮日志里一条 loss 都没有），写文件后 trace 不再依赖控制台捕获。
+    from transformers import TrainerCallback
+
+    class _LossLog(TrainerCallback):
+        def __init__(self, path: Path) -> None:
+            self.path = path
+
+        def on_log(self, args, state, control, logs=None, **kwargs):  # noqa: ANN001, ANN003
+            if not logs:
+                return
+            keep = {k: v for k, v in logs.items() if isinstance(v, (int, float))}
+            if not keep:
+                return
+            with open(self.path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"step": state.global_step, **keep}, ensure_ascii=False) + "\n")
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    trainer.add_callback(_LossLog(run_dir / "loss.jsonl"))
+
     # 断点续训（--resume）：机器休眠/会话重启会杀进程，8 小时训练不能白丢。
     # 注意：目录里没有 checkpoint-N 时不能让 Trainer 收到 resume=True（它会直接抛错），
     # 所以这里先探测再决定，并把实际行为打印出来，避免"以为在续训、其实从头跑"。
