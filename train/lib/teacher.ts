@@ -28,10 +28,18 @@ export function teacherConfig(): TeacherConfig {
   };
 }
 
+export interface ChatUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  /** DeepSeek 上下文缓存：命中部分单价低一个数量级（省钱自查的关键指标） */
+  prompt_cache_hit_tokens?: number;
+  prompt_cache_miss_tokens?: number;
+}
+
 export interface ChatResult {
   content: string;
   model: string;
-  usage: { prompt_tokens: number; completion_tokens: number } | null;
+  usage: ChatUsage | null;
   ms: number;
 }
 
@@ -83,7 +91,7 @@ export async function chat(
       }
       const json = (await res.json()) as {
         model?: string;
-        usage?: { prompt_tokens: number; completion_tokens: number };
+        usage?: ChatUsage;
         choices?: { message?: { content?: string } }[];
       };
       return {
@@ -158,14 +166,40 @@ export function parseLooseJson(raw: string): unknown | undefined {
 export const usage = {
   promptTokens: 0,
   completionTokens: 0,
+  cacheHitTokens: 0,
+  cacheMissTokens: 0,
   calls: 0,
   failures: 0,
   add(r: ChatResult): void {
     this.calls++;
     this.promptTokens += r.usage?.prompt_tokens ?? 0;
     this.completionTokens += r.usage?.completion_tokens ?? 0;
+    const hit = r.usage?.prompt_cache_hit_tokens ?? 0;
+    const miss = r.usage?.prompt_cache_miss_tokens ?? 0;
+    this.cacheHitTokens += hit;
+    // 服务端没回 miss 字段时按"未命中 = 输入 - 命中"兜底
+    this.cacheMissTokens += miss || Math.max(0, (r.usage?.prompt_tokens ?? 0) - hit);
+  },
+  /**
+   * 费用估算（人民币）。单价随官方调整，用环境变量覆盖：
+   *   TEACHER_PRICE_HIT / TEACHER_PRICE_MISS / TEACHER_PRICE_OUT （元 / 百万 token）
+   * 默认值仅供自查量级，不要当账单。缓存命中价通常比未命中低一个数量级，
+   * 而本管道的输入里约 9 成是同一条 system prompt 的重复 —— 命中率就是主要省钱杠杆。
+   */
+  cost(): { cny: number; hitRate: number } {
+    const perM = (k: string, d: number) => Number(process.env[k] ?? d);
+    const hitYuan = (this.cacheHitTokens / 1e6) * perM('TEACHER_PRICE_HIT', 0.5);
+    const missYuan = (this.cacheMissTokens / 1e6) * perM('TEACHER_PRICE_MISS', 2);
+    const outYuan = (this.completionTokens / 1e6) * perM('TEACHER_PRICE_OUT', 8);
+    const totalIn = this.cacheHitTokens + this.cacheMissTokens;
+    return { cny: hitYuan + missYuan + outYuan, hitRate: totalIn ? this.cacheHitTokens / totalIn : 0 };
   },
   text(): string {
-    return `调用 ${this.calls} 次（失败 ${this.failures}），输入 ${this.promptTokens} tok + 输出 ${this.completionTokens} tok`;
+    const c = this.cost();
+    return (
+      `调用 ${this.calls} 次（失败 ${this.failures}），输入 ${this.promptTokens} tok` +
+      `（缓存命中 ${this.cacheHitTokens} / ${(c.hitRate * 100).toFixed(1)}%）` +
+      ` + 输出 ${this.completionTokens} tok ≈ ¥${c.cny.toFixed(2)}`
+    );
   },
 };

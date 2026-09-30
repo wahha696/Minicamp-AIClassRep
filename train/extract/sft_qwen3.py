@@ -217,6 +217,9 @@ def main() -> None:
     from transformers import Trainer, TrainingArguments
 
     total_steps = max(1, int(len(data) * args.epochs / (args.batch * args.grad_accum)))
+    # 每轮训练独立存档目录（用 --out 的名字）：多轮实验的 checkpoint 不能互相污染，
+    # 否则 --resume 会接到上一次实验的存档上（数据不同 → 静默跑错）。
+    run_dir = HERE.parent / "artifacts" / f"sft-runs-{Path(args.out).name}"
     conf = TrainingArguments(
         per_device_train_batch_size=args.batch,
         gradient_accumulation_steps=args.grad_accum,
@@ -232,7 +235,7 @@ def main() -> None:
         save_total_limit=2,
         report_to=[],
         seed=args.seed,
-        output_dir=str(HERE.parent / "artifacts" / "sft-runs"),
+        output_dir=str(run_dir),
         dataloader_num_workers=0,  # Windows spawn 不支持嵌套类；预分词数据主进程加载无瓶颈
         gradient_checkpointing_kwargs={"use_reentrant": False},
     )
