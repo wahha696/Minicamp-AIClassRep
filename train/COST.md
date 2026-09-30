@@ -35,9 +35,14 @@
 ### 1. 不要重复生成剧本（最省）
 剧本生成按输出计费，每个剧本 ≈ 1,100 个输出 token。已经付过钱的 2,342 个剧本要反复利用：
 - 增量蒸馏 `--out` 指向已有 jsonl，会自动跳过已完成的 `scenario#batch`，**不重复花钱**；
-- 想扩样本量时，优先"同一批剧本换 `now` 再蒸一遍"（输入侧、命中缓存、便宜约一个数量级），
-  而不是新生成剧本。⚠️ 需要改一处代码：去重键目前是 `scenario#batch`，
-  换 `now` 会被误判成重复而跳过 —— 应把 `now` 偏移量并入键（`scenario#batch@offset`）。
+- 想扩样本量时用 **`--now-offsets N`**（已实现）：同一批剧本换 N 个回放时刻各蒸一遍，
+  只花输入侧且命中缓存（¥0.5/百万），比新生成剧本（¥8/百万输出）便宜约一个数量级。
+  去重键向后兼容 —— offset 0 仍是 `scenario#batch`，所以历史数据不会被重蒸。
+
+  ```powershell
+  # 复用现有 2342 个剧本，每个再换 2 个回放时刻（每档间隔 7 天）→ 样本量约翻 3 倍
+  node train\dist\train\gen-sft-data.js --out sft-v2.jsonl --now-offsets 3 --offset-days 7
+  ```
 
 ### 2. 提高 `--max-candidates`（蒸馏侧的调用次数）
 `gen-sft-data.js --max-candidates N`：一个剧本打成的批次越少，重复的 system prompt 越少。
