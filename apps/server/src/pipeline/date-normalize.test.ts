@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { completeTimes, resolveWhen } from './date-normalize.js';
 import { fmtShanghai } from './extract.js';
+import { db, openDb } from '../db/index.js';
 
 // 验证集取自考卷（eval.ts 的 EXPECT + data/mock 的真实表达）：这些正是学生模型答错的用例，
 // now 也取自 eval 运行时的"当前时间"，所以期望值就是考卷答案本身。
@@ -73,5 +74,38 @@ describe('completeTimes：两种策略', () => {
     const { events, filled } = completeTimes(rows, [{ message_id: 'm3', text: '第三章我一点没看' }], NOW, 'prefer');
     expect(filled).toBe(0);
     expect(events[0]!.deadline_at ?? null).toBeNull();
+  });
+});
+
+describe('eval.ts --dates 的集成路径（从 DB 读来源消息）', () => {
+  it('event_sources 里的来源消息能驱动补全（表/列名变更会在这里炸，而不是验收时）', () => {
+    openDb(':memory:');
+    const now = NOW;
+    db.prepare(
+      `INSERT INTO events (group_id, type, title, status, start_at, deadline_at, confidence, version, created_at, updated_at)
+       VALUES ('g1','assignment','牛顿环实验报告提交','active',NULL,NULL,0.9,1,?,?)`,
+    ).run(now, now);
+    const id = (db.prepare('SELECT last_insert_rowid() AS id').get() as { id: number }).id;
+    db.prepare(
+      'INSERT INTO event_sources (event_id, message_id, sender_name, text, sent_at) VALUES (?,?,?,?,?)',
+    ).run(id, 'demo-assignment-1', '张三', '实验报告本周五 23:59 前传到学习通', now);
+
+    // 与 eval.ts 里完全相同的一段：读来源消息 → completeTimes → 回填时间字段
+    const src = db.prepare('SELECT message_id FROM event_sources WHERE event_id = ?').all(id) as unknown as {
+      message_id: string;
+    }[];
+    expect(src.map((s) => s.message_id)).toEqual(['demo-assignment-1']);
+    const msgs = db.prepare('SELECT message_id, text FROM event_sources WHERE event_id = ?').all(id) as unknown as {
+      message_id: string;
+      text: string;
+    }[];
+    const { events, filled } = completeTimes(
+      [{ type: 'assignment', start_at: null, deadline_at: null, source_message_ids: src.map((s) => s.message_id) }],
+      msgs,
+      now,
+      'prefer',
+    );
+    expect(filled).toBe(1);
+    expect(fmtShanghai(events[0]!.deadline_at!).startsWith('2026-10-02 23:59')).toBe(true);
   });
 });
