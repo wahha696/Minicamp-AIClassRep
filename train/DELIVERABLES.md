@@ -28,10 +28,29 @@ TypeSafe Key 依赖在运行时已由本地快判替代（产品决策 `FASTJUDG
 
 **下一步（一条命令，成本先报价）**：
 ```powershell
-powershell -File train\rebuild-realistic-data.ps1 -Scenarios 800            # 只打印计划与花费
-powershell -File train\rebuild-realistic-data.ps1 -Scenarios 800 -Yes -Train # 生成+蒸馏+训练（约 ¥18 / 4h）
+# 已有剧本、只想重新蒸馏/训练（不重新生成，最省）
+powershell -File train\train-real-dataset.ps1 -Yes -Train
+# 从零重建形态对齐数据（会重新生成剧本，按输出计费）
+powershell -File train\rebuild-realistic-data.ps1 -Scenarios 650            # 只打印计划与花费
+powershell -File train\rebuild-realistic-data.ps1 -Scenarios 650 -Yes -Train
 ```
-详见 `BATCH-SHAPE.md`（错配量化与修法）与 `COST.md`（成本结构与省钱杠杆）。
+
+### 当前进展与两个已就绪的"提分件"
+
+1. **形态对齐数据集已建成**：`train/data/sft-real.jsonl`，**1,738 对**
+   （557 剧本 → 1,850 批次，94% 接受率），成本 **¥9.5**。
+   形态实测：批内候选数中位 **8**（旧数据 23、真实考卷 6）、**100% 落在生产区间**、
+   候选字/条 9（真实 11、旧数据 17）、含时间表达 16.5%（真实 25.6%、旧数据 31.6%）。
+   正在训练中（109 步 ≈ 2.8h），随后自动验收 —— 这是回答"形态是不是主因"的关键实验。
+
+2. **日期归一化模块已验证，可直接上线**：`train/date-normalize.ts`
+   - 考卷日期用例 **10/10**（含模型全部答错的「下周三」「本周五 23:59 前」等）
+   - 跨周边界用例 **4/4**（周日 23:50 的「本周一」仍算本周）
+   - 65k 消息误报审计：弱信号 13% 被拦截，误判"过去"从 7.5% 降到 **2.7%**
+   - 落地接口 `completeTimes(events, messages, now, mode)`：`fill`（只补空）/`prefer`（代码为准）
+   - **只改时间字段、不碰 prompt** → 不触发 `PROMPT_VERSION` 变更、既有数据不作废
+   - 量化收益：时间类失败占全部失败项 **31~62%**；但纯日期阻塞的剧本只有 0~2/6，
+     其余还栽在召回/精度/类型/地点/更新合并（见 `BATCH-SHAPE.md`）——所以它是**补刀**，不是替代训练。
 
 ## 交付物一览
 
