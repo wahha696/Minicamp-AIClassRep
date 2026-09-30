@@ -94,6 +94,20 @@ v1（358 对）和 v2（662 对）在同一考卷上 **0/6，失败清单逐条�
    这是首要解释；需要的话可以在训练时做过采样/重采样把比例压到 ~40%。
 2. 样本更短（p50 1,957 vs 2,519）且**无超长样本**，所以不需要 `--drop-over-seq` 也不会截断。
 
+#### 预案已就绪：负例调回生产水平（`sft-real-bal.jsonl`）
+
+若本轮模型漏提偏多，直接用这份对照集重训（1,400 对 / 87 步 ≈ 1.7h，仍是 100% 生产形态）：
+
+```powershell
+python train\tools\rebalance_negatives.py --src train\data\sft-real.jsonl `
+    --out train\data\sft-real-bal.jsonl --neg-ratio 0.4
+python train\extract\sft_qwen3.py --data train\data\sft-real-bal.jsonl --epochs 1 --seq 3072 `
+    --no-unsloth --save-steps 25 --out train\models\qwen3-1.7b-sft-real-bal
+```
+
+产出实测：**840 正 + 560 负 = 1,400 对（负例 40%）**，候选中位 9、100% 落在生产区间、
+0 非法 JSON、pv=1 —— 与 `sft-real` 唯一的差别就是负例比例。
+
 **结论：模型是在"20~30 个候选的拥挤批次"上学的，上线却只面对 6 个候选。**
 这不是 prompt 契约问题（教师同考卷 6/6 全绿），而是**训练数据的场景写得太"实"**：
 生成模板要求"至少 6 条闲聊打断"，但产出实际只有约 20% 闲聊。
