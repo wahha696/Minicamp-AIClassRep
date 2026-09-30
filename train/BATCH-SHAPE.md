@@ -273,6 +273,23 @@ cancel 这三个更新型剧本上——两者是一致的：模型没在足够�
 问题在模型输出的 `action/update_of` 没被稳定触发）——即先确认模型是输出了 `create` 还是 `update`，
 再决定是补数据还是补提示/后处理。
 
+#### 现成的诊断配方：一条命令看清模型输出的 action（无需改代码）
+
+`apps/server/src/pipeline/try-extract.ts` 会把**原始事件**连同 `action` / `update_of` / 来源消息一起打印，
+并且本地模拟合并逻辑。所以"是 create 还是 update"一跑就知道：
+
+```powershell
+# 先起本地服务器（用当前要诊断的模型）
+python train\env\serve_hf.py --model train\models\qwen3-1.7b-sft-real-bal-bf16 --port 8080
+# 再看 reschedule / cancel 两个更新型剧本
+pnpm --filter server exec tsx src/pipeline/try-extract.ts reschedule
+pnpm --filter server exec tsx src/pipeline/try-extract.ts cancel
+```
+
+判读：
+- 若打出 `update #<id> … 地点 A203` → **模型识别正确**，合并没生效要找 `reconcile.ts` 侧；
+- 若打出 `create … 地点 A301` → **模型侧问题**（该走"提高更新型剧本占比 + 明确模板要求"的数据路线）。
+
 ## 下一步（若 v4 仍不达标）
 
 ### 先看一个量化结论：代码侧日期归一化**必要但不充分**
