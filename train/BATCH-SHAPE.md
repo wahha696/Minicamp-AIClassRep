@@ -134,6 +134,15 @@ v1（358 对）和 v2（662 对）在同一考卷上 **0/6，失败清单逐条�
 
 ## 下一步（若 v4 仍不达标）
 
+0. **一键重建（已备好脚本）**：`train/rebuild-realistic-data.ps1` 会先打印计划与花费，
+   加 `-Yes` 才真花钱；`-Train` 可连训练一起跑：
+
+   ```powershell
+   powershell -File train\rebuild-realistic-data.ps1 -Scenarios 1500            # 只打印计划
+   powershell -File train\rebuild-realistic-data.ps1 -Scenarios 1500 -Yes -Train # 生成+蒸馏+训练
+   ```
+   成本（本机实测单价）：生成 ≈¥25.5 + 蒸馏 ≈¥7.5；训练 1 epoch ≈6.6h（RTX 5070 Laptop）。
+   嫌贵可以先跑 800 个剧本（≈¥18、训练 ≈3.5h）。
 1. **把生成模板的"真实感三件套"写死**（`gen-scenarios.ts` 的 brief）：
    消息要短（多数 ≤10 字）、口语化、**大多数消息不含时间/日期**（目标 6% 而不是 27%）、
    每剧本 50~70 条消息。生成到位后再分层抽样（+ 噪声注入兜底）→ 蒸馏 → 重训。
