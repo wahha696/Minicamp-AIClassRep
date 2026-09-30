@@ -1,0 +1,19 @@
+{
+  // 训练数据管道：编译到 train/dist 后用 node 直接跑（不依赖 tsx/esbuild，规避沙箱 spawn 限制）。
+  // 只列 train 自身脚本作为入口，import 到的生产模块（extract.ts / demo.ts / db …）由 tsc 顺藤摸瓜一起编译；
+  // rootDir = 仓库根，产物结构保持 apps/server/src/... 原样，相对引用在 node 下直接成立。
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": "..",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "verbatimModuleSyntax": false,
+    "isolatedModules": false,
+    "types": ["node"],
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": ["./**/*.ts"]
+}

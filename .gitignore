@@ -47,3 +47,6 @@ release/
 .agents/
 skills-lock.json
 docs/architecture/
+
+# unsloth JIT cache
+unsloth_compiled_cache/

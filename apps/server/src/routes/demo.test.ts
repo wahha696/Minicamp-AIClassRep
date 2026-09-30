@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db, openDb } from '../db/index.js';
+import { env } from '../env.js';
 import { MOCK_DIR } from '../paths.js';
 import { buildDemoMessages, listScenarios, parseImportedText } from '../ingest/demo.js';
 import { registerBusinessRoutes } from './business.js';
@@ -55,6 +56,8 @@ function count(table: string, where = '', params: unknown[] = []): number {
 }
 
 beforeEach(() => {
+  // D9 后 DEMO_MODE 默认关闭：demo 路由测试必须显式打开（env 是纯对象，改了立即生效）
+  env.DEMO_MODE = true;
   runPipelineNowMock.mockClear();
 });
 
