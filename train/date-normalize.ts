@@ -122,6 +122,67 @@ export function resolveWhen(
   return { at, hasTime, isDeadline };
 }
 
+// ---------------- 落地形态：只填空值的输出补全 ----------------
+
+/** 与 extract.ts 的 ExtractedEvent 对齐的最小字段集（这里只关心时间与来源） */
+export interface EventLike {
+  type: string;
+  title: string;
+  start_at?: number | null;
+  deadline_at?: number | null;
+  source_message_ids?: string[];
+}
+
+export interface MessageLike {
+  message_id: string;
+  text: string;
+  sent_at: number;
+}
+
+/** 作业/问卷/通知类用 deadline 语义；考试/会议/活动用 start 语义 */
+const DEADLINE_TYPES = new Set(['assignment', 'announcement', 'other']);
+
+/**
+ * 用来源消息补全/校正事件的时间字段。
+ *
+ * 两种策略（`mode`）：
+ * - `fill`（保守）：只补 `null`，绝不覆盖模型给出的非空值。适合先上线观察。
+ * - `prefer`（推荐用于本考卷）：只要来源消息能解析出时间，就以代码结果为准；
+ *   模型仍负责"识别出这件事"，代码负责"把口语时间换算成时间戳"（手册的 code owns the workflow）。
+ *   依据：本模块在考卷全部 10 个日期用例上 10/10，而学生模型在这一维度系统性出错。
+ *
+ * 不触碰 prompt，因此不会让 PROMPT_VERSION 作废。
+ */
+export function completeTimes(
+  events: EventLike[],
+  messages: MessageLike[],
+  now: number,
+  mode: 'fill' | 'prefer' = 'fill',
+): { events: EventLike[]; filled: number; corrected: number } {
+  const byId = new Map(messages.map((m) => [m.message_id, m]));
+  let filled = 0;
+  let corrected = 0;
+  const out = events.map((ev) => {
+    const e: EventLike = { ...ev };
+    const kind: 'deadline' | 'start' = DEADLINE_TYPES.has(e.type) ? 'deadline' : 'start';
+    const field = kind === 'deadline' ? 'deadline_at' : 'start_at';
+    const current = e[field];
+    if (current != null && mode === 'fill') return e; // 保守模式：已有值不动
+    for (const id of e.source_message_ids ?? []) {
+      const m = byId.get(id);
+      if (!m) continue;
+      const r = resolveWhen(m.text, now, kind);
+      if (!r) continue;
+      if (current == null) filled++;
+      else if (r.at !== current) corrected++;
+      e[field] = r.at;
+      break;
+    }
+    return e;
+  });
+  return { events: out, filled, corrected };
+}
+
 // ---------------- 自测：用考卷（data/mock）里真实出现的表达 + 考卷自己的期望值 ----------------
 
 interface Case {
@@ -158,6 +219,28 @@ function main(): void {
     console.log(`${ok ? '✅' : '❌'} 「${c.text}」 → ${got}  期望 ${c.want}   [${c.note}]`);
   }
   console.log(`\n通过 ${pass}/${CASES.length}`);
+
+  // ---- 输出补全演示：复现学生模型在考卷上的两种典型失败（deadline=null / 日期算错） ----
+  const now = Date.parse('2026-09-29T20:34:00+08:00');
+  const msgs: MessageLike[] = [
+    { message_id: 'm1', text: '这周实验报告记得交哈，本周五 23:59 前传到学习通', sent_at: now - 3600_000 },
+    { message_id: 'm2', text: '线代考试改到下周四上午 10 点，5 号楼 301', sent_at: now - 1800_000 },
+  ];
+  const modelOut: EventLike[] = [
+    { type: 'assignment', title: '牛顿环实验报告提交', start_at: null, deadline_at: null, source_message_ids: ['m1'] },
+    { type: 'exam', title: '线代期中考试', start_at: Date.parse('2026-09-30T10:00:00+08:00'), source_message_ids: ['m2'] },
+  ];
+  const { events, filled, corrected } = completeTimes(modelOut, msgs, now, 'prefer');
+  console.log('\n--- completeTimes 演示（mode=prefer：代码能解析就以代码为准）---');
+  for (const e of events) {
+    const s = e.start_at ? fmtShanghai(e.start_at) : 'null';
+    const d = e.deadline_at ? fmtShanghai(e.deadline_at) : 'null';
+    console.log(`${e.type.padEnd(11)} ${e.title} | 开始 ${s} | 截止 ${d}`);
+  }
+  console.log(`补全 ${filled} 处 / 校正 ${corrected} 处`);
+  console.log('  · 牛顿环（模型给 null）→ 代码按「本周五 23:59 前」补 2026-10-02 23:59');
+  console.log('  · 线代（模型给错 09-30）→ 代码按「下周四上午 10 点」校正为 2026-10-08 10:00');
+  console.log('  保守模式（mode=fill）只会补 null，模型给错的日期不会被纠正——两者按上线风险选择。');
   if (pass !== CASES.length) process.exit(1);
 }
 
