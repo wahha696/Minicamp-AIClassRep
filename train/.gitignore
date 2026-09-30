@@ -26,3 +26,6 @@ dist/
 
 # NOTE: train/env/ holds SOURCE (serve_hf.py, setup_windows.ps1, smoke_gpu.py,
 # llama-server.ps1) and must stay tracked - do not add an "env/" rule here.
+
+# 量化工具：根 .gitignore 的 tools/ 会把这里一起忽略，显式放行
+!tools/
