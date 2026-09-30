@@ -42,7 +42,9 @@ Write-Host "  NOTE: stop any training first - 8GB VRAM cannot hold both." -Foreg
 $srv = Start-Process -FilePath "python" -ArgumentList @(
     "train\env\serve_hf.py", "--model", $bf16, "--port", "$Port"
 ) -PassThru -WindowStyle Minimized
-Start-Sleep -Seconds 45
+# bf16 3.4GB 模型加载 + torch 首次导入实测 20~70s；给足余量再探活。
+# 探活失败不影响流程，但若服务器还没起来，eval 会以连接失败收场、得到假的 llm=error。
+Start-Sleep -Seconds 75
 try {
     $probe = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/v1/models" -TimeoutSec 20
     Write-Host "  server up: $($probe.data[0].id)"
