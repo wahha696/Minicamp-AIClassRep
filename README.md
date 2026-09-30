@@ -183,6 +183,8 @@ docs/        分工文档与拓展计划
 - 请勿提交 `.env`、`data/` 下的任何数据或 API Key。
 - NapCat 为第三方开源项目，本仓库不包含其运行包及任何账号数据；组件下载走官方 GitHub Release（版本与 SHA-256 钉在 `napcat.version.json`）。
 - 自更新只覆盖程序文件（`app/`、`runtime/`、`napcat/`、`启动.bat`），`data/`（账号数据库、API Key、配置）永不覆盖。
+- 更新切换前会在 `data/update/` 保存恢复记录、程序备份和独立恢复入口。切换失败会恢复旧版；进程中断后，下次启动先恢复再运行。若恢复失败，保留备份并停止启动，请关闭其他 ClassRep 进程后重试，不要删除 `data/update/`。
+- 更新恢复修复随新安装包提供；旧安装包的首次升级仍由旧更新器执行。验证更新故障和 Windows 启动恢复可运行 `node --test scripts/update.test.mjs`。
 
 ### 历史补拉能做到什么程度（如实说明）
 

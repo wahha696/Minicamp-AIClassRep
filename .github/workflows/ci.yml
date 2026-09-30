@@ -34,6 +34,9 @@ jobs:
       - name: 单元测试（vitest）
         run: pnpm -r test
 
+      - name: 自动更新故障与中断恢复测试
+        run: node --test scripts/update.test.mjs
+
       - name: 构建（esbuild + vite）
         run: pnpm -r build
 

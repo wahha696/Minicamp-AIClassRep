@@ -10,7 +10,19 @@ chcp 65001 >nul
 title ClassRep（关闭此窗口即退出）
 cd /d "%~dp0"
 
-rem ===== 0. 免安装包布局：清上次更新残留 → 应用待安装的更新 → 直接跑打包产物 =====
+rem ===== 0. 先恢复被中断的更新，恢复入口不能依赖 app/ 或 runtime/ 是否完整 =====
+if exist "data\update\transaction.json" goto :recoverUpdate
+goto :detectLayout
+
+:recoverUpdate
+if not exist "data\update\recover.mjs" goto :updateFailed
+if not exist "data\update\recovery-node.exe" goto :updateFailed
+"data\update\recovery-node.exe" "data\update\recover.mjs" --recover-only
+if errorlevel 1 goto :updateFailed
+goto :startPackaged
+
+:detectLayout
+rem ===== 免安装包布局：应用待安装的更新 → 直接跑打包产物 =====
 if not exist "runtime\node.exe" goto :repo
 if not exist "app\server\dist\index.js" goto :repo
 if exist "runtime\node.exe.old" del /q "runtime\node.exe.old" >nul 2>nul
@@ -18,8 +30,20 @@ if exist "data\update\pending.json" if exist "app\update.mjs" (
   echo [ClassRep] 检测到新版本，正在应用更新...
   "runtime\node.exe" "app\update.mjs"
 )
+rem 回滚没有完成时不能继续运行混合版本，也不能删除备份。
+if exist "data\update\transaction.json" goto :recoverUpdate
+
+:startPackaged
+if not exist "runtime\node.exe" goto :updateFailed
+if not exist "app\server\dist\index.js" goto :updateFailed
+if exist "data\update\recovery-node.exe" del /q "data\update\recovery-node.exe" >nul 2>nul
 "runtime\node.exe" "app\server\dist\index.js" %*
 exit /b %errorlevel%
+
+:updateFailed
+echo [ClassRep] 更新恢复尚未完成，已保留 data\update 中的备份。请关闭其他 ClassRep 进程后重试。
+pause
+exit /b 1
 
 :repo
 rem ===== 克隆仓库布局：定位可用的 Node（需要 node:sqlite，即 ≥22.13） =====

@@ -1,178 +1,202 @@
-// ClassRep 免安装包自更新器（问题 4）。打包时被复制为 app\update.mjs，由 启动.bat 在启动前调用：
-//   if exist "data\update\pending.json" if exist "app\update.mjs" → runtime\node.exe app\update.mjs
-// 流程：读 data\update\pending.json { zip, to } → 解压到 data\update\staging →
-//       整树预备到 data\update\new → 逐目录「改名换旧、改名上新」事务化切换（失败整体回滚，
-//       runtime\node.exe 单独热替换）→ 清工作树与 pending → 退出 0，启动.bat 接着正常启动。
-// 任何失败：保留 pending.json 与 staging（下次启动重试），退出码非 0（启动.bat 继续用旧版跑）。
+// 免安装包更新器：切换前保存事务和独立恢复程序；失败恢复旧版，已提交的更新只清理。
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, readdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import {
+  closeSync, cpSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync,
+  readdirSync, renameSync, rmSync, writeFileSync,
+} from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// 安装根 = app/ 的上一级（打包布局：<root>\app\update.mjs）
-const APP_DIR = dirname(fileURLToPath(import.meta.url));
-const INSTALL_ROOT = dirname(APP_DIR);
-const STAGING = join(INSTALL_ROOT, 'data', 'update', 'staging');
+const SCRIPT = fileURLToPath(import.meta.url);
+const recoveryOnly = process.argv.includes('--recover-only');
+// 恢复副本位于 <root>/data/update/recover.mjs，常规入口位于 <root>/app/update.mjs。
+const INSTALL_ROOT = recoveryOnly ? resolve(dirname(SCRIPT), '../..') : dirname(dirname(SCRIPT));
+const WORK = join(INSTALL_ROOT, 'data', 'update');
+const STAGING = join(WORK, 'staging');
+const NEWROOT = join(WORK, 'new');
+const OLDROOT = join(WORK, 'old');
+const JOURNAL = join(WORK, 'transaction.json');
+const pendingPath = join(WORK, 'pending.json');
 
-console.log('[update] 应用待安装的更新...');
-
-// ---------- 1. 读触发文件 ----------
-const pendingPath = join(INSTALL_ROOT, 'data', 'update', 'pending.json');
-let pending;
-try {
-  pending = JSON.parse(readFileSync(pendingPath, 'utf8'));
-} catch {
-  console.error('[update] ❌ 读不到 data\\update\\pending.json，跳过更新（可手动删除该文件）。');
-  process.exit(1);
-}
-const zipPath = pending.zip;
-if (!zipPath || !existsSync(zipPath)) {
-  console.error(`[update] ❌ 更新包不存在（${zipPath ?? '未指定'}）。删除 pending.json 可跳过本次更新。`);
-  process.exit(1);
-}
-
-// ---------- 1.5 SHA-256 复核（S05）：pending.json 里的摘要来自发版清单，落盘后必须仍一致 ----------
-if (typeof pending.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(pending.sha256)) {
-  // 缺校验信息的 pending 不应用（老版本 updater 写的不带 sha256；宁可不更不盲更）
-  quarantine(`缺少 sha256 校验信息`);
-}
-const got = createHash('sha256').update(readFileSync(zipPath)).digest('hex');
-if (got !== pending.sha256.toLowerCase()) {
-  quarantine(`SHA-256 校验失败（文件可能被篡改或下载损坏）`);
-}
-
-// ---------- 2. 解压 ----------
-rmSync(STAGING, { recursive: true, force: true });
-mkdirSync(STAGING, { recursive: true });
-const tar = spawnSync('tar', ['-x', '-f', zipPath, '-C', STAGING], { stdio: 'ignore', windowsHide: true });
-if (tar.status !== 0) {
-  console.error('[update] ❌ 解压失败（包损坏？）。保留 pending.json，可重试。');
-  process.exit(1);
-}
-const src = existsSync(join(STAGING, 'ClassRep')) ? join(STAGING, 'ClassRep') : STAGING;
-if (!existsSync(join(src, 'app', 'server', 'dist', 'index.js'))) {
-  console.error('[update] ❌ 更新包内容不对（缺 app/server/dist/index.js），已中止且不改动现有安装。');
-  process.exit(1);
-}
-
-// ---------- 3. 事务化覆盖安装（R7 / 旧评 P0-04：任何一步失败整体回滚） ----------
-// 3a 预备：把更新内容全量复制到 data/update/new（还没碰安装根，失败直接退出）；
-// 3b 切换：逐个顶层目录「旧的改名进 data/update/old → 新的改名进安装根」，记日志；
-// 3c 任何一步失败按日志反向改回；runtime\node.exe 仍走热替换（正在运行的 exe 所在目录不整目录 rename）。
-// 断电/进程被杀的窗口从「整个复制过程」缩到「每目录两次 rename」（毫秒级）；
-// 即便截停在切换中途，pending.json 还在，下次启动会重跑本脚本收敛到完整新版。
-const NEWROOT = join(INSTALL_ROOT, 'data', 'update', 'new');
-const OLDROOT = join(INSTALL_ROOT, 'data', 'update', 'old');
-rmSync(NEWROOT, { recursive: true, force: true });
-rmSync(OLDROOT, { recursive: true, force: true });
-mkdirSync(NEWROOT, { recursive: true });
-mkdirSync(OLDROOT, { recursive: true });
-
-const entries = readdirSync(src).filter((name) => name !== 'data'); // data/ 是用户数据，绝不动
-try {
-  for (const name of entries) {
-    cpSync(join(src, name), join(NEWROOT, name), { recursive: true, force: true });
+function safeParts(path) {
+  if (typeof path !== 'string') throw new Error('恢复记录路径无效');
+  const parts = path.split('/');
+  if (parts.some((p) => !p || p === '.' || p === '..' || /[\\:]/.test(p))) {
+    throw new Error('恢复记录路径无效');
   }
-} catch (e) {
-  console.error(`[update] ❌ 预备新文件失败（${e?.message ?? e}）。现有安装未改动，保留 pending.json 可重试。`);
-  process.exit(1);
+  if (parts[0].toLowerCase() === 'data' ||
+      (parts.length !== 1 && !(parts.length === 2 && parts[0] === 'runtime'))) {
+    throw new Error('恢复记录越过更新范围');
+  }
+  return parts;
 }
 
-const swapped = [];
-function rollback() {
-  for (const name of swapped.reverse()) {
+function location(root, entry) {
+  return join(root, ...safeParts(entry.path));
+}
+
+function saveJournal(transaction) {
+  const temp = `${JOURNAL}.tmp`;
+  const fd = openSync(temp, 'w');
+  try {
+    writeFileSync(fd, `${JSON.stringify(transaction)}\n`, 'utf8');
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(temp, JOURNAL);
+}
+
+function readJournal() {
+  const tx = JSON.parse(readFileSync(JOURNAL, 'utf8'));
+  if (tx.version !== 1 || !['switching', 'committed'].includes(tx.state) || !Array.isArray(tx.entries)) {
+    throw new Error('恢复记录格式无效，保留备份，请手动检查 data/update');
+  }
+  const paths = new Set();
+  for (const entry of tx.entries) {
+    safeParts(entry.path);
+    const key = entry.path.toLowerCase();
+    if (typeof entry.hadOriginal !== 'boolean' || paths.has(key)) throw new Error('恢复记录条目无效');
+    paths.add(key);
+  }
+  return tx;
+}
+
+function rollback(tx) {
+  const failures = [];
+  for (const entry of [...tx.entries].reverse()) {
+    const target = location(INSTALL_ROOT, entry);
+    const backup = location(OLDROOT, entry);
+    const prepared = location(NEWROOT, entry);
     try {
-      rmSync(join(INSTALL_ROOT, name), { recursive: true, force: true });
-      renameSync(join(OLDROOT, name), join(INSTALL_ROOT, name));
-    } catch (err) {
-      console.error(`[update] ⚠️ 回滚 ${name} 失败：${err?.message ?? err}（可从 ClassRep.zip 手动恢复）`);
+      if (entry.hadOriginal) {
+        // 备份存在说明旧文件已移走，新文件尚未放入也必须恢复。
+        // 备份不存在则是尚未切换，或上次恢复已完成；重复恢复不删除它。
+        if (existsSync(backup)) {
+          rmSync(target, { recursive: true, force: true });
+          mkdirSync(dirname(target), { recursive: true });
+          renameSync(backup, target);
+        }
+      } else if (!existsSync(prepared)) {
+        // 原本不存在的组件只有在预备文件已被移走后，才可能需要撤销。
+        rmSync(target, { recursive: true, force: true });
+      }
+    } catch (e) {
+      failures.push(`${entry.path}: ${e.message}`);
     }
   }
+  if (failures.length) {
+    throw new Error(`回滚尚未完成，备份和恢复记录已保留：${failures.join('；')}`);
+  }
 }
 
-try {
-  for (const name of entries) {
-    if (name === 'runtime') continue; // node.exe 正在运行，整目录 rename 不可靠，单独热替换
-    if (existsSync(join(INSTALL_ROOT, name))) renameSync(join(INSTALL_ROOT, name), join(OLDROOT, name));
-    renameSync(join(NEWROOT, name), join(INSTALL_ROOT, name));
-    swapped.push(name);
+function cleanup(committed) {
+  // committed 持久化后才清 pending；清理中断时继续清理，不回滚成功更新。
+  if (committed) rmSync(pendingPath, { force: true });
+  for (const dir of [NEWROOT, OLDROOT, STAGING]) rmSync(dir, { recursive: true, force: true });
+  rmSync(JOURNAL, { force: true });
+}
+
+function recover() {
+  const tx = readJournal();
+  if (tx.state === 'committed') {
+    cleanup(true);
+    console.log('[update] 已完成上次成功更新的清理。');
+  } else {
+    rollback(tx);
+    cleanup(false);
+    console.log('[update] 已恢复到完整旧版，保留待更新信息，下次启动可重试。');
   }
-  swapRuntime(join(NEWROOT, 'runtime', 'node.exe'), join(INSTALL_ROOT, 'runtime', 'node.exe'));
-  // 更新包 runtime/ 里除 node.exe 外的文件（目前打包只有 node.exe，防御性补齐）
-  const newRuntime = join(NEWROOT, 'runtime');
-  if (existsSync(newRuntime)) {
-    for (const f of readdirSync(newRuntime)) {
-      if (f !== 'node.exe') cpSync(join(newRuntime, f), join(INSTALL_ROOT, 'runtime', f), { recursive: true, force: true });
+}
+
+function quarantine(zipPath, reason) {
+  console.error(`[update] 更新包校验未通过：${reason}，本次继续使用旧版。`);
+  renameSync(pendingPath, `${pendingPath}.failed.json`);
+  if (zipPath && existsSync(zipPath)) renameSync(zipPath, `${zipPath}.bad`);
+}
+
+function applyUpdate() {
+  const pending = JSON.parse(readFileSync(pendingPath, 'utf8'));
+  const zipPath = pending.zip;
+  if (typeof zipPath !== 'string' || !existsSync(zipPath)) throw new Error('更新包不存在，现有安装未改动');
+  if (typeof pending.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(pending.sha256)) {
+    quarantine(zipPath, '缺少 SHA-256 校验信息');
+    return false;
+  }
+  const got = createHash('sha256').update(readFileSync(zipPath)).digest('hex');
+  if (got !== pending.sha256.toLowerCase()) {
+    quarantine(zipPath, 'SHA-256 校验失败');
+    return false;
+  }
+
+  rmSync(STAGING, { recursive: true, force: true });
+  mkdirSync(STAGING, { recursive: true });
+  const tar = spawnSync('tar', ['-x', '-f', zipPath, '-C', STAGING], { stdio: 'ignore', windowsHide: true });
+  if (tar.status !== 0) throw new Error('更新包解压失败，现有安装未改动');
+  const src = existsSync(join(STAGING, 'ClassRep')) ? join(STAGING, 'ClassRep') : STAGING;
+  if (!existsSync(join(src, 'app', 'server', 'dist', 'index.js'))) {
+    throw new Error('更新包缺 app/server/dist/index.js，现有安装未改动');
+  }
+
+  rmSync(NEWROOT, { recursive: true, force: true });
+  rmSync(OLDROOT, { recursive: true, force: true });
+  mkdirSync(NEWROOT, { recursive: true });
+  mkdirSync(OLDROOT, { recursive: true });
+  const names = readdirSync(src).filter((name) => name.toLowerCase() !== 'data');
+  const entries = [];
+  for (const name of names) {
+    cpSync(join(src, name), join(NEWROOT, name), { recursive: true });
+    // runtime 不整体移动；node.exe 和其他运行时文件参与同一事务。
+    const paths = name === 'runtime'
+      ? readdirSync(join(NEWROOT, name)).filter((file) => file !== 'node.exe.old').map((file) => `runtime/${file}`)
+      : [name];
+    for (const path of paths) {
+      const entry = { path, hadOriginal: existsSync(join(INSTALL_ROOT, ...safeParts(path))) };
+      entries.push(entry);
     }
   }
-} catch (e) {
-  console.error(`[update] ❌ 切换失败（${e?.message ?? e}），正在整体回滚…`);
-  rollback();
-  console.error('[update] 已回滚到旧版，保留 pending.json，下次启动重试。');
-  process.exit(1);
-}
 
-// ---------- 4. 收尾：清 staging/pending/新旧工作树；旧运行时（node.exe.old）下次启动再清 ----------
-try {
-  rmSync(join(INSTALL_ROOT, 'runtime', 'node.exe.old'), { force: true });
-} catch {
-  // 可能正被本进程占用，下次启动再清
-}
-rmSync(pendingPath, { force: true });
-rmSync(STAGING, { recursive: true, force: true });
-rmSync(NEWROOT, { recursive: true, force: true });
-rmSync(OLDROOT, { recursive: true, force: true });
-console.log(`[update] ✅ 已更新到 v${pending.to ?? '?'}，继续启动...`);
-
-// ===== helpers =====
-
-/**
- * 校验不过的更新包不应用、也不让 pending.json 留在原地反复重试：
- * pending → pending.failed.json、zip → .zip.bad（留档可查，下次发版会覆盖）。
- */
-function quarantine(reason) {
-  console.error(`[update] ❌ 更新包校验未通过：${reason}。已隔离，本次用旧版继续启动。`);
+  // app 和 runtime 都可能暂时消失，恢复不能依赖它们。
+  cpSync(SCRIPT, join(WORK, 'recover.mjs'));
+  cpSync(process.execPath, join(WORK, 'recovery-node.exe'));
+  const tx = { version: 1, state: 'switching', entries };
+  saveJournal(tx);
   try {
-    renameSync(pendingPath, `${pendingPath}.failed.json`);
-  } catch {
-    rmSync(pendingPath, { force: true });
-  }
-  try {
-    renameSync(zipPath, `${zipPath}.bad`);
-  } catch {
-    // 改名失败就删掉，绝不留着被下次读到
-    rmSync(zipPath, { force: true });
-  }
-  process.exit(1);
-}
-
-/** runtime/node.exe 热替换：Windows 允许给正在运行的 exe 改名，但不允许覆盖/删除。失败抛错由调用方整体回滚（R7）。 */
-function swapRuntime(srcExe, targetExe) {
-  if (!existsSync(srcExe)) {
-    console.warn('[update] ⚠️ 更新包里没有 runtime/node.exe，保留现有运行时');
-    return;
-  }
-  const backup = `${targetExe}.old`;
-  try {
-    rmSync(backup, { force: true });
-  } catch {
-    // 占用中：留给下次启动清理
-  }
-  try {
-    renameSync(targetExe, backup); // 正在运行的 exe 可以改名
-  } catch {
-    throw new Error('runtime\\node.exe 无法改名（被占用？）');
-  }
-  try {
-    cpSync(srcExe, targetExe, { force: true });
+    for (const entry of entries) {
+      const target = location(INSTALL_ROOT, entry);
+      const backup = location(OLDROOT, entry);
+      mkdirSync(dirname(backup), { recursive: true });
+      mkdirSync(dirname(target), { recursive: true });
+      if (entry.hadOriginal) renameSync(target, backup);
+      renameSync(location(NEWROOT, entry), target);
+    }
+    saveJournal({ ...tx, state: 'committed' });
   } catch (e) {
-    // 拷新失败 → 回滚改名，保持旧版可用
-    try {
-      renameSync(backup, targetExe);
-    } catch {
-      // 极端情况：回滚也失败。下次启动 启动.bat 会因缺 node.exe 自动重新下载。
-    }
-    throw new Error(`写入新运行时失败：${e?.message ?? e}`);
+    console.error(`[update] 切换失败：${e.message}，正在恢复旧版…`);
+    // 以磁盘记录为准；提交标记已写入时，只清理已完整安装的新版。
+    recover();
+    return false;
   }
+  try {
+    cleanup(true);
+  } catch (e) {
+    // Windows 上正在运行的旧 Node 已被移到备份，退出后才能删除。
+    // committed 记录保留，启动器用独立 Node 接着清理；新版不会被误回滚。
+    console.warn(`[update] 新版已完整安装，备份清理待重试：${e.message}`);
+  }
+  console.log(`[update] 已更新到 v${pending.to ?? '?'}。`);
+  return true;
+}
+
+try {
+  if (existsSync(JOURNAL)) {
+    recover();
+    // 先恢复，不在同一个进程内再次尝试更新。
+  } else if (!recoveryOnly) {
+    if (!applyUpdate()) process.exitCode = 1;
+  }
+} catch (e) {
+  console.error(`[update] ${e.message}`);
+  process.exitCode = 1;
 }
