@@ -15,5 +15,19 @@
     "declaration": false,
     "sourceMap": false
   },
-  "include": ["./**/*.ts"]
+  "include": ["./**/*.ts"],
+  // 本机 --target 安装的第三方 Python 包（unsloth 等）自带 .ts，不能被顺藤摸瓜编译进来；
+  // 同理排除产物/缓存目录。否则 train:build 会在 train/pylibs-gpu/**/*.ts 上报错。
+  "exclude": [
+    "node_modules",
+    "dist",
+    "pylibs",
+    "pylibs-gpu",
+    ".cache",
+    "llama.cpp",
+    "models",
+    "data",
+    "artifacts",
+    "env"
+  ]
 }
