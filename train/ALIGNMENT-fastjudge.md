@@ -16,11 +16,42 @@
 
 > 两者指标不可直接比较：快判脚手架的 0.85 写在**混合 mock+synth 的 750 条**上（mock 占 test 多数、且 mock 标签是启发式的）；本工作区的 1.0 写在**纯合成 10k**上。要横向比，必须跑同一 split。
 
-## 推荐定位（互补，不是二选一）
+## 推荐定位（**已用同口径实测修正，2026-09-30**）
 
-1. **默认走快判脚手架**：2ms、0.86MB、无 torch —— 作为每批候选的第一道闸门，成本几乎为零。
-2. **不确定样本走 ONNX 模型**（级联第二级）：把 fastjudge 分数落在中间区间（如 0.2–0.7）的候选交给 rbt3-ONNX 复判，用更强的语义能力兜住难例。级联只在少数候选上付出 ~100ms/30 条的代价。
-3. **横向评测方法**（要选型就先做这一步）：用 `classrep-fastjudge/scripts/merge_and_split.py` 的同一 split，分别跑两条路线的 `recall_pos@0.2` / 误杀 / 误报 / 延迟 / 包体，把结果并排写进 `acceptance-metrics` 口径的表格，再决定是否保留级联。
+**结论：不要用 rbt3-ONNX 替换 fastjudge，也不要拿它做级联第二级。**
+
+在同一批 115 条候选、同一份参考标签上逐条对比（`train/.cache/head_to_head.py`，
+标签取自 `jev-calibrate --dump` 的存档，两边输入同为 `群名 [SEP] prev [SEP] msg`）：
+
+| 丢弃阈值 | fastjudge 召回 | fastjudge 丢弃率 | rbt3-ONNX 召回 | ONNX 丢弃率 |
+|---|---|---|---|---|
+| 0.05 | **92.0%** | 34.8% | 80.0% | 66.1% |
+| 0.20 | **88.0%** | 47.0% | 68.0% | 77.4% |
+| 0.45 | **88.0%** | 56.5% | 60.0% | 81.7% |
+
+- **级联价值为 0**：ONNX 能救回、fastjudge 漏掉的真通知 = **0 条**；
+  反过来 ONNX 会丢掉 fastjudge 保留的 **5 条**真通知（「老师说考到第四章第二节」「奖学金加分细则，会上要用」等）。
+- 也就是说：本工作区的 36.9MB ONNX 在这份真实验收分布上**全面劣于**队友 4.9MB 的 TF-IDF 模型，
+  且慢 1~2 个数量级（ONNX 单批 ~20ms vs fastjudge ~2ms/条）。
+- 为什么？我的 Jev 训练数据是**纯合成**的（`gen-jev-data.ts`，10k 条 1:3），
+  合成集上 AUC 1.0 没有迁移到真实分布——这正是手册反复强调"合成指标不等于真实表现"的实例。
+
+### 因此当前建议
+
+1. **默认继续用 fastjudge**（`FASTJUDGE_MODE=local`）；本工作区的 ONNX 不作为交付物上线路。
+2. 若要把 ONNX 做成真能用的第二级，先补**真实分布标签**：
+   按 `classrep-fastjudge/docs/HANDOFF-to-trainer.md` 的建议用 DeepSeek 对 `mock.jsonl`
+   重打 label/soft_label，再用本工作区管道重训（`gen-jev-data.ts` → `02_train_rbt3.py` → `03_export_onnx.py`），
+   然后**再用同一份 dump 跑一次 head_to_head**——没有这一步就别上线。
+3. 快判的阈值问题（任何阈值都到不了 100% 召回）见
+   `train/jev/INTEGRATION.md` §8：根因是"LLM event_sources 当召回基准"的口径，
+   而不是模型不行；换模型不解决口径问题。
+
+### 仍然可以复用的部分
+
+- 验收门修复：`jev-calibrate.ts` 已能在 `FASTJUDGE_MODE=local`（无 TypeSafe key）下运行并 `--dump` 存档；
+- 延迟经验：常驻 worker 冷启动 6.2s（默认超时 3s/下限 5s 会把首次请求判超时），p50 18ms；
+- 训练/导出/量化管道本身可复用（换真实标签重训即可）。
 
 ## 不要做的事
 

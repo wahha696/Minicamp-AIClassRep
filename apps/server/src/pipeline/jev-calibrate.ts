@@ -8,6 +8,7 @@
 // 3. 输出：真通知的分数（最低的几条最要紧）、各阈值下的召回率与 LLM 输入省下的比例、Jev / LLM 各自耗时。
 // 参考答案来自 LLM，本身可能有错：打印出来的「真通知最低分」那几条要人工看一眼。
 import { db, openDb } from '../db/index.js';
+import { writeFileSync } from 'node:fs';
 import { env } from '../env.js';
 import { buildDemoMessages, listScenarios } from '../ingest/demo.js';
 import { ingestMessages } from '../ingest/index.js';
@@ -32,11 +33,21 @@ if (!env.LLM_API_KEY || (!env.TYPESAFE_API_KEY && !localJevReady())) {
   process.exit(2);
 }
 
-const args = process.argv.slice(2).filter((a) => !a.startsWith('-'));
+const rawArgv = process.argv.slice(2);
+/** 取 `--key value` 形式的参数（与位置参数过滤互不干扰） */
+function flagOf(key: string): string | undefined {
+  const i = rawArgv.indexOf(key);
+  return i >= 0 ? rawArgv[i + 1] : undefined;
+}
+
+// 位置参数 = 剧本名；要排除掉 `--dump <path>` 里的路径，否则它会被当成剧本名
+const dumpIdx = rawArgv.indexOf('--dump');
+const args = rawArgv.filter((a, i) => !a.startsWith('-') && i !== dumpIdx + 1);
 const names = args.length ? args : listScenarios().map((s) => s.name);
 
 interface Scored {
   scenario: string;
+  group_name: string;
   msg: Message;
   score: number;
   positive: boolean;
@@ -79,7 +90,7 @@ for (const name of names) {
     const scores = await scoreWithJev(candidates, context, msgs[0]!.group_name);
     if (!scores) throw new Error(`Jev 调用失败（剧本 ${name}），先检查 key / 网络`);
     jevMs.push({ n: candidates.length, ms: Date.now() - t });
-    candidates.forEach((msg, k) => all.push({ scenario: name, msg, score: scores[k]!, positive: positives.has(msg.message_id) }));
+    candidates.forEach((msg, k) => all.push({ scenario: name, group_name: msgs[0]!.group_name, msg, score: scores[k]!, positive: positives.has(msg.message_id) }));
   }
   const mine = all.filter((s) => s.scenario === name);
   console.log(
@@ -90,6 +101,28 @@ for (const name of names) {
 // ---- 3. 报告 ----
 const pos = all.filter((s) => s.positive).sort((a, b) => a.score - b.score);
 const neg = all.filter((s) => !s.positive);
+
+// 机器可读存档（--dump <path>）：逐条候选的分数与参考标签。
+// 用来把不同快判实现放在**同一批候选、同一份标签**上横向比（口径一致才可比）。
+const dumpPath = flagOf('--dump') ?? process.env.JEV_CALIBRATE_DUMP;
+if (dumpPath) {
+  const record = {
+    generated_at: new Date().toISOString(),
+    backend: env.FASTJUDGE_MODE,
+    drop_below: JEV_DROP_BELOW,
+    urgent_at: JEV_URGENT_AT,
+    candidates: all.map((s) => ({
+      scenario: s.scenario,
+      group_name: s.group_name,
+      sender: s.msg.sender_name,
+      text: s.msg.text,
+      score: Number(s.score.toFixed(6)),
+      positive: s.positive,
+    })),
+  };
+  writeFileSync(dumpPath, JSON.stringify(record, null, 1), 'utf8');
+  console.log(`\n已写出候选分数存档：${dumpPath}（${all.length} 条，供跨实现同口径对比）`);
+}
 
 console.log('\n======== 真通知里 Jev 分数最低的 10 条（阈值必须低于这些，除非参考答案本身错了）');
 for (const s of pos.slice(0, 10)) {
