@@ -104,12 +104,19 @@ const SPEC_HEADER = `你是一个大学班级群聊剧本作家，为「AI 课�
 {"group_name": "群名", "initial_events": [...], "messages": [...], "expected": [...]}
 
 硬性格式：
-- messages：15~35 条，元素 {"offset_minutes": 整数(≤0，历史消息可到 -2880), "sender": "中文昵称", "text": "消息"}，按时间递增（分钟可重复）；至少 6 个不同昵称；正式通知由老师/辅导员发。
+- messages：50~70 条，元素 {"offset_minutes": 整数(≤0，历史消息可到 -2880), "sender": "中文昵称", "text": "消息"}，按时间递增（分钟可重复）；至少 12 个不同昵称；正式通知由老师/辅导员发。
 - text：自然口语；可穿插 [图片]/[表情]/[转发]/[语音] 占位符（每种全文 ≤3 次）；有附和与跑题；事项信息拆散在多条消息、被闲聊打断，不要一条长消息说完所有字段。
 - 时间表述口语化且多样：相对时间（今天/明天/今晚/下周三/这周五）、绝对日期（10 月 16 号）、时刻（下午两点/19:00）；只有日期没有时刻的截止默认当天 23:59。
 - initial_events：改期/取消/历史类剧本必填——日历里已有的事件，id 从 100 递增，字段 {"id":100,"type":"exam|assignment|meeting|activity|announcement|other","title":"...","when":"YYYY-MM-DD HH:mm","location":"...或null","level":1~4}。
 - expected：验收答案。每个要提取的事件一行 {"action":"create|update|cancel","type":"...","title":"...","when":"一句话（如 下周五 14:00）","update_of":原id或null,"location":null}；纯闲聊剧本 expected=[]；只有 update/cancel 给 update_of。
 - 禁止在 text 里出现 JSON、代码块、网址。
+
+真实感硬要求（这三个比例会与线上真实数据对齐，偏离太多视为不合格）：
+- **闲聊占比 ≥75%**：绝大多数消息是「哈哈哈哈」「收到」「几点？」「我也去」「+1」「？？」这类**≤10 字**的短句；
+  真正承载事项信息的消息**不超过 6 条**。
+- **提到时间/日期的消息 ≤10%**：闲聊里不要出现时间；时间只在承载事项的那几条里说。
+- **单条 text 多数 ≤10 字，最长 ≤40 字**：像真人打字（口语、可带错别字/表情/缩写/重复），
+  不要写成公告体——「下周三前交哈」而不是「请于下周三前提交」；通知也拆成多条短消息夹在闲聊里。
 `;
 
 // ---------- 随机要素 ----------
@@ -158,7 +165,8 @@ function normalizeScenario(raw: unknown, tpl: string, tplDef: Template, seed: nu
   if (typeof r.group_name !== 'string' || r.group_name.length < 2 || r.group_name.length > 30) {
     return 'group_name 不合法';
   }
-  if (!Array.isArray(r.messages) || r.messages.length < 10 || r.messages.length > 40) {
+  // 消息数对齐真实群聊（data/mock 中位 60 条；旧上限 40 会把新要求下产出的剧本判死）
+  if (!Array.isArray(r.messages) || r.messages.length < 40 || r.messages.length > 80) {
     return `messages 数量不对：${Array.isArray(r.messages) ? r.messages.length : '非数组'}`;
   }
   const msgs: ScenarioMessageJson[] = [];
@@ -173,7 +181,7 @@ function normalizeScenario(raw: unknown, tpl: string, tplDef: Template, seed: nu
     if (!Number.isFinite(off)) return 'offset_minutes 不是数';
     msgs.push({ offset_minutes: Math.max(-2880, Math.min(0, off)), sender, text });
   }
-  if (msgs.length < 10) return `有效消息太少：${msgs.length}`;
+  if (msgs.length < 35) return `有效消息太少：${msgs.length}（真实群聊中位 60 条，要求 ≥35）`;
 
   const expected: ExpectedEventJson[] = (Array.isArray(r.expected) ? r.expected : [])
     .filter(
@@ -258,6 +266,8 @@ const WANT = numArg('n', 20);
 const CONC = Math.max(1, Math.min(8, numArg('concurrency', 3)));
 const SEED = numArg('seed', 1);
 const ONLY = flagOf('template');
+/** 输出目录（--out）：默认写 train/data/scenarios；做实验时用独立目录，避免污染主数据集 */
+const OUT_DIR = flagOf('out') ?? SCENARIO_DIR;
 
 async function main(): Promise<void> {
   if (ONLY && !TEMPLATES[ONLY]) {
@@ -288,9 +298,9 @@ async function main(): Promise<void> {
     plan.push(chosen);
   }
 
-  mkdirSync(SCENARIO_DIR, { recursive: true });
+  mkdirSync(OUT_DIR, { recursive: true });
   console.log(
-    `生成 ${plan.length} 个剧本 → ${SCENARIO_DIR}` +
+    `生成 ${plan.length} 个剧本 → ${OUT_DIR}` +
       `（模板：${[...new Set(plan)].map((t) => `${t}×${plan.filter((p) => p === t).length}`).join(' ')}）`,
   );
 
@@ -303,7 +313,7 @@ async function main(): Promise<void> {
       const idx = cursor++;
       const tpl = plan[idx]!;
       const seed = SEED * 100_000 + idx;
-      const file = join(SCENARIO_DIR, `${tpl}-${seed.toString(36)}.json`);
+      const file = join(OUT_DIR, `${tpl}-${seed.toString(36)}.json`);
       try {
         const scenario = await genOne(tpl, seed);
         if (typeof scenario === 'string') {
@@ -322,7 +332,7 @@ async function main(): Promise<void> {
   }
   await Promise.all(Array.from({ length: CONC }, () => worker()));
 
-  console.log(`\n完成：成功 ${ok}，失败 ${failures.length} → ${SCENARIO_DIR}`);
+  console.log(`\n完成：成功 ${ok}，失败 ${failures.length} → ${OUT_DIR}`);
   for (const f of failures.slice(0, 10)) console.log(`  ✗ ${f}`);
   console.log(usage.text());
   process.exit(failures.length > plan.length / 2 ? 1 : 0);
