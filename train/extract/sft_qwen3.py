@@ -241,8 +241,21 @@ def main() -> None:
     )
     trainer = Trainer(model=model, args=conf, train_dataset=SftRows(data), data_collator=collate)
 
-    # 断点续训（--resume）：机器休眠/会话重启会杀进程，8 小时训练不能白丢
-    trainer.train(resume_from_checkpoint=True if args.resume else None)
+    # 断点续训（--resume）：机器休眠/会话重启会杀进程，8 小时训练不能白丢。
+    # 注意：目录里没有 checkpoint-N 时不能让 Trainer 收到 resume=True（它会直接抛错），
+    # 所以这里先探测再决定，并把实际行为打印出来，避免"以为在续训、其实从头跑"。
+    ckpts = sorted(
+        (p for p in run_dir.glob("checkpoint-*") if p.is_dir()),
+        key=lambda p: int(p.name.split("-")[-1]) if p.name.split("-")[-1].isdigit() else -1,
+    ) if run_dir.exists() else []
+    resume = None
+    if args.resume:
+        if ckpts:
+            resume = True
+            print(f"--resume：从 {ckpts[-1].name} 续训（共 {len(ckpts)} 个检查点）")
+        else:
+            print(f"--resume：{run_dir} 下没有 checkpoint-*，改为从头训练")
+    trainer.train(resume_from_checkpoint=resume)
 
     # 合并导出（16bit，供 GGUF 转换；见 03_export_gguf.py）
     out = Path(args.out)
