@@ -15,13 +15,20 @@ import type { Message } from '../types.js';
 import { isNoise } from './filter.js';
 import { runPipelineNow } from './index.js';
 import { JEV_DROP_BELOW, JEV_URGENT_AT, resetJevBackoff, scoreWithJev } from './jev.js';
+import { localJevReady } from './jev-local.js';
 import { jevStats, llmStats } from './stats.js';
 
 const BATCH = 30;
 const CONTEXT = 10;
 
-if (!env.LLM_API_KEY || !env.TYPESAFE_API_KEY) {
-  console.error('需要在仓库根目录 .env 里同时配置 LLM_API_KEY 与 TYPESAFE_API_KEY');
+// 快判已本地化（产品决策 2026-09-29 起 FASTJUDGE_MODE 默认 local）：本地模式下不再需要
+// TypeSafe key，验收门必须能在"只有本地模型"的配置里跑起来，否则本地化交付无法验收。
+if (!env.LLM_API_KEY || (!env.TYPESAFE_API_KEY && !localJevReady())) {
+  console.error(
+    '需要在仓库根目录 .env 里配置 LLM_API_KEY，且满足以下之一：\n' +
+      '  · FASTJUDGE_MODE=local 且本地快判可用（classrep-fastjudge/models/local-jev-v1.joblib 或 LOCAL_JEV_MODEL_PATH/FASTJUDGE_ROOT）\n' +
+      '  · 或配置 TYPESAFE_API_KEY（FASTJUDGE_MODE=jev/dual 的远端对照）',
+  );
   process.exit(2);
 }
 
