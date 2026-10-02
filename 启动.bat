@@ -37,6 +37,7 @@ if exist "data\update\transaction.json" goto :recoverUpdate
 if not exist "runtime\node.exe" goto :updateFailed
 if not exist "app\server\dist\index.js" goto :updateFailed
 if exist "data\update\recovery-node.exe" del /q "data\update\recovery-node.exe" >nul 2>nul
+set "CLASSREP_OPEN_BROWSER=1"
 "runtime\node.exe" "app\server\dist\index.js" %*
 exit /b %errorlevel%
 

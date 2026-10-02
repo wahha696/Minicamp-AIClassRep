@@ -45,13 +45,8 @@ jobs:
         run: node scripts/pack.mjs --version "${{ github.ref_name }}"
         # API Key 不打进包里（修复计划 3.2）：用户首次启动在向导页填，CI 也不读 .env.release。
 
-      - name: 校验 zip 内版本号与 tag 一致（version.json 必须在压缩前写好）
-        shell: pwsh
-        run: |
-          $want = '${{ github.ref_name }}'.TrimStart('v')
-          tar -x -f release/ClassRep.zip -C release ClassRep/app/version.json
-          $got = (Get-Content release/ClassRep/app/version.json -Raw | ConvertFrom-Json).version
-          if ($got -ne $want) { throw "包内版本号 $got != tag $want" }
+      - name: 验收真实 ZIP（中文路径解压、启动入口、浏览器、网页、本地模型、版本号）
+        run: node scripts/verify-release.mjs release/ClassRep.zip "${{ github.ref_name }}"
 
       - name: 创建/更新 GitHub Release 并上传
         if: startsWith(github.ref, 'refs/tags/')

@@ -175,14 +175,16 @@ log(`app/version.json = v${version}（${repo}）`);
 // ---------- 7. 压缩 release/ClassRep.zip ----------
 const zipPath = join(releaseDir, 'ClassRep.zip');
 rmSync(zipPath, { force: true });
-// Windows 10+ 自带 bsdtar；对中文名（启动.bat）比 Compress-Archive 可靠。
-// 输出名用相对路径 + cwd：bsdtar 会把「E:\…」里的盘符冒号当成远程主机名（-f host:path），
-// 传绝对路径会报 "Cannot connect to E: resolve failed"
-const tar = spawnSync('tar', ['-a', '-c', '-f', 'ClassRep.zip', 'ClassRep'], {
+// tar -a 在部分 Windows 环境会把中文名写成 ??，甚至输出名为 .zip 的 TAR。
+// 使用 .NET 显式生成 ZIP + UTF-8 文件名，包含隐藏文件，并检查压缩包内的启动入口。
+const archive = spawnSync('powershell.exe', [
+  '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(REPO, 'scripts', 'zip-release.ps1'),
+  '-SourceDirectory', outDir, '-ArchivePath', zipPath,
+], {
   stdio: 'inherit',
-  cwd: releaseDir,
+  windowsHide: true,
 });
-if (tar.status !== 0) fail('tar 压缩失败（需要 Windows 10 1803+ 或自行安装 bsdtar）');
+if (archive.status !== 0) fail('ZIP 压缩或启动入口校验失败');
 
 // ---------- 8. 发布清单（成熟度评估 S05）：自更新按它校验 SHA-256 + 大小，校验不过不更新 ----------
 const zipSize = statSync(zipPath).size;
