@@ -24,7 +24,10 @@ type GroupFetch = {
 };
 
 type SyncResult = { groups: number; messages: number; failures: number };
-type SyncAccountContext = { generation: number; accountEpoch: string };
+type SyncAccountContext = { generation: number; accountEpoch: string; captureEpoch: number };
+let captureEpoch = 0;
+/** Cancel old page requests before QQ is handed back; late replies cannot write into a resumed session. */
+export function cancelHistorySync(): void { captureEpoch++; inflight = null; }
 let inflight: { days: number; context: SyncAccountContext; promise: Promise<SyncResult> } | null = null;
 const EMPTY_RESULT: SyncResult = { groups: 0, messages: 0, failures: 0 };
 
@@ -35,12 +38,13 @@ const EMPTY_RESULT: SyncResult = { groups: 0, messages: 0, failures: 0 };
  */
 function captureSyncAccountContext(): SyncAccountContext | null {
   if (accountDataState() !== 'ready') return null;
-  return { generation: dbGeneration(), accountEpoch: accountEpoch() };
+  return { generation: dbGeneration(), accountEpoch: accountEpoch(), captureEpoch };
 }
 
 function syncAccountIsCurrent(context: SyncAccountContext): boolean {
   return (
     accountDataState() === 'ready' &&
+    context.captureEpoch === captureEpoch &&
     dbGeneration() === context.generation &&
     accountEpoch() === context.accountEpoch
   );

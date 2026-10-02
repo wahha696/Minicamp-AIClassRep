@@ -14,6 +14,7 @@ export interface PresenceOptions {
   /** 检查间隔 */
   checkEveryMs?: number;
   now?: () => number;
+  keepAlive?: () => boolean;
 }
 
 /** 纯逻辑，方便测试：记录每个页面最后报到时间，判断现在是否该退出 */
@@ -23,7 +24,7 @@ export class PresenceTracker {
   private readonly startedAt: number;
 
   constructor(
-    private readonly opts: Required<Omit<PresenceOptions, 'checkEveryMs' | 'now'>> & { now: () => number },
+    private readonly opts: Required<Omit<PresenceOptions, 'checkEveryMs' | 'now' | 'keepAlive'>> & { now: () => number },
   ) {
     this.startedAt = opts.now();
   }
@@ -84,7 +85,7 @@ export function registerPresence(app: Hono, onIdle: () => void, options: Presenc
   });
 
   const timer = setInterval(() => {
-    if (tracker.shouldExit()) {
+    if (!options.keepAlive?.() && tracker.shouldExit()) {
       clearInterval(timer);
       console.log('网页都关掉了，ClassRep 自动退出');
       onIdle();

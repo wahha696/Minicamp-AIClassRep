@@ -65,9 +65,14 @@ export function usePolling<T>(fn: () => Promise<T>, intervalMs: number, resetKey
       const hidden = typeof document !== 'undefined' && document.hidden;
       if (!run.current && !hidden) void refresh();
     }, intervalMs);
+    const onVisible = () => { if (!document.hidden) void refresh(); };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('classrep:resumed', refresh);
     return () => {
       alive.current = false;
       clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('classrep:resumed', refresh);
     };
   }, [refresh, intervalMs, resetKey]);
 

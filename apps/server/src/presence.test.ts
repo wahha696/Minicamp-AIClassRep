@@ -57,6 +57,19 @@ describe('PresenceTracker', () => {
 });
 
 describe('registerPresence 路由', () => {
+  it('keeps the backend alive in QQ mode even if the browser is closed', () => {
+    vi.useFakeTimers();
+    const onIdle = vi.fn();
+    let paused = true;
+    const stop = registerPresence(new Hono(), onIdle, { startupGraceMs: 200, checkEveryMs: 100, keepAlive: () => paused });
+    vi.advanceTimersByTime(1000);
+    expect(onIdle).not.toHaveBeenCalled();
+    paused = false;
+    vi.advanceTimersByTime(100);
+    expect(onIdle).toHaveBeenCalledOnce();
+    stop();
+    vi.useRealTimers();
+  });
   const LOOPBACK = { incoming: { socket: { remoteAddress: '127.0.0.1' } } } as never;
 
   it('报到 / 再见 / 没页面后调 onIdle', async () => {

@@ -142,7 +142,17 @@ export interface MemoryDTO {
   feedback_count: number;
 }
 
+export interface DesktopQQStatusDTO {
+  supported: boolean;
+  state: 'idle' | 'opening' | 'qq' | 'resuming' | 'error';
+  session_id?: string;
+  uin?: string;
+  paused_at?: number;
+  message?: string;
+}
+
 export interface ConnectStatusDTO {
+  desktop_qq?: DesktopQQStatusDTO;
   state: ConnectState;
   account_epoch: string; // 不含账号信息的数据代次令牌；前端业务读写用它拒绝跨号请求
   uin?: string;

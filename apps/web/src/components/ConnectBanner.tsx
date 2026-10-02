@@ -14,6 +14,7 @@ export default function ConnectBanner() {
   const [busy, setBusy] = useState(false);
 
   const banner = bannerFor(data, pathname);
+  if (data?.desktop_qq && data.desktop_qq.state !== 'idle') return null;
   if (!banner) return null;
 
   async function onRestart() {

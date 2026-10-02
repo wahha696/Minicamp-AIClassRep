@@ -17,11 +17,13 @@ vi.mock('./manager.js', async (importOriginal) => {
 
 import { currentAccount, setAccountsDirForTest, switchAccount } from '../accounts.js';
 import { db } from '../db/index.js';
+import { setDesktopRecoveryDoneHandler, setDesktopRecoveryHandler } from './desktop-recovery.js';
 import {
   getOnebotFacts,
   handleOnebotMessage,
   startOnebotClient,
   stopOnebotClient,
+  resetAfterRestart,
 } from './onebot.js';
 
 interface SentAction {
@@ -103,6 +105,8 @@ function reply(call: SentAction, data: unknown): void {
 }
 
 afterEach(async () => {
+  setDesktopRecoveryHandler(() => null);
+  setDesktopRecoveryDoneHandler(() => {});
   stopOnebotClient();
   vi.unstubAllGlobals();
   // 让被 stop 拒绝的 afterOnline 链完成 catch，避免跨用例残留微任务。
@@ -119,6 +123,37 @@ afterAll(() => {
 });
 
 describe('OneBot 迟到响应的账号隔离', () => {
+  it('same-account desktop return backfills its gap once and deduplicates repeated lifecycle events', async () => {
+    await setupAccountA();
+    reply(await actionAt('get_login_info', 0), { nickname: 'A' });
+    reply(await actionAt('get_group_list', 0), []);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    db.prepare("INSERT INTO groups (group_id, name, enabled, adapter, created_at) VALUES ('9001', '班群', 1, 'onebot', ?)").run(Date.now());
+    const since = Date.now() - 10 * 60_000;
+    const takeGap = vi.fn((uin: string) => uin === '11111' ? since : null);
+    setDesktopRecoveryHandler(takeGap);
+    const finished = vi.fn();
+    setDesktopRecoveryDoneHandler(finished);
+    stopOnebotClient();
+    resetAfterRestart();
+    handleOnebotMessage(lifecycle('11111'));
+    reply(await actionAt('get_login_info', 1), { nickname: 'A' });
+    reply(await actionAt('get_group_list', 1), []);
+    const history = await actionAt('get_group_msg_history', 0);
+    expect(finished).not.toHaveBeenCalled();
+    reply(history, { messages: [
+      { message_id: 3001, group_id: 9001, time: Math.floor((since + 1000) / 1000), raw_message: '切换期间的通知', sender: { nickname: '老师' } },
+      { message_id: 3000, group_id: 9001, time: Math.floor((since - 120_000) / 1000), raw_message: '窗口前的消息', sender: { nickname: '老师' } },
+    ] });
+    reply(await actionAt('get_essence_msg_list', 0), []);
+    await vi.waitFor(() => expect(db.prepare("SELECT 1 FROM messages WHERE message_id = '3001'").get()).toBeDefined());
+    expect(db.prepare("SELECT 1 FROM messages WHERE message_id = '3000'").get()).toBeUndefined();
+    handleOnebotMessage(lifecycle('11111'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(takeGap).toHaveBeenCalledExactlyOnceWith('11111');
+    expect(finished).toHaveBeenCalledExactlyOnceWith('11111', since);
+    expect(sent.filter((item) => item.action === 'get_group_msg_history')).toHaveLength(1);
+  });
   it('A 的 get_group_list 切到 B 后才返回，不得把 A 的群写进 B', async () => {
     await setupAccountA();
     const loginA = await actionAt('get_login_info', 0);

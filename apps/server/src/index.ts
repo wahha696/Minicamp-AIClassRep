@@ -33,6 +33,8 @@ import { registerTrashRoutes } from './routes/trash.js';
 import { registerPresence } from './presence.js';
 import { startUpdateChecker } from './update-check.js';
 import { DATA_DIR, WEB_DIST } from './paths.js';
+import { desktopSession } from './napcat/desktop-qq.js';
+import { desktopModeGuard } from './napcat/desktop-guard.js';
 import type { HealthDTO } from './types.js';
 
 trustSystemCertificates(); // 杀毒软件拦截 HTTPS 时也能连上 AI（见 system-ca.ts）
@@ -51,6 +53,7 @@ const app = new Hono();
 // 来源 IP 取不到时按「非本机」处理（宁可只读，也不放行写操作）。
 app.use('*', accessGuard({ lanToken: currentLanToken }));
 app.use('*', accountMutationGuard());
+app.use('*', desktopModeGuard());
 
 app.get('/health', (c) => {
   const accountReady = accountDataState() === 'ready';
@@ -113,7 +116,7 @@ registerTrashRoutes(app);
 
 // 后台模式（scripts/dev.mjs --background 设 AUTO_EXIT=1）：网页全关掉后自动退出
 const AUTO_EXIT = process.env.AUTO_EXIT === '1';
-if (AUTO_EXIT) registerPresence(app, () => shutdown());
+if (AUTO_EXIT) registerPresence(app, () => shutdown(), { keepAlive: () => desktopSession.isActive() });
 
 // 00-总约定 §7：错误一律 { error: '中文' }；不存在的接口也不例外（默认是纯文本 404）
 app.notFound((c) => c.json({ error: '接口不存在' }, 404));
@@ -227,6 +230,7 @@ let stopping = false;
 function shutdown(): void {
   if (stopping) return;
   stopping = true;
+  desktopSession.dispose();
   try {
     stopLocalWorker(); // R1：常驻快判子进程随主进程回收
   } catch {

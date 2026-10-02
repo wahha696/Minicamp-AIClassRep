@@ -22,12 +22,12 @@ export default function StatusLights() {
         <li key={l.key} className="group relative">
           <button
             type="button"
-            className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-xs text-slate-500 hover:bg-slate-100 focus:bg-slate-100 focus:outline-none"
+            className="flex items-center gap-1.5 rounded-md px-1 py-1 text-xs text-slate-500 hover:bg-slate-100 focus:bg-slate-100 focus:outline-none sm:px-1.5"
             aria-label={l.tip}
             title={l.tip}
           >
             <span className={`h-2 w-2 rounded-full ${DOT[l.color]}`} />
-            <span>{l.label}</span>
+            <span className="hidden sm:inline">{l.label}</span>
             {l.color === 'gray' && <span className="hidden text-slate-400 sm:inline">预留</span>}
           </button>
           <span

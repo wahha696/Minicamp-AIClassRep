@@ -5,18 +5,20 @@ import { dirname, join } from 'node:path';
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { logoutMock, restartMock, isOnlineMock, syncHistoryMock, getConnectStatusMock } = vi.hoisted(() => ({
+const { logoutMock, restartMock, isOnlineMock, syncHistoryMock, getConnectStatusMock, desktopStart, desktopReturn, desktopActive } = vi.hoisted(() => ({
   logoutMock: vi.fn(),
   restartMock: vi.fn(),
   isOnlineMock: vi.fn(),
   syncHistoryMock: vi.fn(),
   getConnectStatusMock: vi.fn(),
+  desktopStart: vi.fn(), desktopReturn: vi.fn(), desktopActive: vi.fn(() => false),
 }));
 
 vi.mock('../napcat/index.js', () => ({ restartNapcat: restartMock, logoutNapcat: logoutMock }));
 vi.mock('../napcat/onebot.js', () => ({ isOnline: isOnlineMock }));
 vi.mock('../ingest/history.js', () => ({ syncHistory: syncHistoryMock }));
 vi.mock('../napcat/state.js', () => ({ getConnectStatus: getConnectStatusMock }));
+vi.mock('../napcat/desktop-qq.js', () => ({ desktopSession: { isActive: desktopActive, start: desktopStart, returnToClassRep: desktopReturn } }));
 // 二维码路径指向仓库外的固定临时文件（仓库外是因为测试目录可能被并发清理），beforeEach 里确保目录存在
 vi.mock('../napcat/paths.js', async () => {
   const { join } = await import('node:path');
@@ -25,6 +27,9 @@ vi.mock('../napcat/paths.js', async () => {
 
 import { registerConnectRoutes } from './connect.js';
 import { QRCODE_PATH } from '../napcat/paths.js';
+import { desktopModeGuard } from '../napcat/desktop-guard.js';
+import { accessGuard } from '../lan-guard.js';
+import { DesktopSessionError } from '../napcat/desktop-session.js';
 
 const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
 
@@ -36,8 +41,51 @@ function app(): Hono {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  desktopActive.mockReturnValue(false);
   mkdirSync(dirname(QRCODE_PATH), { recursive: true });
   writeFileSync(QRCODE_PATH, PNG_BYTES);
+});
+
+describe('desktop QQ controls', () => {
+  const body = { expected_account_epoch: 'v2:test:1:0', expected_uin: '10001' };
+  const sessionId = '00000000-0000-4000-8000-000000000001';
+  const json = (data: unknown) => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+  it('validates account snapshot and return session before invoking the controller', async () => {
+    desktopStart.mockReturnValue({ supported: true, state: 'opening' });
+    desktopReturn.mockReturnValue({ supported: true, state: 'resuming' });
+    expect((await app().request('/api/connect/desktop-qq', json(body))).status).toBe(200);
+    expect(desktopStart).toHaveBeenCalledExactlyOnceWith(body.expected_account_epoch, '10001');
+    expect((await app().request('/api/connect/desktop-qq/return', json(body))).status).toBe(400);
+    expect(desktopReturn).not.toHaveBeenCalled();
+    expect((await app().request('/api/connect/desktop-qq/return', json({ ...body, session_id: sessionId }))).status).toBe(200);
+    expect(desktopReturn).toHaveBeenCalledExactlyOnceWith(body.expected_account_epoch, '10001', sessionId);
+    desktopStart.mockImplementationOnce(() => { throw new DesktopSessionError('切换状态已过期'); });
+    expect((await app().request('/api/connect/desktop-qq', json(body))).status).toBe(409);
+  });
+  it('blocks other-tab writes while allowing the return control, reads and presence', async () => {
+    const a = new Hono();
+    a.use('*', desktopModeGuard());
+    registerConnectRoutes(a);
+    a.post('/api/events', c => c.json({ ok: true }));
+    a.post('/api/presence/bye', c => c.json({ ok: true }));
+    desktopActive.mockReturnValue(true);
+    expect((await a.request('/api/events', json({}))).status).toBe(409);
+    expect((await a.request('/api/connect/logout', json(body))).status).toBe(409);
+    expect((await a.request('/api/presence/bye', json({}))).status).toBe(200);
+    desktopReturn.mockReturnValue({ supported: true, state: 'resuming' });
+    expect((await a.request('/api/connect/desktop-qq/return', json({ ...body, session_id: sessionId }))).status).toBe(200);
+  });
+  it('rejects LAN, cross-site and form-based attempts before touching QQ', async () => {
+    const a = new Hono();
+    a.use('*', accessGuard({ lanToken: () => null, lanHosts: () => [] }));
+    registerConnectRoutes(a);
+    const local = { incoming: { socket: { remoteAddress: '127.0.0.1' } } } as never;
+    const lan = { incoming: { socket: { remoteAddress: '192.168.1.2' } } } as never;
+    expect((await a.request('/api/connect/desktop-qq', json(body), lan)).status).toBe(403);
+    expect((await a.request('/api/connect/desktop-qq', { ...json(body), headers: { 'Content-Type': 'application/json', Origin: 'https://other.example' } }, local)).status).toBe(403);
+    expect((await a.request('/api/connect/desktop-qq', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'x=1' }, local)).status).toBe(415);
+    expect(desktopStart).not.toHaveBeenCalled();
+  });
 });
 
 afterEach(() => {

@@ -13,6 +13,7 @@ import { jevAvailable, scoreWithJev } from './jev.js';
 import { getPipelineStats } from './index.js';
 import { llmStats } from './stats.js';
 import { quiesceScheduler, resetLlmRetry, resumeScheduler, runPipelineNow, tick } from './scheduler.js';
+import { setDesktopPipelinePaused } from './activity.js';
 
 vi.mock('./extract.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./extract.js')>()),
@@ -75,6 +76,7 @@ const count = (where: string) =>
   (db.prepare(`SELECT COUNT(*) AS n FROM messages WHERE ${where}`).get() as { n: number }).n;
 
 beforeEach(() => {
+  setDesktopPipelinePaused(false);
   openDb(':memory:');
   extract.mockReset();
   extract.mockResolvedValue([]);
@@ -84,7 +86,49 @@ beforeEach(() => {
   jevOn.mockReturnValue(false);
   resetLlmRetry();
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { setDesktopPipelinePaused(false); vi.restoreAllMocks(); });
+
+describe('desktop QQ pause', () => {
+  it('blocks new AI work and retries pending messages after returning', async () => {
+    ingestMessages(chat('demo-paused', 2), 'demo');
+    setDesktopPipelinePaused(true);
+    await runPipelineNow();
+    await tick(NOW + 60_000);
+    expect(extract).not.toHaveBeenCalled();
+    expect(count('processed = 0')).toBe(2);
+    setDesktopPipelinePaused(false);
+    await runPipelineNow();
+    expect(count('processed = 0')).toBe(0);
+  });
+  it('discards an AI reply from before a pause even if the same account has resumed', async () => {
+    ingestMessages(chat('demo-late', 2), 'demo');
+    let finish!: (events: ExtractedEvent[]) => void;
+    extract.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const running = runPipelineNow();
+    await vi.waitFor(() => expect(extract).toHaveBeenCalledOnce());
+    const input = extract.mock.calls[0]![0];
+    setDesktopPipelinePaused(true);
+    setDesktopPipelinePaused(false);
+    finish([created(input)]);
+    await running;
+    expect(db.prepare('SELECT * FROM events').all()).toHaveLength(0);
+    expect(count('processed = 0')).toBe(2);
+    await runPipelineNow();
+    expect(count('processed = 0')).toBe(0);
+  });
+  it('does not let a late fast-judge reply mark messages filtered during QQ mode', async () => {
+    ingestMessages(chat('demo-jev-late', 2), 'demo');
+    let finish!: (scores: number[]) => void;
+    jev.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const running = runPipelineNow();
+    await vi.waitFor(() => expect(jev).toHaveBeenCalledOnce());
+    setDesktopPipelinePaused(true);
+    finish([0, 0]);
+    await running;
+    expect(count('filtered_out = 1')).toBe(0);
+    expect(count('processed = 0')).toBe(2);
+  });
+});
 
 describe('runPipelineNow', () => {
   it('reschedule 剧本：全部置已处理，噪声置 filtered_out，按 30 条分批，事件入库', async () => {

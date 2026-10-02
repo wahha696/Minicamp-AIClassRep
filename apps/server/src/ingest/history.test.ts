@@ -25,7 +25,7 @@ vi.mock('../napcat/onebot.js', () => ({
   },
 }));
 
-import { syncHistory } from './history.js';
+import { cancelHistorySync, syncHistory } from './history.js';
 
 const DAY = 24 * 3600_000;
 const NOW = Date.now();
@@ -78,6 +78,21 @@ const syncRow = (id = '1001') =>
     | undefined;
 
 describe('syncHistory 翻页', () => {
+  it('QQ handoff cancels old pages; same-account recovery can sync without waiting for them', async () => {
+    seedGroup();
+    let finish!: (response: unknown) => void;
+    callActionMock.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const oldSync = syncHistory(7);
+    await vi.waitFor(() => expect(histCalls()).toHaveLength(1));
+    cancelHistorySync();
+    mockHistoryPages(page([202, Date.now() - 1000]), []);
+    const recovered = await syncHistory(0.01);
+    expect(recovered.messages).toBe(1);
+    finish({ messages: page([201, Date.now() - 2000]) });
+    await oldSync;
+    expect(db.prepare("SELECT 1 FROM messages WHERE message_id = '201'").get()).toBeUndefined();
+    expect(msgCount()).toBe(1);
+  });
   it('3 页：首页不带 message_seq，之后用上一页最早一条的 message_id', async () => {
     seedGroup();
     // 每页两条：按返回顺序遍历，锚点是本页最早的那条（小的 message_id）

@@ -8,6 +8,7 @@ import type {
   AiSettingsDTO,
   AiTestResultDTO,
   ConnectStatusDTO,
+  DesktopQQStatusDTO,
   CsuImportResultDTO,
   CsuImportStartDTO,
   EventDetailDTO,
@@ -54,6 +55,8 @@ export interface Api {
   undoReplay(name: string): Promise<{ ok: true }>;
   importText(groupName: string, text: string): Promise<{ messages: number }>;
   getConnectStatus(): Promise<ConnectStatusDTO>;
+  startDesktopQQ(context: AccountControlContext & { uin: string }): Promise<DesktopQQStatusDTO>;
+  returnFromDesktopQQ(context: AccountControlContext & { uin: string }, sessionId: string): Promise<DesktopQQStatusDTO>;
   /** killQQ=true 只给「关闭电脑版 QQ 并继续」用：会结束用户自己开着的 QQ */
   restartConnect(context: AccountControlContext, killQQ?: boolean): Promise<{ ok: true }>;
   /** erase=true：退出并删除本号在本机的全部数据（不可恢复） */
@@ -198,6 +201,12 @@ function rangeQuery(from?: number, to?: number): string {
 }
 
 const realApi: Api = {
+  startDesktopQQ: (context) => request('POST', '/api/connect/desktop-qq', {
+    expected_account_epoch: context.accountEpoch, expected_uin: context.uin,
+  }),
+  returnFromDesktopQQ: (context, sessionId) => request('POST', '/api/connect/desktop-qq/return', {
+    expected_account_epoch: context.accountEpoch, expected_uin: context.uin, session_id: sessionId,
+  }),
   getToday: () => request('GET', '/api/today'),
   getEvents: (from, to) => request('GET', `/api/events${rangeQuery(from, to)}`),
   getEvent: (id) => request('GET', `/api/events/${id}`),
@@ -282,6 +291,8 @@ export const {
   undoReplay,
   importText,
   getConnectStatus,
+  startDesktopQQ,
+  returnFromDesktopQQ,
   restartConnect,
   logoutConnect,
   startFetchNapcat,

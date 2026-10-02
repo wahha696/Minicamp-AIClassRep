@@ -17,6 +17,7 @@ import {
 import { dbGeneration, onAccountSwitch } from '../db/index.js';
 import { ingestMessages, upsertGroup } from '../ingest/index.js';
 import { getUin, killTree, setUin } from './manager.js';
+import { finishDesktopRecovery, takeDesktopRecovery } from './desktop-recovery.js';
 import type { Message } from '../types.js';
 
 const DEFAULT_WS = 'ws://127.0.0.1:3001';
@@ -79,6 +80,7 @@ let selfId: string | null = null;
 let selfNickname: string | null = null; // get_login_info 拿到的昵称（右上角账号信息用）
 /** 每次 lifecycle / 手动重连 +1，让同账号重连前的异步回包也能失效。 */
 let lifecycleEpoch = 0;
+let onlineLifecycle: { socket: WebSocket | null; uin: string; generation: number; epoch: number } | null = null;
 let kicked = false;            // 收到 bot_offline：不再自动重连，等用户点「重新连接」
 let reconnectTimer: NodeJS.Timeout | null = null;
 let backoffMs = BACKOFF_START_MS;
@@ -105,6 +107,7 @@ export function startOnebotClient(): void {
 
 /** 进程退出时调用：停掉重连并关闭连接 */
 export function stopOnebotClient(): void {
+  lifecycleEpoch++; // Invalidate lifecycle, group-list and forward-message tasks before any reconnect.
   stopped = true;
   if (reconnectTimer !== null) {
     clearTimeout(reconnectTimer);
@@ -216,6 +219,11 @@ export function handleOnebotMessage(text: string): void {
   if (obj.post_type === 'meta_event' && obj.meta_event_type === 'lifecycle') {
     const uin = str(obj.self_id);
     if (!isValidUin(uin)) return;
+    // Duplicate announcements on this authenticated socket must not cancel its backfill
+    // or start another one. A new socket, account or failed DB mount still runs recovery.
+    if (onlineLifecycle?.socket === ws && onlineLifecycle.uin === uin &&
+        onlineLifecycle.epoch === lifecycleEpoch && onlineLifecycle.generation === dbGeneration() &&
+        accountDbError === null && accountDataState() === 'ready' && currentAccount() === uin) return;
     if (selfId !== null && selfId !== uin) rejectAllPending('QQ 账号已切换');
     const epoch = ++lifecycleEpoch;
     selfId = uin;
@@ -467,8 +475,10 @@ async function onLifecycleOnline(uin: string, epoch: number): Promise<void> {
   flushSwitchBuffer();
   const context = captureAccountTask(uin);
   if (context === null || !accountTaskIsCurrent(context)) return;
+  onlineLifecycle = { socket: ws, uin, generation: context.generation, epoch };
   // 刷群名 + 历史补齐（FR-2：每次进入 online 自动跑一次），失败不影响连接
-  void afterOnline(context);
+  const desktopGapSince = takeDesktopRecovery(uin);
+  void afterOnline(context, desktopGapSince);
 }
 
 // ===== @ 规则 =====
@@ -523,7 +533,14 @@ export function isMentionOther(item: unknown): boolean {
 let lastSyncAt = 0;
 
 /** lifecycle 后异步执行：refreshGroups → syncHistory。动态 import 避免 onebot ⇄ history 加载环。 */
-async function afterOnline(context: AccountTaskContext): Promise<void> {
+async function afterOnline(context: AccountTaskContext, desktopGapSince: number | null = null): Promise<void> {
+  try { await refreshAfterOnline(context, desktopGapSince); }
+  finally {
+    if (desktopGapSince !== null) finishDesktopRecovery(context.uin, desktopGapSince);
+  }
+}
+
+async function refreshAfterOnline(context: AccountTaskContext, desktopGapSince: number | null): Promise<void> {
   try {
     const info = await callAction<Json>('get_login_info', {});
     if (!accountTaskIsCurrent(context)) return;
@@ -542,10 +559,11 @@ async function afterOnline(context: AccountTaskContext): Promise<void> {
   try {
     const { syncHistory } = await import('../ingest/history.js');
     if (!accountTaskIsCurrent(context)) return;
-    // B7：首次 online 补 7 天；之后重连只补断线那段（封顶 30 天，最少 1 天——接口只认 1/7/30 天档）
+    // 常规重连按天补读；从电脑版 QQ 返回只补离开区间，并留 1 分钟重叠去重。
     const DAY = 86_400_000;
-    const days =
-      lastSyncAt === 0 ? 7 : Math.min(30, Math.max(1, Math.ceil((Date.now() - lastSyncAt) / DAY)));
+    const days = desktopGapSince !== null
+      ? Math.min(30, Math.max(1 / DAY, (Date.now() - desktopGapSince + 60_000) / DAY))
+      : lastSyncAt === 0 ? 7 : Math.min(30, Math.max(1, Math.ceil((Date.now() - lastSyncAt) / DAY)));
     await syncHistory(days);
     if (!accountTaskIsCurrent(context)) return;
     lastSyncAt = Date.now();

@@ -8,10 +8,15 @@ import { QRCODE_PATH } from '../napcat/paths.js';
 import { isOnline } from '../napcat/onebot.js';
 import { logoutNapcat, restartNapcat } from '../napcat/index.js';
 import { getConnectStatus } from '../napcat/state.js';
+import { desktopSession } from '../napcat/desktop-qq.js';
+import { DesktopSessionError } from '../napcat/desktop-session.js';
 
 export function registerConnectRoutes(app: Hono): void {
   // GET /api/connect/status → ConnectStatusDTO（前端每 2s 轮询）
   app.get('/api/connect/status', (c) => c.json(getConnectStatus()));
+
+  app.post('/api/connect/desktop-qq', (c) => desktopControl(c, false));
+  app.post('/api/connect/desktop-qq/return', (c) => desktopControl(c, true));
 
   // GET /api/connect/qrcode → napcat/cache/qrcode.png（不存在则 404）；no-store：每 2s 重取新码
   app.get('/api/connect/qrcode', async (c) => {
@@ -31,6 +36,7 @@ export function registerConnectRoutes(app: Hono): void {
   // （「关闭电脑版 QQ 并继续」「重新连接」「重启采集端」共用，架构.md §5）
   // body 可选 { kill_qq: true }：只有「关闭电脑版 QQ 并继续」按钮传，才会结束用户自己的 QQ（修复计划 S4）
   app.post('/api/connect/restart', async (c) => {
+    if (desktopSession.isActive()) return c.json({ error: '请先返回 ClassRep，再重新连接' }, 409);
     const parsed = restartSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: '连接状态已过期，请刷新后重试' }, 400);
     try {
@@ -49,6 +55,7 @@ export function registerConnectRoutes(app: Hono): void {
   // POST /api/connect/logout：退出当前 QQ（忘掉 QQ 号 + 重启采集端）→ 回到扫码，可换号登录。
   // 数据按号分库存着，换回来原样恢复；body 可选 { erase: true } = 「退出并删除本号数据」（不可恢复）
   app.post('/api/connect/logout', async (c) => {
+    if (desktopSession.isActive()) return c.json({ error: '请先返回 ClassRep，再退出登录' }, 409);
     const parsed = logoutSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: '连接状态已过期，请刷新后重试' }, 400);
     try {
@@ -129,3 +136,26 @@ const logoutSchema = z.object({
   expected_uin: uinSchema,
   erase: z.boolean().optional(),
 });
+
+const desktopSchema = z.object({
+  expected_account_epoch: accountEpochSchema,
+  expected_uin: uinSchema,
+  session_id: z.string().uuid().optional(),
+});
+
+async function desktopControl(c: import('hono').Context, returning: boolean) {
+  const parsed = desktopSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success || (returning && !parsed.data.session_id)) {
+    return c.json({ error: '切换状态已过期，请刷新后重试' }, 400);
+  }
+  try {
+    const { expected_account_epoch: epoch, expected_uin: uin, session_id: sessionId } = parsed.data;
+    const status = returning
+      ? desktopSession.returnToClassRep(epoch, uin, sessionId!)
+      : desktopSession.start(epoch, uin);
+    return c.json(status);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : 'QQ 切换失败' },
+      error instanceof DesktopSessionError ? error.status as 409 : 500);
+  }
+}

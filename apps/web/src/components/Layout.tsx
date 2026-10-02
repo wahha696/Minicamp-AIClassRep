@@ -5,6 +5,8 @@ import ConnectBanner from './ConnectBanner';
 import Pet from './Pet';
 import StatusLights from './StatusLights';
 import SyncButton from './SyncButton';
+import ReturnQQ from './ReturnQQ';
+import { useConnectStatus } from './ConnectStatus';
 
 interface NavItem {
   to: string;
@@ -30,21 +32,24 @@ function Icon({ d }: { d: string }) {
 }
 
 export default function Layout() {
+  const { data } = useConnectStatus();
+  const paused = data?.desktop_qq !== undefined && data.desktop_qq.state !== 'idle';
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-800">
+    <div className="min-h-screen bg-slate-50 text-slate-800" inert={paused || undefined}>
       <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/90 backdrop-blur">
-        <div className="mx-auto flex h-14 max-w-5xl items-center gap-6 px-4">
+        <div className="mx-auto flex h-14 max-w-5xl items-center gap-2 px-4 sm:gap-3 xl:gap-6">
           <NavLink to="/" className="shrink-0 text-lg font-semibold tracking-tight text-slate-900">
             AI课代表
           </NavLink>
-          <nav className="hidden flex-1 gap-1 md:flex">
+          <ReturnQQ />
+          <nav className="hidden flex-1 gap-1 lg:flex">
             {NAV.map((n) => (
               <NavLink
                 key={n.to}
                 to={n.to}
                 end={n.to === '/'}
                 className={({ isActive }) =>
-                  `rounded-md px-3 py-1.5 text-sm ${
+                  `whitespace-nowrap rounded-md px-2 py-1.5 text-sm xl:px-3 ${
                     isActive ? 'bg-slate-100 font-medium text-slate-900' : 'text-slate-500 hover:text-slate-900'
                   }`
                 }
@@ -53,22 +58,22 @@ export default function Layout() {
               </NavLink>
             ))}
           </nav>
-          <div className="ml-auto flex items-center gap-3">
+          <div className="ml-auto flex items-center gap-2 sm:gap-3">
             <SyncButton />
             <StatusLights />
-            {/* 手机上跟在状态灯后面；宽屏贴到整个页面的最右上角 */}
-            <Avatar className="md:absolute md:right-5 md:top-[10px]" />
+            {/* 中小屏跟在状态灯后面；宽屏贴到整个页面的最右上角 */}
+            <Avatar className="xl:absolute xl:right-5 xl:top-[10px]" />
           </div>
         </div>
         <ConnectBanner />
       </header>
 
       {/* 手机上底部有 Tab 栏，留出空间 */}
-      <main className="mx-auto max-w-5xl px-4 pb-24 pt-6 md:pb-10">
+      <main className="mx-auto max-w-5xl px-4 pb-24 pt-6 lg:pb-10">
         <Outlet />
       </main>
 
-      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-6 border-t border-slate-200 bg-white pb-[env(safe-area-inset-bottom)] md:hidden">
+      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-6 border-t border-slate-200 bg-white pb-[env(safe-area-inset-bottom)] lg:hidden">
         {NAV.map((n) => (
           <NavLink
             key={n.to}
@@ -85,7 +90,7 @@ export default function Layout() {
       </nav>
 
       {/* 桌宠（PET-1~6）：纯装饰浮层，交互与层级说明见 components/Pet.tsx 顶部注释 */}
-      <Pet />
+      {!paused && <Pet />}
     </div>
   );
 }

@@ -162,7 +162,17 @@ export interface MemoryDTO {
   feedback_count: number;
 }
 
+export interface DesktopQQStatusDTO {
+  supported: boolean;
+  state: 'idle' | 'opening' | 'qq' | 'resuming' | 'error';
+  session_id?: string;
+  uin?: string;
+  paused_at?: number;
+  message?: string;
+}
+
 export interface ConnectStatusDTO {
+  desktop_qq?: DesktopQQStatusDTO;
   state: ConnectState;
   /** 当前账号库租约；前端业务读写都带回，换号后旧页面请求会被后端拒绝。 */
   account_epoch: string;

@@ -10,6 +10,7 @@ import type { ConnectState, ConnectStatusDTO } from '../types.js';
 import { getManagerFacts, getUin, type ManagerFacts } from './manager.js';
 import { EXTERNAL_ONEBOT, getOnebotFacts, getSelfNickname } from './onebot.js';
 import { NAPCAT_DIR, QRCODE_PATH } from './paths.js';
+import { getDesktopStatus } from './desktop-recovery.js';
 
 /** 采集端主程序：缺它 = 缺运行包（git 克隆不带 napcat/，发布包自带；缺了给一键下载入口） */
 const NAPCAT_BOOT_EXE = join(NAPCAT_DIR, 'NapCatWinBootMain.exe');
@@ -135,6 +136,7 @@ export function getConnectStatus(): ConnectStatusDTO {
     since = Date.now();
   }
   const dto: ConnectStatusDTO = {
+    desktop_qq: getDesktopStatus(),
     state: derived.state,
     account_epoch: accountEpoch(),
     since,

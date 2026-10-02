@@ -1,3 +1,4 @@
+let mockDesktopQQ: import('./types').DesktopQQStatusDTO = { supported: true, state: 'idle' };
 // VITE_MOCK=1 时 client.ts 用这里的假数据代替后端，用于后端没好时开发页面。
 // 数据存在内存里：PATCH/删除/回放都会改变后续返回，刷新页面恢复初始状态。
 // 连接状态可在浏览器控制台切换，方便调 D1 黄条 / D5 连接页：
@@ -673,9 +674,10 @@ export const mockApi: Api = {
     const status: ConnectStatusDTO = {
       state,
       account_epoch: '10001:1',
+      desktop_qq: mockDesktopQQ,
       since: bootAt,
       first_run: localStorage.getItem('mockFirstRun') === '1',
-      ...(state === 'online' ? { uin: '10001', nickname: '演示同学' } : {}),
+      ...(state === 'online' || mockDesktopQQ.state !== 'idle' ? { uin: '10001', nickname: '演示同学' } : {}),
       ...(state === 'error'
         ? { message: '采集端异常。常见原因是 QQ 版本过旧，请更新到最新版 QQ 后重试' }
         : {}),
@@ -686,6 +688,15 @@ export const mockApi: Api = {
   restartConnect() {
     localStorage.removeItem('mockConnectState');
     return delay({ ok: true as const });
+  },
+
+  startDesktopQQ() {
+    mockDesktopQQ = { supported: true, state: 'qq', uin: '10001', session_id: '00000000-0000-4000-8000-000000000001', paused_at: Date.now() };
+    return delay(mockDesktopQQ);
+  },
+  returnFromDesktopQQ() {
+    mockDesktopQQ = { supported: true, state: 'idle' };
+    return delay(mockDesktopQQ);
   },
 
   logoutConnect() {
