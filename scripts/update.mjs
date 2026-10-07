@@ -116,6 +116,38 @@ function quarantine(zipPath, reason) {
   if (zipPath && existsSync(zipPath)) renameSync(zipPath, `${zipPath}.bad`);
 }
 
+/**
+ * Release 实际下发 ZIP。Windows 上优先用系统 PowerShell 的 Expand-Archive：
+ * Git for Windows 附带的 GNU tar 在含中文/空格的安装路径下会解压失败，且普通用户机器
+ * 也不保证 PATH 中有可处理 ZIP 的 tar。环境变量传路径，避免把用户路径拼进命令脚本。
+ * PowerShell 被策略禁用时再回退系统 tar；非 Windows 保持 tar 路径。
+ */
+function extractArchive(zipPath) {
+  if (process.platform === 'win32') {
+    const ps = spawnSync('powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy', 'Bypass',
+      '-Command',
+      "$ErrorActionPreference='Stop'; Expand-Archive -LiteralPath $env:CLASSREP_UPDATE_ARCHIVE -DestinationPath $env:CLASSREP_UPDATE_STAGING -Force",
+    ], {
+      stdio: 'ignore',
+      windowsHide: true,
+      env: {
+        ...process.env,
+        CLASSREP_UPDATE_ARCHIVE: zipPath,
+        CLASSREP_UPDATE_STAGING: STAGING,
+      },
+    });
+    if (ps.status === 0) return true;
+  }
+  const tar = spawnSync('tar', ['-x', '-f', zipPath, '-C', STAGING], {
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  return tar.status === 0;
+}
+
 function applyUpdate() {
   const pending = JSON.parse(readFileSync(pendingPath, 'utf8'));
   const zipPath = pending.zip;
@@ -132,8 +164,7 @@ function applyUpdate() {
 
   rmSync(STAGING, { recursive: true, force: true });
   mkdirSync(STAGING, { recursive: true });
-  const tar = spawnSync('tar', ['-x', '-f', zipPath, '-C', STAGING], { stdio: 'ignore', windowsHide: true });
-  if (tar.status !== 0) throw new Error('更新包解压失败，现有安装未改动');
+  if (!extractArchive(zipPath)) throw new Error('更新包解压失败，现有安装未改动');
   const src = existsSync(join(STAGING, 'ClassRep')) ? join(STAGING, 'ClassRep') : STAGING;
   if (!existsSync(join(src, 'app', 'server', 'dist', 'index.js'))) {
     throw new Error('更新包缺 app/server/dist/index.js，现有安装未改动');
