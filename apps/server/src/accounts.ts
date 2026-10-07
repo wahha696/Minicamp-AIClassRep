@@ -9,11 +9,13 @@
 // 切完按序入库（攒不下就丢，历史补齐会兜回来）。
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { DB_FILE, db, dbGeneration, notifyAccountSwitch, openDb } from './db/index.js';
+import { snapshotDatabase, validateBackupDatabase } from './data-backup.js';
 import { pauseCleanup, resumeCleanup } from './jobs/cleanup.js';
 import { getUin } from './napcat/manager.js';
 import { ACCOUNTS_DIR, DATA_DIR } from './paths.js';
+import { redactSensitive } from './redact.js';
 
 /** 未登录时的「无账号」兜底库：就是旧版的 data/classrep.db（演示模式数据落这里）。 */
 export const FALLBACK_DB = DB_FILE;
@@ -21,6 +23,8 @@ export const FALLBACK_DB = DB_FILE;
 export const LEGACY_UIN = 'legacy';
 /** classrep.db 的伴生文件（WAL） */
 const DB_SIDECARS = ['', '-wal', '-shm'] as const;
+const AUTO_BACKUP_KEEP = 7;
+const AUTO_BACKUP_CHECK_MS = 60 * 60 * 1000;
 
 let current: string | null = null;
 let accountsDir = ACCOUNTS_DIR;
@@ -34,6 +38,7 @@ let schedulerResumePending = false;
 let transitionTail: Promise<void> = Promise.resolve();
 let queuedTransitions = 0;
 let activeMutationLeases = 0;
+let automaticBackupTimer: ReturnType<typeof setInterval> | null = null;
 /** 防止服务重启后 generation/accessEpoch 从相同初值开始，令旧浏览器页面的 epoch 意外复活。 */
 const processAccountNonce = randomUUID();
 const mutationLeaseWaiters = new Set<() => void>();
@@ -175,13 +180,93 @@ export function accountDbPath(uin: string): string {
   return join(accountsDir, uin, 'classrep.db');
 }
 
+function backupsDir(uin: string): string {
+  return join(accountsDir, uin, 'backups');
+}
+
+/** 每个账号每天第一次挂载后做一致性快照，保留最近 7 份。失败只告警，不阻断登录。 */
+function ensureDailyBackup(uin: string, now = Date.now()): void {
+  const dir = backupsDir(uin);
+  const day = new Date(now + 8 * 60 * 60 * 1000).toISOString().slice(0, 10); // Asia/Shanghai 日期
+  const target = join(dir, `auto-${day}.db`);
+  if (existsSync(target)) {
+    try {
+      validateBackupDatabase(target);
+      return;
+    } catch {
+      // 上次进程中断可能留下了不完整文件；不能把“文件存在”当作备份成功。
+      rmSync(target, { force: true });
+    }
+  }
+  const temporary = `${target}.tmp-${randomUUID()}`;
+  try {
+    mkdirSync(dir, { recursive: true });
+    snapshotDatabase(temporary);
+    validateBackupDatabase(temporary);
+    renameSync(temporary, target);
+    const autos = readdirSync(dir).filter((name) => /^auto-\d{4}-\d{2}-\d{2}\.db$/.test(name)).sort().reverse();
+    for (const old of autos.slice(AUTO_BACKUP_KEEP)) rmSync(join(dir, old), { force: true });
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    console.warn(`[accounts] 自动备份失败：${redactSensitive(error)}`);
+  }
+}
+
+/**
+ * 立即检查今日快照。lease 保证 VACUUM INTO 期间不会切到另一个账号库。
+ * 返回 false 只表示当前未登录、正在切号或处于 fail-closed 状态。
+ */
+export function runAutomaticBackupNow(now = Date.now()): boolean {
+  const lease = tryAcquireAccountMutationLease();
+  if (!lease) return false;
+  try {
+    const uin = current;
+    if (uin === null || !lease.isCurrent()) return false;
+    ensureDailyBackup(uin, now);
+    return true;
+  } finally {
+    lease.release();
+  }
+}
+
+/** 常驻运行时每小时检查一次，跨天不重启也不会漏掉自动备份。 */
+export function startAutomaticBackupScheduler(): void {
+  if (automaticBackupTimer !== null) return;
+  automaticBackupTimer = setInterval(() => runAutomaticBackupNow(), AUTO_BACKUP_CHECK_MS);
+  automaticBackupTimer.unref();
+}
+
+export interface AccountBackupStatus {
+  automatic_count: number;
+  latest_automatic_at: number | null;
+  latest_restore_backup_at: number | null;
+}
+
+export function accountBackupStatus(): AccountBackupStatus {
+  if (current === null) return { automatic_count: 0, latest_automatic_at: null, latest_restore_backup_at: null };
+  let names: string[];
+  const dir = backupsDir(current);
+  try { names = readdirSync(dir); } catch { names = []; }
+  const mtimes = (prefix: string) => names
+    .filter((name) => name.startsWith(prefix) && name.endsWith('.db'))
+    .map((name) => statSync(join(dir, name)).mtimeMs)
+    .sort((a, b) => b - a);
+  const auto = mtimes('auto-');
+  const restore = mtimes('pre-restore-');
+  return {
+    automatic_count: auto.length,
+    latest_automatic_at: auto[0] ?? null,
+    latest_restore_backup_at: restore[0] ?? null,
+  };
+}
+
 /**
  * 挂载某账号的库（幂等）。停调度器 → 等在途批次 → openDb（幂等建表 + migrate）→ 恢复调度。
  * 同一账号重复调用（WS 重连会再收 lifecycle）直接返回。
  */
 export function switchAccount(uin: string): Promise<void> {
   if (!isValidUin(uin)) {
-    console.warn(`[accounts] ${uin} 不是合法 QQ 号，忽略切库`);
+    console.warn('[accounts] 收到不合法的账号标识，忽略切库');
     return Promise.resolve();
   }
   // 没有别的 transition 排队时，同号 lifecycle 才能安全地直接 no-op。
@@ -201,7 +286,8 @@ export function switchAccount(uin: string): Promise<void> {
       blockedAccount = null;
       schedulerResumePending = false;
       notifyAccountSwitch(uin); // 通知各模块清账号相关的内存缓存（群名、Jev 分数、历史补齐时点…）
-      console.log(`[accounts] 已挂载账号 ${uin} 的库（${accountDbPath(uin)}）`);
+      ensureDailyBackup(uin);
+      console.log('[accounts] 已挂载当前登录账号的数据库');
       resumeScheduler(shouldResume);
     } catch (error) {
       // openDb 原子保留旧连接，但 selfId/登录会话已经可能变成目标账号；旧数据不得再经 API 暴露。
@@ -209,6 +295,91 @@ export function switchAccount(uin: string): Promise<void> {
       blockedAccount = uin;
       accessEpoch++;
       schedulerResumePending = shouldResume;
+      throw error;
+    }
+  });
+}
+
+export type RestoreAccountBackupResult =
+  | { status: 'restored'; safetyBackup: string }
+  | { status: 'stale' };
+
+/**
+ * 用已验证的 SQLite 候选文件替换当前账号库。调用方必须把候选放在当前账号目录内，保证改名原子。
+ * 切换前 checkpoint + 关闭句柄；原库永久保留为 pre-restore 快照。任何失败都恢复原库并重新挂载。
+ */
+export function restoreCurrentAccountBackup(expectedEpoch: string, candidate: string): Promise<RestoreAccountBackupResult> {
+  // 挂库失败时 current 可能仍指向旧 A，而 blockedAccount 才是当前登录且需修复的 B。
+  // 只使用控制面权威账号，避免“修复 B”误替换 A。
+  const targetUin = accountControlUin();
+  if (targetUin === null || switching || accountEpoch() !== expectedEpoch) {
+    return Promise.resolve({ status: 'stale' });
+  }
+  const accountDir = join(accountsDir, targetUin);
+  const resolvedCandidate = resolve(candidate);
+  if (dirname(resolvedCandidate) !== resolve(accountDir) || !existsSync(resolvedCandidate)) {
+    return Promise.reject(new Error('恢复候选文件不在当前账号目录'));
+  }
+  validateBackupDatabase(resolvedCandidate);
+
+  return enqueueAccountTransition<RestoreAccountBackupResult>(async () => {
+    if (accountControlUin() !== targetUin || accountEpoch() !== expectedEpoch) return { status: 'stale' };
+    const { quiesceScheduler, resumeScheduler } = await import('./pipeline/scheduler.js');
+    const wasRunning = await quiesceScheduler();
+    const shouldResume = wasRunning || schedulerResumePending;
+    const database = accountDbPath(targetUin);
+    const safetyDir = backupsDir(targetUin);
+    mkdirSync(safetyDir, { recursive: true });
+    const safety = join(safetyDir, `pre-restore-${new Date().toISOString().replace(/[:.]/g, '-')}.db`);
+    let candidateMoved = false;
+    try {
+      // 正常恢复时这是目标库；挂库失败时可能是 fallback/旧账号库。
+      // 只做 checkpoint+关句柄，后面的文件操作始终限定到 targetUin 目录。
+      if (db?.isOpen) {
+        db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+        db.close();
+      }
+      for (const suffix of DB_SIDECARS) {
+        const source = database + suffix;
+        if (existsSync(source)) renameSync(source, safety + suffix);
+      }
+      renameSync(resolvedCandidate, database);
+      candidateMoved = true;
+      openDb(database); // 允许旧 schema 在恢复时走正常迁移
+      current = targetUin;
+      accessBlocked = false;
+      blockedAccount = null;
+      schedulerResumePending = false;
+      notifyAccountSwitch(targetUin);
+      ensureDailyBackup(targetUin);
+      resumeScheduler(shouldResume);
+      return { status: 'restored', safetyBackup: safety };
+    } catch (error) {
+      try { if (db?.isOpen) db.close(); } catch { /* 继续恢复原库 */ }
+      try {
+        if (candidateMoved && existsSync(database)) {
+          renameSync(database, join(accountDir, `failed-restore-${Date.now()}.db`));
+        }
+        for (const suffix of DB_SIDECARS) {
+          if (existsSync(safety + suffix)) {
+            rmSync(database + suffix, { force: true });
+            renameSync(safety + suffix, database + suffix);
+          }
+        }
+        openDb(database);
+        current = targetUin;
+        accessBlocked = false;
+        blockedAccount = null;
+        schedulerResumePending = false;
+        notifyAccountSwitch(targetUin);
+        resumeScheduler(shouldResume);
+      } catch (rollbackError) {
+        accessBlocked = true;
+        blockedAccount = targetUin;
+        accessEpoch++;
+        schedulerResumePending = shouldResume;
+        throw new Error(`恢复失败且原库回滚未完成：${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+      }
       throw error;
     }
   });
@@ -312,7 +483,7 @@ export function logoutAccountData(opts: {
       if (erase) {
         const dir = join(accountsDir, expectedUin);
         rmSync(dir, { recursive: true, force: true });
-        console.log(`[accounts] 已退出并删除账号 ${expectedUin} 的本机数据（${dir}）`);
+        console.log('[accounts] 已退出并删除当前账号的本机数据');
       }
       clearSession();
     } catch (error) {
@@ -367,7 +538,7 @@ export function deleteAccountData(uin: string): Promise<boolean> {
     if (current === uin || accessBlocked) await closeCurrentAccountNow();
     if (!existed) return false;
     rmSync(dir, { recursive: true, force: true });
-    console.log(`[accounts] 已删除账号 ${uin} 的本机数据（${dir}）`);
+    console.log('[accounts] 已删除账号的本机数据');
     return true;
   });
 }
@@ -386,7 +557,7 @@ export function deleteInactiveAccountData(uin: string): Promise<DeleteInactiveAc
     const dir = join(accountsDir, uin);
     if (!existsSync(join(dir, 'classrep.db'))) return 'not_found';
     rmSync(dir, { recursive: true, force: true });
-    console.log(`[accounts] 已删除非活动账号 ${uin} 的本机数据（${dir}）`);
+    console.log('[accounts] 已删除非活动账号的本机数据');
     return 'deleted';
   });
 }
@@ -424,7 +595,7 @@ export function migrateLegacyDb(opts?: {
   if (uin === null) {
     console.log('[accounts] 旧版数据库已移动到 data/accounts/legacy/（连接页会提示一次）');
   } else {
-    console.log(`[accounts] 旧版数据库已迁移到账号 ${uin}`);
+    console.log('[accounts] 旧版数据库已迁移到当前账号');
   }
   return { moved: true, target: targetDb };
 }
@@ -440,7 +611,7 @@ export async function initAccounts(opts?: {
   if (opts?.accountsDir !== undefined) accountsDir = opts.accountsDir;
   if (opts?.fallbackDb !== undefined) fallbackDb = opts.fallbackDb;
   const { moved, target } = migrateLegacyDb(opts);
-  if (moved && target !== null) console.log(`[accounts] 旧库已迁移 → ${target}`);
+  if (moved && target !== null) console.log('[accounts] 旧库迁移完成');
   const saved = getUin(opts?.settingsDir ?? opts?.dataDir);
   if (saved !== undefined) {
     try {
@@ -449,14 +620,14 @@ export async function initAccounts(opts?: {
       // 冷启动时保存的账号库若损坏/无权限，不能让 HTTP 服务根本起不来：
       // 用安全 fallback 提供连接页与账号删除等恢复入口，但继续 accessBlocked，
       // 所有业务数据 API/OneBot/调度均 fail closed，绝不把 fallback 当成该账号数据。
-      console.error(`[accounts] 启动时无法挂载记住的账号 ${saved}，已进入可恢复模式：`, error);
+      console.error(`[accounts] 启动时无法挂载记住的账号，已进入可恢复模式：${redactSensitive(error)}`);
       current = null;
       try {
         openDb(opts?.fallbackDb ?? fallbackDb);
         notifyAccountSwitch(null);
       } catch (fallbackError) {
         // 连 fallback 也打不开时仍让服务启动；全局恢复路由不依赖业务库。
-        console.error('[accounts] 恢复用兜底库也无法挂载：', fallbackError);
+        console.error(`[accounts] 恢复用兜底库也无法挂载：${redactSensitive(fallbackError)}`);
       }
       accessBlocked = true;
       accessEpoch++;

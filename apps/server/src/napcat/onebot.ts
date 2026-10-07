@@ -16,6 +16,7 @@ import {
 } from '../accounts.js';
 import { dbGeneration, onAccountSwitch } from '../db/index.js';
 import { ingestMessages, upsertGroup } from '../ingest/index.js';
+import { redactSensitive } from '../redact.js';
 import { getUin, killTree, setUin } from './manager.js';
 import { finishDesktopRecovery, takeDesktopRecovery } from './desktop-recovery.js';
 import type { Message } from '../types.js';
@@ -239,7 +240,7 @@ export function handleOnebotMessage(text: string): void {
       switchBuffer.length = 0;
       stopOnebotClient();
       void failAccountSession().catch((closeError) => {
-        console.error('[onebot] 保存登录账号失败，且无法关闭账号库：', closeError);
+        console.error(`[onebot] 保存登录账号失败，且无法关闭账号库：${redactSensitive(closeError)}`);
       });
       return;
     }
@@ -384,10 +385,10 @@ export function expandForward(
       if (msgs.length > 0) {
         if (!accountTaskIsCurrent(context)) return;
         const { inserted } = ingestMessages(msgs, 'forward');
-        console.log(`[onebot] 合并转发已展开：res_id=${resId} 节点=${msgs.length} 新入库=${inserted}`);
+        console.log(`[onebot] 合并转发已展开：节点=${msgs.length} 新入库=${inserted}`);
       }
     } catch (e) {
-      console.warn(`[onebot] 合并转发展开失败（res_id=${resId}）：`, e);
+      console.warn(`[onebot] 合并转发展开失败：${redactSensitive(e)}`);
     } finally {
       expandingForwards.delete(key);
     }
@@ -459,7 +460,7 @@ async function onLifecycleOnline(uin: string, epoch: number): Promise<void> {
     if (epoch === lifecycleEpoch && selfId === uin) {
       accountDbError = e instanceof Error ? e.message : String(e);
       accountDbDropped = 0;
-      console.error('[onebot] 切换账号库失败，暂停写入直到重连重试：', e);
+      console.error(`[onebot] 切换账号库失败，暂停写入直到重连重试：${redactSensitive(e)}`);
       switchBuffer.length = 0;
     }
     return;

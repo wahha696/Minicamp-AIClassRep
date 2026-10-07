@@ -9,6 +9,7 @@ import type {
   AiTestResultDTO,
   ConnectStatusDTO,
   DesktopQQStatusDTO,
+  DataBackupStatusDTO,
   CsuImportResultDTO,
   CsuImportStartDTO,
   EventDetailDTO,
@@ -67,6 +68,10 @@ export interface Api {
   /** 账号数据管理：列出本机账号库 / 删除指定账号数据 */
   listAccounts(): Promise<AccountsDTO>;
   deleteAccountData(uin: string): Promise<{ ok: true }>;
+  getDataBackupStatus(): Promise<DataBackupStatusDTO>;
+  downloadDataBackup(): Promise<{ blob: Blob; filename: string }>;
+  restoreDataBackup(file: File): Promise<{ ok: true; safety_backup_created: true }>;
+  downloadDiagnosticReport(): Promise<{ blob: Blob; filename: string }>;
   /** days=往前补拉多少天（1/7/30），缺省 7 */
   syncNow(days?: 1 | 7 | 30): Promise<{ groups: number; messages: number; failures?: number }>;
   getHealth(): Promise<HealthDTO>;
@@ -115,6 +120,8 @@ const ACCOUNT_DATA_PREFIXES = [
   '/api/todos',
   '/api/timetable',
   '/api/settings/memory',
+  '/api/settings/data',
+  '/api/settings/diagnostics',
   '/api/trash',
   '/api/pet/chat',
 ] as const;
@@ -244,6 +251,51 @@ const realApi: Api = {
   getFetchNapcatProgress: () => request('GET', '/api/setup/napcat'),
   listAccounts: () => request('GET', '/api/accounts'),
   deleteAccountData: (uin) => request('DELETE', `/api/accounts/${encodeURIComponent(uin)}`),
+  getDataBackupStatus: () => request('GET', '/api/settings/data'),
+  downloadDataBackup: async () => {
+    const response = await accountScopedFetch('/api/settings/data/backup', {
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => null) as { error?: unknown } | null;
+      throw new ApiError(typeof body?.error === 'string' ? body.error : `备份失败（${response.status}）`, response.status);
+    }
+    const disposition = response.headers.get('content-disposition') ?? '';
+    const filename = disposition.match(/filename="([^"]+)"/)?.[1] ?? 'ClassRep.classrep-backup';
+    return { blob: await response.blob(), filename };
+  },
+  restoreDataBackup: async (file) => {
+    const response = await accountScopedFetch('/api/settings/data/restore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: file,
+      signal: AbortSignal.timeout(120_000),
+    });
+    const body = await response.json().catch(() => null) as
+      | { ok: true; safety_backup_created: true }
+      | { error?: unknown }
+      | null;
+    if (!response.ok || body === null || !('ok' in body)) {
+      if (response.status === 409) accountEpoch = undefined;
+      throw new ApiError(
+        body && 'error' in body && typeof body.error === 'string' ? body.error : `恢复失败（${response.status}）`,
+        response.status,
+      );
+    }
+    // 恢复会重新挂载数据库，旧 epoch 必须立即丢弃。
+    accountEpoch = undefined;
+    return body;
+  },
+  downloadDiagnosticReport: async () => {
+    const response = await accountScopedFetch('/api/settings/diagnostics', {
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => null) as { error?: unknown } | null;
+      throw new ApiError(typeof body?.error === 'string' ? body.error : `诊断导出失败（${response.status}）`, response.status);
+    }
+    return { blob: await response.blob(), filename: 'ClassRep-diagnostic.json' };
+  },
   // 历史补齐要逐群翻页，几十秒很正常（30 天档可能更久）——10s 默认超时会误报「连不上」
   syncNow: (days) => request('POST', '/api/sync', days === undefined ? undefined : { days }, 180_000),
   getHealth: () => request('GET', '/health'),
@@ -299,6 +351,10 @@ export const {
   getFetchNapcatProgress,
   listAccounts,
   deleteAccountData,
+  getDataBackupStatus,
+  downloadDataBackup,
+  restoreDataBackup,
+  downloadDiagnosticReport,
   syncNow,
   getHealth,
   getLlmSettings,

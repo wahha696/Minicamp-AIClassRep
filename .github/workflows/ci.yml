@@ -6,7 +6,7 @@ name: ci
 
 on:
   push:
-    branches: [main, feat/**]
+    branches: [main, codex/**, feat/**]
   pull_request:
     branches: [main]
 

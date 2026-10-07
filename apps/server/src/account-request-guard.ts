@@ -12,6 +12,8 @@ const ACCOUNT_DATA_PREFIXES = [
   '/api/todos',
   '/api/timetable',
   '/api/settings/memory',
+  '/api/settings/data',
+  '/api/settings/diagnostics',
   '/api/trash',
   '/api/pet/chat',
 ] as const;
@@ -29,6 +31,8 @@ export function accountMutationGuard(): MiddlewareHandler {
   return async (c, next) => {
     if (!isAccountDataPath(c.req.path)) return next();
     if (c.req.method === 'OPTIONS') return next();
+    // 恢复会进入独占账号 transition；路由自行核对 epoch，不能让当前请求持有共享 lease 后自等死。
+    if (c.req.path === '/api/settings/data/restore' && c.req.method === 'POST') return next();
 
     const state = accountDataState();
     if (state === 'switching') {

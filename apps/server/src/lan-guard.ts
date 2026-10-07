@@ -61,6 +61,8 @@ export function isSensitivePath(path: string): boolean {
     path.startsWith('/api/settings/llm') ||
     path.startsWith('/api/settings/ai') ||
     path.startsWith('/api/settings/lan') ||
+    path.startsWith('/api/settings/data') ||
+    path.startsWith('/api/settings/diagnostics') ||
     path.startsWith('/api/timetable/csu') ||
     path.startsWith('/api/timetable/versions') ||
     path === '/api/accounts' ||
@@ -117,7 +119,10 @@ export function accessGuard(opts: GuardOptions): MiddlewareHandler {
         // S2：写接口必须 JSON。表单的 Content-Type 变不成 application/json，
         // 这一条把「不带 Origin 的 HTML 表单简单请求 CSRF」也挡掉
         const ct = c.req.header('content-type') ?? '';
-        if (!ct.includes('application/json')) {
+        const backupRestore = c.req.path === '/api/settings/data/restore' &&
+          ct.includes('application/octet-stream') &&
+          (c.req.header('X-ClassRep-Account-Epoch')?.trim().length ?? 0) > 0;
+        if (!ct.includes('application/json') && !backupRestore) {
           return c.json({ error: '写请求需要 JSON' }, 415);
         }
       }

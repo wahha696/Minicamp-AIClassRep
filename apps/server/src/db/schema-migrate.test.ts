@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterAll, describe, expect, it } from 'vitest';
 import { setAccountsDirForTest, switchAccount } from '../accounts.js';
-import { db, onAccountSwitch, openDb } from './index.js';
+import { db, onAccountSwitch, openDb, SCHEMA_VERSION } from './index.js';
 
 const tempDirs: string[] = [];
 
@@ -88,7 +88,7 @@ describe('schema 迁移（v1 → v2）', () => {
     const eventCols = (db.prepare('PRAGMA table_info(events)').all() as { name: string }[]).map((c) => c.name);
     expect(eventCols).toContain('manual_locked_fields');
     const v = db.prepare("SELECT value FROM kv WHERE key = 'schema_version'").get() as { value: string };
-    expect(v.value).toBe('6');
+    expect(v.value).toBe(String(SCHEMA_VERSION));
   });
 
   it('v3 过渡库（start_section/end_section）重建回 block+details，节次写进 details', () => {
@@ -188,7 +188,7 @@ describe('schema 迁移（v1 → v2）', () => {
     expect(proposalCols).toEqual(expect.arrayContaining([
       'reason', 'proposed_changes', 'source_message_ids', 'event_fingerprint', 'base_version',
     ]));
-    expect((db.prepare("SELECT value FROM kv WHERE key = 'schema_version'").get() as { value: string }).value).toBe('6');
+    expect((db.prepare("SELECT value FROM kv WHERE key = 'schema_version'").get() as { value: string }).value).toBe(String(SCHEMA_VERSION));
   });
 
   it('v5 create 提案升级时只回填一次原始事件指纹，后续人工编辑不会改写', () => {
@@ -248,7 +248,7 @@ describe('schema 迁移（v1 → v2）', () => {
     expect((db.prepare('SELECT event_fingerprint FROM event_proposals WHERE id = 1').get() as {
       event_fingerprint: string;
     }).event_fingerprint).toBe(first);
-    expect((db.prepare("SELECT value FROM kv WHERE key = 'schema_version'").get() as { value: string }).value).toBe('6');
+    expect((db.prepare("SELECT value FROM kv WHERE key = 'schema_version'").get() as { value: string }).value).toBe(String(SCHEMA_VERSION));
   });
 });
 

@@ -241,7 +241,7 @@ function applyOne(groupId: string, ev: ExtractedEvent, byId: Map<string, Message
 
   if (ev.action === 'cancel') {
     if (!target) {
-      console.warn(`[reconcile] 取消找不到对应事件，忽略：${ev.title || `#${ev.update_of}`}`);
+      console.warn('[reconcile] 取消找不到对应事件，已忽略');
       return;
     }
     addSources(target.id, ev.source_message_ids, byId);
@@ -362,7 +362,7 @@ function applyOne(groupId: string, ev: ExtractedEvent, byId: Map<string, Message
   }
 
   if (!ev.title) {
-    console.warn(`[reconcile] ${ev.action} 找不到对应事件且没有标题，忽略：#${ev.update_of}`);
+    console.warn(`[reconcile] ${ev.action} 找不到对应事件且没有标题，已忽略`);
     return;
   }
   const status: EventStatus = ev.confidence < PENDING_BELOW ? 'pending_confirm' : 'active';

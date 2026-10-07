@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+  cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
@@ -33,10 +33,11 @@ function archivePayload(payload, zip) {
 }
 
 function fixture(t, realRuntime = false) {
-  const root = mkdtempSync(join(tmpdir(), 'classrep-update-test-'));
+  // macOS 上 /var 是 /private/var 的符号链接；故障注入要与更新器 fileURL 解析后的真实路径一致。
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'classrep-update-test-')));
   t.after(() => {
     // 递归清理只允许本测试刚创建的临时目录。
-    assert.equal(dirname(resolve(root)), resolve(tmpdir()));
+    assert.equal(dirname(resolve(root)), realpathSync(tmpdir()));
     assert.ok(root.split(sep).at(-1).startsWith('classrep-update-test-'));
     rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
@@ -131,7 +132,7 @@ test('预备文件复制失败：安装未改动，也没有开始事务', (t) =
     if(dst===join(work,'new','app')) throw new Error('prepare denied');
     return copy(src,dst,opts);
   };` });
-  assert.equal(result.status, 1);
+  assert.equal(result.status, 1, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
   f.old();
   assert.equal(f.has('data/update/transaction.json'), false);
 });

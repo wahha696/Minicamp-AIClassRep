@@ -4,6 +4,7 @@ import type { Hono } from 'hono';
 import { z } from 'zod';
 import { csuBeginImport, csuFetchCourses, CsuError } from '../csujwc.js';
 import { clearTimetable, getTimetable, saveTimetable, timetableVersions } from '../timetable.js';
+import { redactSensitive } from '../redact.js';
 import {
   dateStamp,
   minutes,
@@ -273,9 +274,10 @@ export function registerTimetableRoutes(app: Hono): void {
     try {
       return c.json(await csuFetchCourses(parsed.data.session_id, parsed.data.captcha));
     } catch (e) {
-      const status = e instanceof CsuError ? 502 : 500;
-      const message = e instanceof Error ? e.message : '教务系统导入失败';
-      console.warn(`[csujwc] fetch 失败:${message}`);
+      const expected = e instanceof CsuError;
+      const status = expected ? 502 : 500;
+      const message = expected ? e.message : '教务系统导入失败';
+      console.warn(`[csujwc] fetch 失败:${redactSensitive(e)}`);
       return c.json({ error: message }, status);
     }
   });

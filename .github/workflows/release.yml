@@ -11,6 +11,9 @@ on:
 
 permissions:
   contents: write # 创建 Release 要写权限
+  id-token: write # Sigstore 产物证明
+  attestations: write
+  artifact-metadata: write
 
 jobs:
   release:
@@ -30,6 +33,9 @@ jobs:
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
 
+      - name: 拦截生产依赖高危漏洞
+        run: pnpm audit --registry=https://registry.npmjs.org --prod --audit-level high
+
       - name: 验证（类型检查 + 测试，发布前最后一道闸）
         run: |
           pnpm typecheck
@@ -45,8 +51,21 @@ jobs:
         run: node scripts/pack.mjs --version "${{ github.ref_name }}"
         # API Key 不打进包里（修复计划 3.2）：用户首次启动在向导页填，CI 也不读 .env.release。
 
+      - name: 用 Ed25519 离线发布钥签名清单
+        env:
+          CLASSREP_RELEASE_SIGNING_KEY: ${{ secrets.CLASSREP_RELEASE_SIGNING_KEY }}
+        run: node scripts/sign-release.mjs release/ClassRep.manifest.json release/ClassRep.manifest.sig
+
       - name: 验收真实 ZIP（中文路径解压、启动入口、浏览器、网页、本地模型、版本号）
         run: node scripts/verify-release.mjs release/ClassRep.zip "${{ github.ref_name }}"
+
+      - name: 生成可在 GitHub 验证的构建来源证明
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            release/ClassRep.zip
+            release/ClassRep.manifest.json
+            release/ClassRep.manifest.sig
 
       - name: 创建/更新 GitHub Release 并上传
         if: startsWith(github.ref, 'refs/tags/')
@@ -56,6 +75,7 @@ jobs:
           files: |
             release/ClassRep.zip
             release/ClassRep.manifest.json
+            release/ClassRep.manifest.sig
             修复升级.bat
             修复升级.ps1
           generate_release_notes: true

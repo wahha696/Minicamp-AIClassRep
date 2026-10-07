@@ -9,6 +9,7 @@
 //   3. 日志文件超过上限就不再追加，磁盘不会被写满。
 import { appendFileSync, mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { redactSensitive } from './redact.js';
 
 /** server.log 最大 10 MB，超过就只打印不写文件 */
 export const MAX_LOG_BYTES = 10 * 1024 * 1024;
@@ -28,7 +29,7 @@ export function createCrashLogger(logFile: string): (kind: string, err: unknown)
     if (busy) return; // 打印/写日志过程中又出错：不递归
     busy = true;
     try {
-      const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
+      const detail = redactSensitive(err);
       try {
         console.error(`ClassRep 出现${kind}（已记日志，进程继续运行）：${detail}`);
       } catch {

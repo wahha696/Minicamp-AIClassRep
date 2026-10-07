@@ -6,6 +6,7 @@
 // event_sources 里存的是快照，不受影响。
 import { beginTx, commitTx, db, rollbackTx } from '../db/index.js';
 import { env } from '../env.js';
+import { redactSensitive } from '../redact.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
@@ -73,7 +74,7 @@ export function startCleanupJob(): void {
     try {
       cleanupOnce();
     } catch (err) {
-      console.error(`清理任务首次执行失败：${err instanceof Error ? err.message : String(err)}`);
+      console.error(`清理任务首次执行失败：${redactSensitive(err)}`);
     }
   }
   const timer = setInterval(() => {
@@ -81,7 +82,7 @@ export function startCleanupJob(): void {
     try {
       cleanupOnce();
     } catch (err) {
-      console.error(`清理任务执行失败：${err instanceof Error ? err.message : String(err)}`);
+      console.error(`清理任务执行失败：${redactSensitive(err)}`);
     }
   }, HOUR_MS);
   timer.unref();

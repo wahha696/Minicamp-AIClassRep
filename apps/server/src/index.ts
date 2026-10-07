@@ -9,7 +9,7 @@ import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { env } from './env.js';
 import { db } from './db/index.js';
-import { accountDataState, initAccounts } from './accounts.js';
+import { accountDataState, initAccounts, startAutomaticBackupScheduler } from './accounts.js';
 import { startNapcat, stopNapcat } from './napcat/index.js';
 import { getConnectStatus } from './napcat/state.js';
 import { getPipelineStats, startScheduler } from './pipeline/index.js';
@@ -30,6 +30,8 @@ import { registerSettingsRoutes } from './routes/settings.js';
 import { registerTimetableRoutes } from './routes/timetable.js';
 import { registerTodoRoutes } from './routes/todos.js';
 import { registerTrashRoutes } from './routes/trash.js';
+import { registerDataRoutes } from './routes/data.js';
+import { redactSensitive } from './redact.js';
 import { registerPresence } from './presence.js';
 import { startUpdateChecker } from './update-check.js';
 import { DATA_DIR, WEB_DIST } from './paths.js';
@@ -113,6 +115,7 @@ registerTodoRoutes(app);
 registerTimetableRoutes(app);
 registerMemoryRoutes(app);
 registerTrashRoutes(app);
+registerDataRoutes(app);
 
 // 后台模式（scripts/dev.mjs --background 设 AUTO_EXIT=1）：网页全关掉后自动退出
 const AUTO_EXIT = process.env.AUTO_EXIT === '1';
@@ -121,7 +124,7 @@ if (AUTO_EXIT) registerPresence(app, () => shutdown(), { keepAlive: () => deskto
 // 00-总约定 §7：错误一律 { error: '中文' }；不存在的接口也不例外（默认是纯文本 404）
 app.notFound((c) => c.json({ error: '接口不存在' }, 404));
 app.onError((err, c) => {
-  console.error(`接口出错 ${c.req.method} ${c.req.path}：${err.message}`);
+  console.error(`接口出错 ${c.req.method} ${c.req.path}：${redactSensitive(err)}`);
   return c.json({ error: '服务器内部错误' }, 500);
 });
 
@@ -203,6 +206,7 @@ installCrashHandlers(join(DATA_DIR, 'logs', 'server.log'));
 
 // 按账号分库（修复计划第一节 + 四问题修复 #1）：迁移旧单库 → 挂记住的账号库（无 uin 则开兜底库）
 await initAccounts();
+startAutomaticBackupScheduler();
 
 const port = await listenWithFallback();
 listenPort = port;

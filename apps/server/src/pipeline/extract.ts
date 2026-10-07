@@ -3,6 +3,7 @@
 // 例外是「AI 连不上」：通过 status.llmFailed 告诉调用方，这批留着稍后重试。
 import OpenAI from 'openai';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
+import { redactSensitive } from '../redact.js';
 import { z } from 'zod';
 import { getLlmConfig } from '../ai-settings.js';
 import { groupCourseName, occurrences } from '../timetable.js';
@@ -400,7 +401,7 @@ async function extractOnce(
       llmStats.llm = 'error';
       llmStats.failed++;
       status.llmFailed = true;
-      console.warn('[extract] LLM 调用失败：', (e as Error).message);
+      console.warn('[extract] LLM 调用失败：', redactSensitive(e));
       return [];
     }
     llmStats.llm = 'ok';

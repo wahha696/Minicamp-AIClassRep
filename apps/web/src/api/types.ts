@@ -208,6 +208,12 @@ export interface AccountDTO {
   updated_at: number;
 }
 
+export interface DataBackupStatusDTO {
+  automatic_count: number;
+  latest_automatic_at: number | null;
+  latest_restore_backup_at: number | null;
+}
+
 export interface AccountsDTO {
   accounts: AccountDTO[];
   legacy_data: boolean;

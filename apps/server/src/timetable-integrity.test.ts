@@ -100,13 +100,25 @@ describe('源片段 → 规则 → 保存 → 具体日期 守恒', () => {
     expect(res.status).toBe(400);
     expect(getTimetable().courses).toEqual([]);
   });
-  it('HTML 跨行连堂、嵌套表不重复；跨星期合并原文待确认', () => {
+  it('HTML 跨行连堂、嵌套表不重复，且可从原文一路保存并按周展开', async () => {
     const html =
       '<table><tr><td><table><tr><th>节次</th><th>周一</th><th>周二</th></tr><tr><td>1-2</td><td rowspan="2">课A<br>老师<br>1-2[周]<br>A101</td><td></td></tr><tr><td>3-4</td><td>课B<br><br>1[周]<br></td></tr></table></td></tr></table>';
     const p = parseTimetableHtml(html)!;
     expect(p.courses).toHaveLength(2);
     expect(p.courses[0]).toMatchObject({ start_period: 1, end_period: 4 });
     expect(p.courses[1]).toMatchObject({ teacher: '', location: '' });
+    expect(p.items?.flatMap((item) => item.course_ids).sort()).toEqual(
+      p.courses.map((course) => course.id).sort(),
+    );
+    const saved = await request('PUT', '/api/timetable', {
+      semester_start: '2026-09-07',
+      courses: p.courses,
+      import_items: p.items,
+      expected_revision: 0,
+    });
+    expect(saved.status).toBe(200);
+    // 课 A 在 1–2 周，课 B 只在第 1 周：展开后共 3 个真实课次。
+    expect(occurrences(start, start + 14 * day)).toHaveLength(3);
     const merged = parseTimetable([header, ['1-2', cell('不确定')]], {
       merges: [{ s: { r: 1, c: 1 }, e: { r: 1, c: 2 } }],
     });

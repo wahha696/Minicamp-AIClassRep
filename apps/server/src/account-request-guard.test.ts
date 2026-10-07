@@ -80,6 +80,15 @@ describe('账号数据请求闸门', () => {
     expect((await app.request('/api/connect/logout', { method: 'POST' })).status).toBe(200);
   });
 
+  it('数据库恢复接口不持有共享 lease，由路由自行执行独占 epoch 校验', async () => {
+    const app = new Hono();
+    app.use('*', accountMutationGuard());
+    app.post('/api/settings/data/restore', (c) => c.json({ reached: true }));
+    const response = await app.request('/api/settings/data/restore', { method: 'POST' });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ reached: true });
+  });
+
   it('旧页面携带过期 epoch 时返回 409', async () => {
     const epochA = accountEpoch();
     await switchAccount('10002');
