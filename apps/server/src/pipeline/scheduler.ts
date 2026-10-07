@@ -11,6 +11,7 @@
 import { accountDataState } from '../accounts.js';
 import { desktopPipelineEpoch, desktopPipelinePaused } from './activity.js';
 import { db, dbGeneration, onAccountSwitch } from '../db/index.js';
+import { redactSensitive } from '../redact.js';
 import type { Message } from '../types.js';
 import { type ExtractStatus, type ExtractedEvent, extractEvents } from './extract.js';
 import { isNoise } from './filter.js';
@@ -49,6 +50,7 @@ export interface Batch {
   candidates: Message[]; // 过滤后留下的
   extracted: ExtractedEvent[];
   llmFailed?: boolean; // AI 没调通：这批留着下次重试
+  processingError?: boolean; // 非网络错误：本批会收尾，但诊断中必须明确标出
   timing: { jevMs: number; llmMs: number };
 }
 
@@ -62,7 +64,7 @@ const filterStage: Stage = (b) => {
   b.candidates = b.messages.filter((m) => !isNoise(m.text));
   if (noise.length) {
     // messages 主键是 (group_id, message_id)（schema v2）：更新必须带上群
-    db.prepare('UPDATE messages SET filtered_out = 1 WHERE group_id = ? AND message_id IN (SELECT value FROM json_each(?))').run(
+    db.prepare("UPDATE messages SET filtered_out = 1, decision_reason = 'rule_noise' WHERE group_id = ? AND message_id IN (SELECT value FROM json_each(?))").run(
       b.groupId,
       ids(noise),
     );
@@ -83,7 +85,7 @@ const jevStage: Stage = async (b) => {
   const dropped = b.candidates.filter((m) => (jevScores.get(m.message_id) ?? 1) < JEV_DROP_BELOW);
   if (dropped.length) {
     const { changes } = db.prepare(
-      'UPDATE messages SET filtered_out = 1 WHERE group_id = ? AND filtered_out = 0 AND message_id IN (SELECT value FROM json_each(?))',
+      "UPDATE messages SET filtered_out = 1, decision_reason = 'jev_below_threshold' WHERE group_id = ? AND filtered_out = 0 AND message_id IN (SELECT value FROM json_each(?))",
     ).run(b.groupId, ids(dropped));
     jevStats.filtered += Number(changes);
     const gone = new Set(dropped.map((m) => m.message_id));
@@ -194,23 +196,49 @@ async function processBatch(g: PendingGroup, expectedGeneration: number): Promis
       if (pipelineIsPaused() || desktopPipelineEpoch() !== activityEpoch || dbGeneration() !== gen) return 0; // 切号或暂停期间的迟到回包留待重试
     }
   } catch (e) {
-    if (!b.llmFailed) console.warn(`[pipeline] 群 ${g.group_id} 这批处理出错，消息仍置为已处理：`, e);
+    if (!b.llmFailed) {
+      b.processingError = true;
+      console.warn(`[pipeline] 某群这批处理出错，消息仍置为已处理：${redactSensitive(e)}`);
+    }
   }
   if (pipelineIsPaused() || desktopPipelineEpoch() !== activityEpoch || dbGeneration() !== gen) return 0;
   if (b.llmFailed) {
     llmRetryAt = Date.now() + LLM_RETRY_MS;
-    console.warn(`[pipeline] AI 连不上，群 ${g.group_id} 的 ${rows.length} 条消息 ${LLM_RETRY_MS / 1000}s 后重试`);
+    console.warn(`[pipeline] AI 连不上，某群的 ${rows.length} 条消息 ${LLM_RETRY_MS / 1000}s 后重试`);
     return 0;
   }
   const { changes } = db
     .prepare('UPDATE messages SET processed = 1 WHERE group_id = ? AND message_id IN (SELECT value FROM json_each(?))')
     .run(b.groupId, ids(b.messages));
+  if (b.candidates.length) {
+    db.prepare(
+      `UPDATE messages
+          SET decision_reason = CASE
+            WHEN ? = 1 THEN 'pipeline_error'
+            WHEN EXISTS (
+              SELECT 1 FROM event_sources es JOIN events e ON e.id = es.event_id
+               WHERE e.group_id = messages.group_id AND es.message_id = messages.message_id
+                 AND (e.status = 'pending_confirm' OR EXISTS (
+                   SELECT 1 FROM event_proposals ep
+                    WHERE ep.event_id = e.id AND ep.status = 'pending'
+                      AND EXISTS (SELECT 1 FROM json_each(ep.source_message_ids) WHERE value = messages.message_id)
+                 ))
+            ) THEN 'pending_confirmation'
+            WHEN EXISTS (
+              SELECT 1 FROM event_sources es JOIN events e ON e.id = es.event_id
+               WHERE e.group_id = messages.group_id AND es.message_id = messages.message_id
+            ) THEN 'event_recognized'
+            ELSE 'llm_no_event'
+          END
+        WHERE group_id = ? AND message_id IN (SELECT value FROM json_each(?))`,
+    ).run(b.processingError ? 1 : 0, b.groupId, ids(b.candidates));
+  }
   for (const m of b.messages) jevScores.delete(m.message_id);
   if (b.candidates.length) {
     // 延迟排查用：从最早一条入库到处理完，各段各花了多久
     const waited = b.now - Math.min(...rows.map((r) => r.created_at));
     console.log(
-      `[pipeline] 群 ${g.name}：${rows.length} 条 → LLM ${b.candidates.length} 条，等待 ${(waited / 1000).toFixed(1)}s，Jev ${b.timing.jevMs}ms，LLM ${b.timing.llmMs}ms，事件 ${b.extracted.length} 个`,
+      `[pipeline] 某群：${rows.length} 条 → LLM ${b.candidates.length} 条，等待 ${(waited / 1000).toFixed(1)}s，Jev ${b.timing.jevMs}ms，LLM ${b.timing.llmMs}ms，事件 ${b.extracted.length} 个`,
     );
   }
   return Number(changes);
@@ -284,7 +312,7 @@ function launch(g: PendingGroup, expectedGeneration: number): Promise<number> {
   if (running) return running;
   const p = withSlot(() => processBatch(g, expectedGeneration))
     .catch((e) => {
-      console.warn(`[pipeline] 群 ${g.group_id} 调度出错：`, e);
+      console.warn(`[pipeline] 某群调度出错：${redactSensitive(e)}`);
       return 0;
     })
     .finally(() => inflight.delete(g.group_id));
@@ -340,7 +368,7 @@ async function tickOnce(now?: number): Promise<void> {
     if (pipelineIsPaused() || desktopPipelineEpoch() !== activityEpoch || dbGeneration() !== gen) return;
     launched = idle.filter((g) => isDue(g, t())).map((g) => launch(g, gen));
   } catch (e) {
-    console.warn('[pipeline] 调度出错：', e);
+    console.warn(`[pipeline] 调度出错：${redactSensitive(e)}`);
   } finally {
     ticking = false;
   }
@@ -368,7 +396,7 @@ async function runPipelineUntilIdle(): Promise<void> {
       if (done.every((n) => n === 0)) return; // 置不上 processed 就别空转
     }
   } catch (e) {
-    console.warn('[pipeline] 立即处理出错：', e);
+    console.warn(`[pipeline] 立即处理出错：${redactSensitive(e)}`);
   }
 }
 

@@ -2,6 +2,7 @@
 // 本服务端持 key 调 DeepSeek（OpenAI 兼容协议，复用 llm-settings 的配置），key 永远不下发到前端。
 // 局域网写操作已被 lan-guard 统一 403，本接口实际只服务本机页面。
 import type { Hono } from 'hono';
+import { redactSensitive } from '../redact.js';
 import OpenAI from 'openai';
 import { getLlmConfig } from '../ai-settings.js';
 
@@ -138,7 +139,7 @@ export async function petChatReply(
     });
     raw = res.choices[0]?.message.content?.trim() ?? '';
   } catch (e) {
-    console.error(`桌宠对话调用 LLM 失败：${e instanceof Error ? e.message : String(e)}`);
+    console.error(`桌宠对话调用 LLM 失败：${redactSensitive(e)}`);
     // P3：超时（OpenAI SDK 抛 APIConnectionTimeoutError / TimeoutError）给更准的文案
     const name = e instanceof Error ? e.name : '';
     if (name.includes('Timeout') || name === 'APIConnectionTimeoutError') {

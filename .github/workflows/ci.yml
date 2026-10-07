@@ -6,7 +6,7 @@ name: ci
 
 on:
   push:
-    branches: [main, feat/**]
+    branches: [main, codex/**, feat/**]
   pull_request:
     branches: [main]
 
@@ -36,6 +36,9 @@ jobs:
 
       - name: 自动更新故障与中断恢复测试
         run: node --test scripts/update.test.mjs
+
+      - name: v1.0.0 旧版救援升级测试
+        run: node --test scripts/rescue-upgrade.test.mjs
 
       - name: 构建（esbuild + vite）
         run: pnpm -r build

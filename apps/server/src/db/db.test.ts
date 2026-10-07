@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterAll, describe, expect, it } from 'vitest';
-import { db, openDb } from './index.js';
+import { db, openDb, SCHEMA_VERSION } from './index.js';
 
 const TABLES = [
   'groups', 'messages', 'events', 'event_sources', 'event_history',
@@ -169,7 +169,7 @@ describe('db 建表', () => {
     expect(courseCols).toContain('block');   // PR#31：block 做排序提示
     expect(courseCols).toContain('details'); // 精确节次等在 details JSON
     const kv = db.prepare("SELECT value FROM kv WHERE key = 'schema_version'").get() as { value: string };
-    expect(kv.value).toBe('6');
+    expect(kv.value).toBe(String(SCHEMA_VERSION));
   });
 
   it('文件库的 journal_mode 是 WAL', () => {

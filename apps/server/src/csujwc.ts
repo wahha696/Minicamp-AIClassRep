@@ -209,18 +209,43 @@ export interface CsuBeginDTO {
 
 const CAS_BASE = 'https://ca.csu.edu.cn';
 
-/** 诊断用:把教务网返回的页面存到 data/logs/<name>(不含任何凭据),返回页面标题 */
+/**
+ * 诊断页只保留 DOM/表格结构。文本、脚本和非结构属性都可能含姓名、学号、ticket 或课程内容，
+ * 所以绝不把教务网原页直接写盘。
+ */
+export function sanitizeDiagnosticHtml(html: string): string {
+  const $ = cheerio.load(html);
+  $('script, style, noscript').remove();
+  $('*').each((_index, element) => {
+    if (!('attribs' in element)) return;
+    for (const name of Object.keys(element.attribs)) {
+      if (name !== 'rowspan' && name !== 'colspan') $(element).removeAttr(name);
+    }
+  });
+  $.root().find('*').contents().each((_index, node) => {
+    if (node.type === 'comment') {
+      $(node).remove();
+    } else if (node.type === 'text') {
+      const length = node.data.trim().length;
+      if (length > 0) $(node).replaceWith(`[TEXT length=${length}]`);
+    }
+  });
+  return $.html();
+}
+
+/** 诊断用:把脱敏后的页面结构存到 data/logs/<name>,返回不含标题正文的描述 */
 function dumpPage(name: string, html: string): string {
-  const title = (/<title>([^<]*)<\/title>/i.exec(html)?.[1] ?? '').trim();
+  const titleLength = (/<title>([^<]*)<\/title>/i.exec(html)?.[1] ?? '').trim().length;
   try {
     const dir = join(process.cwd(), 'data', 'logs');
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, name), Buffer.from(html, 'utf8'));
-    console.warn(`[csujwc] 页面已保存到 data/logs/${name}(长度 ${html.length})`);
+    const sanitized = sanitizeDiagnosticHtml(html);
+    writeFileSync(join(dir, name), Buffer.from(sanitized, 'utf8'));
+    console.warn(`[csujwc] 脱敏页面结构已保存到 data/logs/${name}(原始长度 ${html.length})`);
   } catch {
     console.warn('[csujwc] 诊断页面保存失败(不阻断主流程)');
   }
-  return title;
+  return titleLength === 0 ? '无标题' : `标题长度 ${titleLength}`;
 }
 
 /** 与 ca.csu.edu.cn 的 encrypt.js 语义一致:AES-CBC(盐=密钥, 随机16字符=iv, PKCS7) → base64,

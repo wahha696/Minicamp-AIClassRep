@@ -49,6 +49,17 @@ describe('createCrashLogger', () => {
     createCrashLogger(file)('未捕获异常', new Error('不该写进去'));
     expect(statSync(file).size).toBe(MAX_LOG_BYTES);
   });
+
+  it('崩溃栈中的 Key、token 和用户目录会先脱敏', () => {
+    const file = join(dir, 'server.log');
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    createCrashLogger(file)('未捕获异常', new Error('Bearer secret-token /Users/alice/ClassRep API_KEY=sk-private123'));
+    const text = readFileSync(file, 'utf8');
+    expect(text).not.toContain('secret-token');
+    expect(text).not.toContain('alice');
+    expect(text).not.toContain('sk-private123');
+    expect(text).toContain('[REDACTED]');
+  });
 });
 
 describe('installCrashHandlers（真实子进程）', () => {

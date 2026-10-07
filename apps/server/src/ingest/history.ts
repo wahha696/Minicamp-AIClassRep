@@ -9,6 +9,7 @@ import { accountDataState, accountEpoch } from '../accounts.js';
 import { db, dbGeneration, onAccountSwitch } from '../db/index.js';
 import { ingestMessages } from './index.js';
 import { callAction, getGroupNameCached, isMentionOther, segmentsToText, toMessage } from '../napcat/onebot.js';
+import { redactSensitive } from '../redact.js';
 import type { Message } from '../types.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -152,7 +153,7 @@ function writeGroupSync(
          reason = excluded.reason`,
     ).run(groupId, at, oldestAt, complete ? 1 : 0, reason);
   } catch (e) {
-    console.warn(`[history] group_sync 写入失败（${groupId}）：`, e);
+    console.warn(`[history] 群同步状态写入失败：${redactSensitive(e)}`);
   }
 }
 

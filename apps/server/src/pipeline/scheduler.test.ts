@@ -170,6 +170,23 @@ describe('runPipelineNow', () => {
     extract.mockRejectedValue(new Error('boom'));
     await expect(runPipelineNow()).resolves.toBeUndefined();
     expect(count('processed = 0')).toBe(0);
+    expect(count("decision_reason = 'pipeline_error'")).toBe(20);
+  });
+
+  it('逐条记录已识别、未识别与待确认原因', async () => {
+    ingestMessages(chat('demo-decisions', 2), 'demo');
+    extract.mockImplementationOnce(async (input) => [created(input)]);
+    await runPipelineNow();
+    expect(count("decision_reason = 'event_recognized'")).toBe(1);
+    expect(count("decision_reason = 'llm_no_event'")).toBe(1);
+
+    // 换一个群避免被上面已识别的同时间事件合并，这里只验证低置信新建事件的解释。
+    const pending = chat('demo-pending', 1, '听说明天可能有考试');
+    pending[0]!.message_id = 'pending-one';
+    ingestMessages(pending, 'demo');
+    extract.mockImplementationOnce(async (input) => [{ ...created(input), confidence: 0.5 }]);
+    await runPipelineNow();
+    expect(count("decision_reason = 'pending_confirmation'")).toBe(1);
   });
 
   it('AI 连不上：这批不置已处理，歇一会；之后连上了再处理', async () => {
@@ -214,6 +231,7 @@ describe('runPipelineNow', () => {
     await runPipelineNow();
     expect(extract).not.toHaveBeenCalled();
     expect(count('filtered_out = 1')).toBe(20);
+    expect(count("decision_reason = 'rule_noise'")).toBe(20);
   });
 
   it('Jev 丢弃闲聊、保留改期，并在没有剩余候选时省去 LLM', async () => {
@@ -228,6 +246,7 @@ describe('runPipelineNow', () => {
       '下周二交实验报告', '实验报告改成周五交',
     ]);
     expect(count('filtered_out = 1')).toBe(1);
+    expect(count("decision_reason = 'jev_below_threshold'")).toBe(1);
     expect(getPipelineStats().jev_filtered_count).toBeGreaterThanOrEqual(1);
 
     const onlyChat = chat('demo-jev', 1, '晚上一起打游戏吗');

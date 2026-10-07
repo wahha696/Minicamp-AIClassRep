@@ -17,6 +17,7 @@ import {
 import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { DATA_DIR, ROOT } from './paths.js';
+import { verifyReleaseManifestSignature } from '../../../scripts/release-signing.mjs';
 
 const VERSION_FILE = join(ROOT, 'app', 'version.json');
 const UPDATE_DIR = join(DATA_DIR, 'update');
@@ -56,14 +57,28 @@ async function checkOnce(): Promise<void> {
 
   const asset = (rel.assets ?? []).find((a) => a.name === 'ClassRep.zip');
   const manifestAsset = (rel.assets ?? []).find((a) => a.name === 'ClassRep.manifest.json');
-  if (!asset || !manifestAsset) return; // release 里没有打包产物/清单，跳过
+  const signatureAsset = (rel.assets ?? []).find((a) => a.name === 'ClassRep.manifest.sig');
+  if (!asset || !manifestAsset || !signatureAsset) return; // 三件套缺一不更新
 
-  // S05：先拿发布清单（发版时算好的 sha256+size），没清单/清单不合法宁可不更
-  const mres = await fetch(manifestAsset.browser_download_url, {
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!mres.ok) return;
-  const manifest = (await mres.json()) as { version?: string; sha256?: string; size?: number };
+  // 先校验 Ed25519 签名，再解析清单。攻击者即使能替换 ZIP 和 SHA 清单，也没有发布私钥。
+  const [mres, sres] = await Promise.all([
+    fetch(manifestAsset.browser_download_url, { signal: AbortSignal.timeout(30_000) }),
+    fetch(signatureAsset.browser_download_url, { signal: AbortSignal.timeout(30_000) }),
+  ]);
+  if (!mres.ok || !sres.ok) return;
+  const manifestBytes = new Uint8Array(await mres.arrayBuffer());
+  if (manifestBytes.byteLength === 0 || manifestBytes.byteLength > 64 * 1024) return;
+  const signature = await sres.text();
+  if (!verifyReleaseManifestSignature(manifestBytes, signature)) {
+    console.warn(`[update] ${latest} 发布清单签名无效，已拒绝更新`);
+    return;
+  }
+  let manifest: { version?: string; sha256?: string; size?: number };
+  try {
+    manifest = JSON.parse(Buffer.from(manifestBytes).toString('utf8')) as typeof manifest;
+  } catch {
+    return;
+  }
   const wantSha = (manifest.sha256 ?? '').toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(wantSha)) return;
   if (manifest.version !== latest.replace(/^v/i, '')) return; // 清单与 tag 对不上，不发
@@ -95,7 +110,7 @@ async function checkOnce(): Promise<void> {
     `${JSON.stringify({ zip: zipPath, sha256: wantSha, to: latest, from: info.version, at: new Date().toISOString() }, null, 2)}\n`,
     'utf8',
   );
-  console.log(`[update] 发现新版本 ${latest}（当前 v${info.version}），已下载并校验 SHA-256，下次启动自动应用`);
+  console.log(`[update] 发现新版本 ${latest}（当前 v${info.version}），已校验发布签名与 SHA-256，下次启动自动应用`);
 }
 
 /** 流式 SHA-256（zip 上百 MB，不一次读进内存/阻塞事件循环） */

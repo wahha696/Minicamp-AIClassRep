@@ -7,7 +7,8 @@
     "build": "node build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
-    "verify:accounts": "node --experimental-strip-types --import ./verify/hooks.mjs verify/verify-accounts.ts"
+    "verify:accounts": "node --experimental-strip-types --import ./verify/hooks.mjs verify/verify-accounts.ts",
+    "eval:accuracy": "tsx src/pipeline/accuracy-cli.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.0",

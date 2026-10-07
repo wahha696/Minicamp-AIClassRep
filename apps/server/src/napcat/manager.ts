@@ -5,6 +5,7 @@ import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_pr
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DATA_DIR, NAPCAT_DIR } from '../paths.js';
+import { redactSensitive } from '../redact.js';
 import { findQQExe, QRCODE_PATH } from './paths.js';
 
 export const IS_WINDOWS: boolean = process.platform === 'win32';
@@ -209,7 +210,7 @@ export function spawnNapcat(uin?: string): void {
     // 按架构.md §4 落到 spawnFailed → 页面显示错误状态；绝不能把服务器进程带崩。
     facts.spawnFailed = true;
     facts.pid = null;
-    try { appendFileSync(logPath, `[manager] spawn 失败：${String(err)}\n`); } catch { /* 忽略 */ }
+    try { appendFileSync(logPath, `[manager] spawn 失败：${redactSensitive(err)}\n`); } catch { /* 忽略 */ }
     return;
   }
   child = c;
@@ -219,16 +220,40 @@ export function spawnNapcat(uin?: string): void {
 
   // 修复计划 D4：napcat.log 超过上限就截断重写，不再无限增长
   capLog(logPath);
+  // Node 的 data chunk 会在任意字节位置切开；逐 chunk 脱敏可能把一枚 token 分成两半而漏掉。
+  // 按行缓冲，超长无换行输出也至少保留末尾 1 KiB 与下一块拼接后再判断。
+  const pending = { stdout: '', stderr: '' };
+  const appendChunk = (stream: keyof typeof pending, chunk: Buffer): void => {
+    pending[stream] += chunk.toString('utf8');
+    const newline = pending[stream].lastIndexOf('\n');
+    if (newline >= 0) {
+      try { appendFileSync(logPath, redactSensitive(pending[stream].slice(0, newline + 1))); } catch { /* 排错日志写不进就算了 */ }
+      pending[stream] = pending[stream].slice(newline + 1);
+    }
+    if (pending[stream].length > 16 * 1024) {
+      const cut = pending[stream].length - 1024;
+      try { appendFileSync(logPath, redactSensitive(pending[stream].slice(0, cut))); } catch { /* 同上 */ }
+      pending[stream] = pending[stream].slice(cut);
+    }
+  };
+  const flushPending = (): void => {
+    for (const stream of ['stdout', 'stderr'] as const) {
+      if (pending[stream] === '') continue;
+      try { appendFileSync(logPath, redactSensitive(pending[stream])); } catch { /* 同上 */ }
+      pending[stream] = '';
+    }
+  };
   c.stdout?.on('data', (d: Buffer) => {
-    try { appendFileSync(logPath, d); } catch { /* 排错日志写不进就算了 */ }
+    appendChunk('stdout', d);
   });
   c.stderr?.on('data', (d: Buffer) => {
-    try { appendFileSync(logPath, d); } catch { /* 同上 */ }
+    appendChunk('stderr', d);
   });
 
   // 监控退出（架构.md §4）：非主动 kill → 1s 后自动重新 spawn（带 -q）；
   // 60s 内退出 ≥3 次 → crashLoop，不再自动重启。
   c.on('exit', () => {
+    flushPending();
     if (child !== c) return;
     child = null;
     facts.pid = null;
@@ -245,13 +270,14 @@ export function spawnNapcat(uin?: string): void {
   });
   // spawn 本身失败（ENOENT 等）→ state → error（不会误触发自动重启）
   c.on('error', (err) => {
+    flushPending();
     if (child !== c) return;
     // 修复计划 B2：不清 child 的话之后 killTree 拿不到 pid 就跳过，child 永远挂着旧对象
     child = null;
     killedByUs = true;
     facts.spawnFailed = true;
     facts.pid = null;
-    try { appendFileSync(logPath, `[manager] 进程错误：${String(err)}\n`); } catch { /* 忽略 */ }
+    try { appendFileSync(logPath, `[manager] 进程错误：${redactSensitive(err)}\n`); } catch { /* 忽略 */ }
   });
 }
 

@@ -160,6 +160,9 @@ function guardApp(token: string | null, epoch: () => string = () => 'epoch-a'): 
   app.get('/api/today', (c) => c.json({ ok: true }));
   app.get('/api/connect/qrcode', (c) => c.json({ ok: true }));
   app.get('/api/accounts', (c) => c.json({ accounts: [{ uin: '10001' }] }));
+  app.get('/api/settings/data', (c) => c.json({ ok: true }));
+  app.get('/api/settings/diagnostics', (c) => c.json({ ok: true }));
+  app.post('/api/settings/data/restore', (c) => c.json({ ok: true }));
   app.post('/api/things', (c) => c.json({ ok: true }));
   return app;
 }
@@ -251,6 +254,15 @@ describe('accessGuard：本机写操作的 Origin 校验（防 CSRF）', () => {
       const res = await req(guardApp(null), 'POST', '/api/things', '127.0.0.1', headers);
       expect(res.status, ct || '(无 content-type)').toBe(415);
     }
+  });
+
+  it('恢复接口只为本机放行带账号 epoch 的二进制流', async () => {
+    const base = { host: 'localhost:8000', 'content-type': 'application/octet-stream' };
+    expect((await req(guardApp(null), 'POST', '/api/settings/data/restore', '127.0.0.1', base)).status).toBe(415);
+    expect((await req(guardApp(null), 'POST', '/api/settings/data/restore', '127.0.0.1', {
+      ...base,
+      'x-classrep-account-epoch': 'epoch-a',
+    })).status).toBe(200);
   });
 
   it('本机 GET 不校验 Origin', async () => {
@@ -359,5 +371,16 @@ describe('accessGuard：局域网访问', () => {
     });
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: '该内容只能在电脑上查看' });
+  });
+
+  it('带 token 也不能下载账号备份或脱敏诊断', async () => {
+    const headers = {
+      ...lanHost,
+      cookie: 'classrep_lan=secret-token-123456; classrep_lan_epoch=epoch-a',
+    };
+    for (const path of ['/api/settings/data', '/api/settings/data/backup', '/api/settings/diagnostics']) {
+      expect((await req(guardApp('secret-token-123456'), 'GET', path, '192.168.1.20', headers)).status, path)
+        .toBe(403);
+    }
   });
 });

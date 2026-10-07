@@ -64,6 +64,11 @@ mkdirSync(cacheDir, { recursive: true });
 
 // ---------- 3. 启动.bat ----------
 cpSync(join(REPO, '启动.bat'), join(outDir, '启动.bat'));
+cpSync(join(REPO, '修复升级.bat'), join(outDir, '修复升级.bat'));
+cpSync(join(REPO, '修复升级.ps1'), join(outDir, '修复升级.ps1'));
+mkdirSync(join(outDir, 'scripts'), { recursive: true });
+cpSync(join(REPO, 'scripts', 'windows-acceptance.ps1'), join(outDir, 'scripts', 'windows-acceptance.ps1'));
+cpSync(join(REPO, 'Windows真机验收.md'), join(outDir, 'Windows真机验收.md'));
 
 // ---------- 4. runtime/node.exe（lib/fetch-node.mjs：查最新 LTS + 缓存，与 bootstrap 共用） ----------
 const { version: nodeVersion } = await ensureNodeExe(join(outDir, 'runtime', 'node.exe'), {

@@ -31,6 +31,8 @@ tools/
 # 运行时数据（只保留仿真剧本 data/mock/）
 data/*
 !data/mock/
+# 从 apps/server 工作目录单独跑测试时可能生成的诊断页
+/apps/server/data/
 
 # 打包产物与私密配置
 release/

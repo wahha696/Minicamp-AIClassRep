@@ -7,6 +7,7 @@ import { clearMemory, deleteMemoryRule, getMemory, setMemoryEnabled } from '../a
 import AiSettingsCard from '../components/AiSettingsCard';
 import ConfirmDialog from '../components/ConfirmDialog';
 import LanSection from '../components/LanSection';
+import DataBackupSection from '../components/DataBackupSection';
 import TimetableSection from '../components/TimetableSection';
 import TrashSection from '../components/TrashSection';
 import { useToast } from '../components/Toast';
@@ -91,6 +92,9 @@ export default function Settings() {
 
       <h2 className="mt-10 text-lg font-semibold text-slate-900">手机访问</h2>
       <LanSection />
+
+      <h2 className="mt-10 text-lg font-semibold text-slate-900">数据安全</h2>
+      <DataBackupSection />
 
       <h2 className="mt-10 text-lg font-semibold text-slate-900">待办</h2>
       <section className="mt-3 rounded-xl border border-slate-200 bg-white p-4">

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import WeekGrid from './WeekGrid';
 import TimetableEditor from './TimetableEditor';
-import { dateStamp, type CourseDTO } from '../../../../shared/timetable';
+import { dateStamp, expandTimetable, type CourseDTO } from '../../../../shared/timetable';
 import { parseTimetable } from '../../../../shared/timetable-import';
 const save = vi.hoisted(() => vi.fn().mockResolvedValue({}));
 vi.mock('../api/client', () => ({ saveTimetable: save }));
@@ -96,6 +96,38 @@ describe('课程可以访问，而不只是数组返回成功', () => {
       />,
     );
     expect(screen.getByText('本周 0 个实际课次 · 0 处时间冲突')).toBeTruthy();
+  });
+  it('Excel 行列原文解析后，每个源片段都有去向，全部规则按周展开并进入页面', () => {
+    const parsed = parseTimetable([
+      ['', '周一', '周二', '周三', '周四', '周五'],
+      ['1-4', '高数\n张老师\n1[周]\nA101\n大物\n李老师\n1[周]\nB202'],
+      ['3-5', '', '线代\n王老师\n1[周]\nC303'],
+      ['9-12', '', '', '程序设计\n赵老师\n1[周]\n机房'],
+      ['11-12', '', '', '', '公选课\n\n1[周]\n'],
+    ], { sheet: 'Excel 课表' });
+    const ids = new Set(parsed.courses.map((item) => item.id));
+    expect(parsed.items).toHaveLength(4);
+    expect(parsed.items?.every((item) =>
+      item.status === 'parsed' && item.course_ids.length > 0 && item.course_ids.every((id) => ids.has(id)),
+    )).toBe(true);
+    expect(parsed.courses.map((item) => [item.start_period, item.end_period])).toEqual([
+      [1, 4], [1, 4], [3, 5], [9, 12], [11, 12],
+    ]);
+    const timetable = { semester_start: '2026-09-07', courses: parsed.courses };
+    expect(expandTimetable(timetable, monday, monday + 7 * 86400000)).toHaveLength(5);
+    render(
+      <WeekGrid
+        days={days}
+        courses={parsed.courses}
+        timetable={timetable}
+        itemsByDay={[]}
+        onPick={() => {}}
+      />,
+    );
+    expect(screen.getByText('本周 5 个实际课次 · 1 处时间冲突')).toBeTruthy();
+    for (const name of ['高数', '大物', '线代', '程序设计', '公选课']) {
+      expect(screen.getAllByText(name).length).toBeGreaterThan(0);
+    }
   });
   it('导入有待确认项时禁存；明确忽略有理由，保存请求保留逐项对账和版本', async () => {
     const parsed = parseTimetable([

@@ -391,6 +391,18 @@ function connectState(): ConnectState {
 // ===== 实现
 
 export const mockApi: Api = {
+  getDataBackupStatus() {
+    return delay({ automatic_count: 1, latest_automatic_at: Date.now(), latest_restore_backup_at: null });
+  },
+  downloadDataBackup() {
+    return delay({ blob: new Blob(['mock'], { type: 'application/octet-stream' }), filename: 'ClassRep-mock.classrep-backup' });
+  },
+  restoreDataBackup() {
+    return delay({ ok: true as const, safety_backup_created: true as const });
+  },
+  downloadDiagnosticReport() {
+    return delay({ blob: new Blob(['{}'], { type: 'application/json' }), filename: 'ClassRep-diagnostic.json' });
+  },
   getToday() {
     const from = at(0, 0);
     const to = at(1, 0);

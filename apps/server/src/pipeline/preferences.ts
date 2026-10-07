@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { accountDataState, accountEpoch } from '../accounts.js';
 import { beginTx, commitTx, db, dbGeneration, onAccountSwitch, rollbackTx } from '../db/index.js';
 import { getLlmConfig } from '../ai-settings.js';
+import { redactSensitive } from '../redact.js';
 import type { Level } from '../types.js';
 import type { LlmClient } from './extract.js';
 
@@ -164,7 +165,7 @@ export async function summarize(
     }
     rules = parsed.data.rules;
   } catch (e) {
-    console.warn('[preferences] summarize failed, keep old rules:', (e as Error).message);
+    console.warn(`[preferences] summarize failed, keep old rules: ${redactSensitive(e)}`);
     return;
   }
 

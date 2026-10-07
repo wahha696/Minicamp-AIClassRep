@@ -5,6 +5,7 @@ import {
   parseKbtable,
   parseSectionLabel,
   parseWeeksLine,
+  sanitizeDiagnosticHtml,
   toCourseDTOs,
   type RawCourse,
 } from './csujwc.js';
@@ -115,6 +116,18 @@ describe('parseKbtable', () => {
 
   it('登录页直接报错提示重新导入', () => {
     expect(() => parseKbtable('<input id="userAccount" />')).toThrow(/重新导入/);
+  });
+});
+
+describe('sanitizeDiagnosticHtml', () => {
+  it('仅保留表格结构，不落盘姓名、学号、ticket、脚本或非结构属性', () => {
+    const safe = sanitizeDiagnosticHtml(`
+      <html><head><title>张三的课表</title><script>token=secret-ticket</script></head>
+      <body data-user="2023123456"><table class="student"><tr><td rowspan="2" title="秘密">高等数学 张三 2023123456</td></tr></table></body></html>
+    `);
+    expect(safe).toContain('rowspan="2"');
+    expect(safe).toContain('[TEXT length=');
+    expect(safe).not.toMatch(/张三|高等数学|2023123456|secret-ticket|data-user|class="student"|title="秘密"/);
   });
 });
 

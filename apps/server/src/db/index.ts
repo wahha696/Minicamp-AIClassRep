@@ -9,6 +9,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { DATA_DIR } from '../paths.js';
+import { redactSensitive } from '../redact.js';
 
 export const DB_FILE = join(DATA_DIR, 'classrep.db'); // 兜底库路径（也是旧版单库位置）
 
@@ -38,7 +39,7 @@ export function notifyAccountSwitch(uin: string | null): void {
     try {
       cb(uin);
     } catch (e) {
-      console.warn('[db] 换号后的缓存清理出错：', e);
+      console.warn(`[db] 换号后的缓存清理出错：${redactSensitive(e)}`);
     }
   }
 }
@@ -61,6 +62,7 @@ CREATE TABLE IF NOT EXISTS messages (
   source       TEXT NOT NULL,            -- MessageSource
   processed    INTEGER NOT NULL DEFAULT 0,   -- C 处理完置 1
   filtered_out INTEGER NOT NULL DEFAULT 0,   -- C 规则过滤掉置 1
+  decision_reason TEXT NOT NULL DEFAULT 'pending', -- rule_noise / jev_below_threshold / event_recognized / pending_confirmation / llm_no_event / pipeline_error
   created_at   INTEGER NOT NULL,
   -- 复合主键（schema v2）：NapCat 的 message_id 是本地短 id，不同群可能撞号
   PRIMARY KEY (group_id, message_id)
@@ -186,8 +188,8 @@ CREATE TABLE IF NOT EXISTS message_seen (
 );
 `;
 
-/** 当前 schema 版本（D3）：v5 = 事件待确认提案与人工字段锁；v6 = create 提案原始指纹。 */
-const SCHEMA_VERSION = 6;
+/** 当前 schema 版本（D3）：v6 = create 提案原始指纹；v7 = 消息处理决策原因。 */
+export const SCHEMA_VERSION = 7;
 
 function schemaVersion(): number {
   try {
@@ -327,6 +329,8 @@ function migrate(): void {
   ensureColumn('groups', 'course_name', 'course_name TEXT');
   db.prepare("INSERT OR IGNORE INTO kv (key, value) VALUES ('memory_enabled', '1')").run();
   if (schemaVersion() < 2) migrateToV2();
+  // v1→v2 会重建 messages，所以必须在它之后补诊断列。
+  ensureColumn('messages', 'decision_reason', "decision_reason TEXT NOT NULL DEFAULT 'pending'");
   if (schemaVersion() < 4) migrateToV4(); // v3 是过渡形状，直接统一到 v4
   db.prepare(
     "INSERT INTO kv (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",

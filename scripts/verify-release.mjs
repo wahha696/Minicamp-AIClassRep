@@ -26,7 +26,9 @@ try {
   });
   assert.equal(extraction.status, 0, `ZIP extraction failed: ${extraction.stderr}`);
   for (const file of [
-    '启动.bat', 'runtime/node.exe', 'app/server/dist/index.js', 'app/web/dist/index.html',
+    '启动.bat', '修复升级.bat', '修复升级.ps1', 'runtime/node.exe',
+    'scripts/windows-acceptance.ps1', 'Windows真机验收.md',
+    'app/server/dist/index.js', 'app/web/dist/index.html',
     'app/version.json', 'napcat/NapCatWinBootMain.exe', 'napcat/NapCatWinBootHook.dll',
     'napcat/napcat.mjs', 'classrep-fastjudge/py/python.exe',
     'classrep-fastjudge/models/local-jev-v1.joblib',
