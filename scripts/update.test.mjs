@@ -12,6 +12,26 @@ import { test } from 'node:test';
 
 const repo = dirname(dirname(fileURLToPath(import.meta.url)));
 
+function archivePayload(payload, zip) {
+  if (process.platform === 'win32') {
+    return spawnSync('powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy', 'Bypass',
+      '-Command',
+      "$ErrorActionPreference='Stop'; Compress-Archive -LiteralPath $env:CLASSREP_TEST_PAYLOAD -DestinationPath $env:CLASSREP_TEST_ARCHIVE -Force",
+    ], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        CLASSREP_TEST_PAYLOAD: payload,
+        CLASSREP_TEST_ARCHIVE: zip,
+      },
+    });
+  }
+  return spawnSync('tar', ['-cf', zip, '-C', dirname(payload), 'ClassRep'], { encoding: 'utf8' });
+}
+
 function fixture(t, realRuntime = false) {
   const root = mkdtempSync(join(tmpdir(), 'classrep-update-test-'));
   t.after(() => {
@@ -51,9 +71,13 @@ function fixture(t, realRuntime = false) {
     cpSync(join(repo, '启动.bat'), join(install, '启动.bat'));
     cpSync(join(repo, '启动.bat'), join(payload, '启动.bat'));
   }
-  const zip = join(root, 'payload.tar');
-  const archive = spawnSync('tar', ['-cf', zip, '-C', dirname(payload), 'ClassRep'], { encoding: 'utf8' });
-  assert.equal(archive.status, 0, archive.stderr);
+  // Windows 上生成与真实 Release 相同的 ZIP；安装路径特意含中文和空格。
+  const zip = join(root, 'payload.zip');
+  const archive = archivePayload(payload, zip);
+  assert.equal(archive.status, 0, `${archive.stdout ?? ''}\n${archive.stderr ?? ''}`);
+  if (process.platform === 'win32') {
+    assert.equal(readFileSync(zip).subarray(0, 2).toString('ascii'), 'PK');
+  }
   writeFileSync(join(work, 'pending.json'), JSON.stringify({
     zip, to: 'test', sha256: createHash('sha256').update(readFileSync(zip)).digest('hex'),
   }));
