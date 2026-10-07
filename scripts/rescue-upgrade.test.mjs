@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
   renameSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -50,10 +50,11 @@ function fixture(t) {
     "$ErrorActionPreference='Stop'; Compress-Archive -LiteralPath $env:PAYLOAD -DestinationPath $env:ZIP -Force",
   ], { encoding: 'utf8', env: { ...process.env, PAYLOAD: payload, ZIP: zip } });
   assert.equal(archive.status, 0, archive.stderr || archive.stdout);
+  const zipBytes = readFileSync(zip);
   const manifest = join(root, 'ClassRep.manifest.json');
   writeFileSync(manifest, JSON.stringify({
-    version: '1.0.1', zip: 'ClassRep.zip', size: statSync(zip).size,
-    sha256: createHash('sha256').update(readFileSync(zip)).digest('hex'),
+    version: '1.0.1', zip: 'ClassRep.zip', size: zipBytes.length,
+    sha256: createHash('sha256').update(zipBytes).digest('hex'),
   }));
   const run = (manifestFile = manifest) => spawnSync('powershell.exe', [
     '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(repo, '修复升级.ps1'),
@@ -83,7 +84,7 @@ test('旧版救援：真实 ZIP 在中文空格路径升级，data 原样保留�
 test('旧版救援：清单校验失败时程序与 data 均不改动', windowsOnly, (t) => {
   const f = fixture(t);
   const bad = join(f.root, 'bad.manifest.json');
-  writeFileSync(bad, JSON.stringify({ version: '1.0.1', size: statSync(f.zip).size, sha256: '0'.repeat(64) }));
+  writeFileSync(bad, JSON.stringify({ version: '1.0.1', size: readFileSync(f.zip).length, sha256: '0'.repeat(64) }));
   const result = f.run(bad);
   assert.equal(result.status, 1);
   assert.equal(readFileSync(join(f.install, 'app/server/dist/index.js'), 'utf8'), 'old-app');
@@ -102,7 +103,7 @@ test('旧版救援：上次在移走程序后中断，重跑先恢复完整旧�
     version: 1, state: 'switching', entries: [{ name: 'app', had_original: true }],
   }));
   const bad = join(f.root, 'bad-after-interrupt.manifest.json');
-  writeFileSync(bad, JSON.stringify({ version: '1.0.1', size: statSync(f.zip).size, sha256: '0'.repeat(64) }));
+  writeFileSync(bad, JSON.stringify({ version: '1.0.1', size: readFileSync(f.zip).length, sha256: '0'.repeat(64) }));
   const result = f.run(bad);
   assert.equal(result.status, 1);
   assert.equal(readFileSync(join(f.install, 'app/server/dist/index.js'), 'utf8'), 'old-app');
