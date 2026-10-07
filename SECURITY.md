@@ -11,7 +11,8 @@
 
 - 新版客户端只接受由内置 Ed25519 公钥验证通过的 `ClassRep.manifest.json`，再按已签名清单校验 ZIP 大小和 SHA-256。私钥仅保存为 GitHub Actions secret。
 - Release 同时生成 GitHub/Sigstore 构建来源证明。可使用 `gh attestation verify ClassRep.zip --repo wahha696/Minicamp-AIClassRep` 独立核对构建来源。
-- PR 和主分支运行 CodeQL、新增依赖审查与生产依赖高危漏洞扫描；Release 流水线也会再次执行生产依赖高危审计，失败即停止打包。仓库应把 CI 与 security 设为主分支必需检查。
+- PR 和主分支运行 CodeQL 与生产依赖高危漏洞扫描；Release 流水线也会再次审计，失败即停止打包。仓库应把 CI 与 security 设为主分支必需检查。
+- GitHub 的增量 Dependency Review 需要仓库管理员先启用 Dependency Graph，再添加 Actions 变量 `DEPENDENCY_REVIEW_ENABLED=true`；未启用时该可选任务跳过，`pnpm audit` 高危门槛仍强制执行。
 
 > `v1.0.0` 旧安装本身没有内置发布公钥，因此“修复升级”入口只能先用 GitHub Release 上的 SHA-256 清单完成信任引导。救援到新版后，后续自动更新强制验签。
 

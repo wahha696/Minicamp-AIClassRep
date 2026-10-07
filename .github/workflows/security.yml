@@ -31,7 +31,9 @@ jobs:
 
   dependency-review:
     name: 新增依赖审查
-    if: github.event_name == 'pull_request'
+    # GitHub 未启用 Dependency Graph 时官方 action 会直接报错，和依赖是否安全无关。
+    # 管理员启用 Dependency Graph 后，再把仓库 Actions 变量设为 DEPENDENCY_REVIEW_ENABLED=true。
+    if: github.event_name == 'pull_request' && vars.DEPENDENCY_REVIEW_ENABLED == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
