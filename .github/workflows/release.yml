@@ -56,4 +56,6 @@ jobs:
           files: |
             release/ClassRep.zip
             release/ClassRep.manifest.json
+            修复升级.bat
+            修复升级.ps1
           generate_release_notes: true

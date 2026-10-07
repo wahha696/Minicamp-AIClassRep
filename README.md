@@ -45,6 +45,10 @@ AI 课代表在本机接管电脑版 QQ，实时读取你开启监听的群，�
 
 免安装包已内置 Node 运行时与 NapCat 采集端，解压即用不用下载。有新版本时后端会自动下载并校验 SHA-256，下次双击 `启动.bat` 时自动应用，数据不受影响。
 
+**v1.0.0 升级救援**：如果旧版在中文或含空格的目录里提示“更新包解压失败”，请从最新 Release 单独下载
+`修复升级.bat` 和 `修复升级.ps1`，放进旧版 `ClassRep` 目录，先关闭原启动窗口，再双击 `修复升级.bat`。
+工具会先校验发布包、在安装目录旁完整备份 `data`，然后只替换程序；失败会自动恢复旧程序，绝不会用发布包里的空数据覆盖账号数据。
+
 ### 方式二：克隆仓库（会用 git/命令行的同学）
 
 ```bash
@@ -119,6 +123,9 @@ pnpm shortcut               # 生成桌面快捷方式（后台模式，网页�
 | `pnpm pack:win` | 打 Windows 发布包 → `release/ClassRep.zip` |
 | `node scripts/bootstrap.mjs` | 五步自检启动（= 双击 启动.bat；`--background` 后台模式） |
 | `node scripts/dev.mjs` | 开发链路启动（含 git 拉最新 main；桌面快捷方式走这个） |
+
+候选发布包还必须按 [`Windows真机验收.md`](./Windows真机验收.md) 在普通 Windows 10/11 用户和真实 QQ 上验收；
+CI 的 Windows Server 模拟不能代替扫码、换号、返回 QQ 与历史补读。
 
 `.env` 主要配置（见 `.env.example`）：
 
