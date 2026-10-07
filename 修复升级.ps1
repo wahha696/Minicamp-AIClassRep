@@ -20,6 +20,22 @@ function Full-Path([string]$Path) {
   return [IO.Path]::GetFullPath($Path).TrimEnd([IO.Path]::DirectorySeparatorChar)
 }
 
+# Get-FileHash 属于可选 PowerShell 模块；旧系统或受限环境可能没有。
+# 直接使用 .NET，确保 Windows PowerShell 5.1 的普通用户环境也能校验。
+function Get-Sha256([string]$Path) {
+  $stream = [IO.File]::OpenRead($Path)
+  try {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+      return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+    } finally {
+      $sha.Dispose()
+    }
+  } finally {
+    $stream.Dispose()
+  }
+}
+
 function Assert-SafeInstall([string]$Root) {
   if ([string]::IsNullOrWhiteSpace($Root) -or $Root -eq [IO.Path]::GetPathRoot($Root)) {
     throw '安装目录不安全，拒绝操作磁盘根目录。'
@@ -84,7 +100,7 @@ function Verify-Package([string]$Zip, [string]$Manifest) {
   if (-not ($info.sha256 -is [string]) -or $info.sha256 -notmatch '^[0-9a-fA-F]{64}$') {
     throw '发布清单缺少合法 SHA-256。'
   }
-  $actualHash = (Get-FileHash -LiteralPath $Zip -Algorithm SHA256).Hash.ToLowerInvariant()
+  $actualHash = Get-Sha256 $Zip
   if ($actualHash -ne ([string]$info.sha256).ToLowerInvariant()) {
     throw '更新包 SHA-256 不匹配，已停止，原安装未改动。'
   }
