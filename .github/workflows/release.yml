@@ -1,7 +1,8 @@
-# 发布流水线（问题 4 + 修复计划 3.3）：推 v* 标签（或手动触发）→ Windows 打包 → 传 release。
+# 发布流水线（问题 4 + 修复计划 3.3）：推 v* 标签 → Windows 打包 → 传 release；
+# 手动触发只构建可下载的候选 Artifact，不公开创建 Release。
 # 步骤：装依赖 → 类型检查+测试 → 构建 → 准备 napcat/（仓库已随提交带一份；缺失时用
 # scripts/fetch-napcat.mjs 下载官方 Release 并按 napcat.version.json 校验 SHA-256）→
-# node scripts/pack.mjs（下 node.exe + 组装 + 压缩）→ 上传 release/ClassRep.zip 到 GitHub Release。
+# node scripts/pack.mjs（下 node.exe + 组装 + 压缩）→ 上传候选 Artifact 或 GitHub Release。
 name: release
 
 on:
@@ -17,7 +18,7 @@ permissions:
 
 jobs:
   release:
-    name: 打包 Windows 免安装版并发布
+    name: 打包并验收 Windows 免安装版
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,6 +30,20 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+
+      - name: 确定候选版本
+        shell: pwsh
+        run: |
+          if ('${{ github.event_name }}' -eq 'push') {
+            $version = '${{ github.ref_name }}' -replace '^v', ''
+          } else {
+            $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+            throw "非法发布版本：$version"
+          }
+          "RELEASE_VERSION=$version" >> $env:GITHUB_ENV
+          Write-Host "构建版本 v$version"
 
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
@@ -47,8 +62,8 @@ jobs:
       - name: 补齐 NapCat 运行包（仓库已带；缺失时按 napcat.version.json 下载并校验 SHA-256）
         run: node scripts/fetch-napcat.mjs
 
-      - name: 打包 Windows 免安装包（版本随 tag 写进包内 version.json，同时产出 sha256 发布清单）
-        run: node scripts/pack.mjs --version "${{ github.ref_name }}"
+      - name: 打包 Windows 免安装包（版本写进包内 version.json，同时产出 sha256 发布清单）
+        run: node scripts/pack.mjs --version "${{ env.RELEASE_VERSION }}"
         # API Key 不打进包里（修复计划 3.2）：用户首次启动在向导页填，CI 也不读 .env.release。
 
       - name: 用 Ed25519 离线发布钥签名清单
@@ -57,7 +72,7 @@ jobs:
         run: node scripts/sign-release.mjs release/ClassRep.manifest.json release/ClassRep.manifest.sig
 
       - name: 验收真实 ZIP（中文路径解压、启动入口、浏览器、网页、本地模型、版本号）
-        run: node scripts/verify-release.mjs release/ClassRep.zip "${{ github.ref_name }}"
+        run: node scripts/verify-release.mjs release/ClassRep.zip "${{ env.RELEASE_VERSION }}"
 
       - name: 生成可在 GitHub 验证的构建来源证明
         uses: actions/attest@v4
@@ -67,11 +82,25 @@ jobs:
             release/ClassRep.manifest.json
             release/ClassRep.manifest.sig
 
+      - name: 保存手动构建的候选包
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClassRep-v${{ env.RELEASE_VERSION }}-windows
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            release/ClassRep.zip
+            release/ClassRep.manifest.json
+            release/ClassRep.manifest.sig
+            修复升级.bat
+            修复升级.ps1
+
       - name: 创建/更新 GitHub Release 并上传
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          name: ClassRep ${{ github.ref_name }}
+          name: ClassRep v${{ env.RELEASE_VERSION }}
           files: |
             release/ClassRep.zip
             release/ClassRep.manifest.json
