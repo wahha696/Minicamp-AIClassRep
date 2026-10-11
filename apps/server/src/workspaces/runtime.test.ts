@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative } from 'node:path';
+import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import { Hono } from 'hono';
 import { createHash, randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -45,7 +46,7 @@ beforeEach(async () => {
   setAccountsDirForTest(join(root, 'accounts'), join(root, 'fallback.db'));
   await initAccounts(options());
 });
-afterEach(() => {
+afterEach(async () => {
   db?.close();
   setAccountsDirForTest(join(root, 'accounts'), join(root, 'fallback.db'));
   const rel = relative(realpathSync(tmpdir()), realpathSync(root));
@@ -53,6 +54,9 @@ afterEach(() => {
     throw new Error('SYNTHETIC_CLEANUP_PATH');
   }
   rmSync(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 });
+  // The synchronous SQLite cases can exceed Vitest's RPC window together on CI.
+  // Let the worker receive result acknowledgements between cases.
+  await yieldToEventLoop();
 });
 function runtime() { return workspaceRuntime()!; }
 async function reinitialize(settings: NonNullable<Parameters<typeof initAccounts>[0]>) {
