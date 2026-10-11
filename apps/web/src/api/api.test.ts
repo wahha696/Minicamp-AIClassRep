@@ -27,7 +27,8 @@ describe('mock 模式', () => {
     const c = await loadClient(true);
     const t = await c.getToday();
     expect(t.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    expect(t.summary).toMatch(/^今天 \d+ 件事，最急的是 \d{2}:\d{2} /);
+    expect(t.summary).toMatch(/^今天 (\d+ 件未完成安排|暂无未完成的日程)/);
+    expect(t.overdue?.every(e => e.type === 'assignment' && e.status !== 'done' && e.deadline_at! < Date.now())).toBe(true);
     expect(t.events.length).toBeGreaterThan(0);
     expect(t.events.every((e) => e.status !== 'cancelled')).toBe(true);
     const times = t.events.map((e) => e.start_at ?? e.deadline_at!);
@@ -272,6 +273,69 @@ describe('真实模式（fetch 打桩）', () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
+  it('微信历史页等待采集及恢复超过 60 秒时，不提前中断服务端的结果', async () => {
+    const c = await loadClient(false);
+    vi.useFakeTimers();
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new DOMException('Timed out', 'TimeoutError')), ms);
+      return controller.signal;
+    });
+    vi.stubGlobal('fetch', (_url: string, init: RequestInit) => new Promise<Response>((resolve, reject) => {
+      init.signal!.addEventListener('abort', () => reject(init.signal!.reason), { once: true });
+      setTimeout(() => resolve(new Response(JSON.stringify({ inserted: 2, has_more: false }))), 450_000);
+    }));
+    try {
+      const result = c.refreshWechatHistory({ expected_account_epoch: 'synthetic-epoch', intake_id: 'synthetic-intake',
+        group_id: 'synthetic@chatroom', days: 7, approve_history_read: true, continue_existing: false });
+      const checked = expect(result).resolves.toEqual({ inserted: 2, has_more: false });
+      await vi.advanceTimersByTimeAsync(450_000);
+      await checked;
+    } finally { timeout.mockRestore(); vi.clearAllTimers(); vi.useRealTimers(); }
+  });
+
+  it('乱序返回的旧连接状态不能覆盖新空间租约', async () => {
+    const c = await loadClient(false);
+    const responses: Array<(response: Response) => void> = [];
+    vi.stubGlobal('fetch', vi.fn((url: string, init: RequestInit) => {
+      if (url === '/api/connect/status') return new Promise<Response>((resolve) => responses.push(resolve));
+      expect(new Headers(init.headers).get('X-ClassRep-Account-Epoch')).toBe('new-space');
+      return Promise.resolve(new Response('{}'));
+    }));
+    const older = c.getConnectStatus();
+    const newer = c.getConnectStatus();
+    responses[1]!(new Response(JSON.stringify({ account_epoch: 'new-space' })));
+    await newer;
+    responses[0]!(new Response(JSON.stringify({ account_epoch: 'old-space' })));
+    await older;
+    await c.getToday();
+  });
+
+  it.each([false, true])('旧业务请求的迟到 409 不清除新空间租约（原始响应=%s）', async (raw) => {
+    const c = await loadClient(false);
+    let release!: (response: Response) => void;
+    let epoch = 'old-space';
+    const fetchMock = vi.fn((url: string) => {
+      if (url === '/api/connect/status') return Promise.resolve(new Response(JSON.stringify({ account_epoch: epoch })));
+      return new Promise<Response>((resolve) => { release = resolve; });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    await c.getConnectStatus();
+    const pending = raw ? c.accountScopedFetch('/api/today') : c.getToday();
+    const checked = raw ? pending : expect(pending).rejects.toMatchObject({ status: 409 });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    epoch = 'new-space';
+    await c.getConnectStatus();
+    release(new Response('{}', { status: 409 }));
+    await checked;
+    fetchMock.mockImplementation((url: string, ...args: unknown[]) => {
+      expect(url).toBe('/api/today');
+      expect(new Headers((args[0] as RequestInit).headers).get('X-ClassRep-Account-Epoch')).toBe('new-space');
+      return Promise.resolve(new Response('{}'));
+    });
+    await c.getToday();
+  });
+
   it('每个函数的方法、路径、请求体都符合 §7', async () => {
     const c = await loadClient(false);
     expect(c.isMock).toBe(false);
@@ -419,7 +483,7 @@ describe('真实模式（fetch 打桩）', () => {
   it('局域网写操作 403 统一提示「请在电脑上操作」', async () => {
     const { errorText } = await import('../lib/errors');
     const { ApiError } = await import('./error');
-    expect(errorText(new ApiError('局域网访问只读', 403))).toBe('请在电脑上操作');
+    expect(errorText(new ApiError('局域网访问只读', 403))).toBe('局域网访问只读');
     expect(errorText(new ApiError('QQ 未连接', 409))).toBe('QQ 未连接');
   });
 });

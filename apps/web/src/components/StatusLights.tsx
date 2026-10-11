@@ -28,7 +28,6 @@ export default function StatusLights() {
           >
             <span className={`h-2 w-2 rounded-full ${DOT[l.color]}`} />
             <span className="hidden sm:inline">{l.label}</span>
-            {l.color === 'gray' && <span className="hidden text-slate-400 sm:inline">预留</span>}
           </button>
           <span
             role="tooltip"

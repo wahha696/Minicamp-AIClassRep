@@ -107,9 +107,10 @@ export interface GroupPreset {
 
 const PRESETS_KEY = 'classrep.groupPresets'; // 实际键经 accountKey 加 uin 后缀（修复计划第一节 §4）
 
-export function loadPresets(): GroupPreset[] {
+export function loadPresets(platform = 'qq'): GroupPreset[] {
   try {
-    const raw: unknown = JSON.parse(localStorage.getItem(accountKey(PRESETS_KEY)) ?? '[]');
+    const key = platform === 'qq' ? PRESETS_KEY : `${PRESETS_KEY}:${platform}`;
+    const raw: unknown = JSON.parse(localStorage.getItem(accountKey(key)) ?? '[]');
     if (!Array.isArray(raw)) return [];
     return raw.filter(
       (p): p is GroupPreset =>
@@ -120,12 +121,27 @@ export function loadPresets(): GroupPreset[] {
   }
 }
 
-export function savePresets(presets: GroupPreset[]): void {
+export function savePresets(presets: GroupPreset[], platform = 'qq'): void {
   try {
-    localStorage.setItem(accountKey(PRESETS_KEY), JSON.stringify(presets));
+    const key = platform === 'qq' ? PRESETS_KEY : `${PRESETS_KEY}:${platform}`;
+    localStorage.setItem(accountKey(key), JSON.stringify(presets));
   } catch {
     // 存不了（隐私模式等）就算了，本次页面里仍然可用
   }
+}
+
+/** Match the server's length-prefixed SHA-256 identity without exposing account IDs in group IDs. */
+export async function wechatBusinessGroupId(account: string, group: string): Promise<string> {
+  const fields = ['wechat-group-v1', account, group].map(value => new TextEncoder().encode(value));
+  const bytes = new Uint8Array(fields.reduce((sum, field) => sum + 4 + field.length, 0));
+  const view = new DataView(bytes.buffer);
+  let offset = 0;
+  for (const field of fields) {
+    view.setUint32(offset, field.length); offset += 4;
+    bytes.set(field, offset); offset += field.length;
+  }
+  const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  return `wechat:${Array.from(hash, byte => byte.toString(16).padStart(2, '0')).join('')}`;
 }
 
 /** 当前监听中的群号（按列表顺序） */

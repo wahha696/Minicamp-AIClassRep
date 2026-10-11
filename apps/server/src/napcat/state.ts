@@ -4,7 +4,7 @@
 // error 的 message 用架构.md §7 原文案；非 Windows 按 00-总约定 §6 返回。
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { accountDataState, accountEpoch, legacyDataExists } from '../accounts.js';
+import { accountDataState, accountEpoch, legacyDataExists, workspaceRuntime } from '../accounts.js';
 import { getLlmConfig } from '../ai-settings.js';
 import type { ConnectState, ConnectStatusDTO } from '../types.js';
 import { getManagerFacts, getUin, type ManagerFacts } from './manager.js';
@@ -30,7 +30,7 @@ let lastState: ConnectState | null = null;
 /** state.ts 判定所需的全部输入（抽出便于测试） */
 export interface ConnectInputs {
   manager: ManagerFacts;
-  onebot: { wsConnected: boolean; everOnline: boolean; selfId: string | null; kicked: boolean; accountError?: string | null };
+  onebot: { wsConnected: boolean; everOnline: boolean; selfId: string | null; kicked: boolean; accountError?: string | null; stopped?: boolean };
   qrcodeExists: boolean;
   uin: string | undefined;
   /** DeepSeek Key 是否已配置（网页或 .env） */
@@ -61,6 +61,7 @@ export function deriveConnectStatus(input: ConnectInputs): { state: ConnectState
       // 持久化账号或挂库失败后 WS 可能已经主动断开，仍必须显示错误而不是假装重连中。
       return { state: 'error', message: MSG_ACCOUNT_DB, first_run: firstRun, uin };
     }
+    if (o.stopped) return { state: 'reconnecting', message: 'QQ 采集已暂停，请重新连接后确认课代表空间', first_run: firstRun, uin };
     if (o.wsConnected && o.selfId !== null) return { state: 'online', first_run: firstRun, uin };
     if (o.everOnline && !o.wsConnected) return { state: 'reconnecting', first_run: firstRun, uin };
     return { state: 'starting', first_run: firstRun, uin };
@@ -73,7 +74,7 @@ export function deriveConnectStatus(input: ConnectInputs): { state: ConnectState
 
   if (m.conflictAtBoot && m.pid === null) {
     // 启动时检测到 QQ.exe 在运行，尚未 spawn → 等用户点「关闭电脑版 QQ 并继续」
-    return { state: 'qq_conflict', message: MSG_QQ_CONFLICT, first_run: firstRun };
+    return { state: 'qq_conflict', message: MSG_QQ_CONFLICT, first_run: firstRun, uin };
   }
   if (m.napcatMissing) {
     return { state: 'error', message: MSG_NAPCAT_MISSING, first_run: firstRun, uin };
@@ -96,6 +97,7 @@ export function deriveConnectStatus(input: ConnectInputs): { state: ConnectState
     // 收到 bot_offline 且进程树已被结束；等用户点「重新连接」，不自动重启
     return { state: 'kicked', first_run: firstRun, uin };
   }
+  if (o.stopped) return { state: 'reconnecting', message: 'QQ 采集已暂停，请重新连接后确认课代表空间', first_run: firstRun, uin };
   if (o.wsConnected && o.selfId !== null) {
     return { state: 'online', first_run: firstRun, uin };
   }
@@ -131,6 +133,10 @@ export function getConnectStatus(): ConnectStatusDTO {
   if (dataState === 'switching' && derived.state === 'online') {
     derived = { ...derived, state: 'reconnecting' };
   }
+  const workspace = workspaceRuntime()?.status();
+  if (workspace?.pending.some((p) => p.platform === 'qq') && derived.state === 'online') {
+    derived = { ...derived, state: 'reconnecting', message: '请选择课代表空间后开始接收消息' };
+  }
   if (derived.state !== lastState) {
     lastState = derived.state;
     since = Date.now();
@@ -143,6 +149,10 @@ export function getConnectStatus(): ConnectStatusDTO {
     first_run: derived.first_run,
     deepseek_configured: deepseekConfigured,
   };
+  if (workspace) {
+    dto.workspace = workspace;
+    dto.first_run = workspace.current === null || !deepseekConfigured;
+  }
   if (derived.uin !== undefined) dto.uin = derived.uin;
   if (derived.message !== undefined) dto.message = derived.message;
   if (derived.reason !== undefined) dto.reason = derived.reason;

@@ -53,6 +53,10 @@ describe('按时间', () => {
 });
 
 describe('按紧急', () => {
+  it('已经开始的报告仍按尚未到来的截止时间判断紧急程度', () => {
+    const report = ev({ start_at: NOW - 4 * 86400000, deadline_at: NOW + 30 * 60000 });
+    expect(urgencyTier(report, NOW)).toBe(0);
+  });
   it('档位：两小时内 < 今天稍晚 < 待定 < 已过 < 已完成', () => {
     expect(urgencyTier(ev({ start_at: sh('2026-09-30T11:30:00') }), NOW)).toBe(0);
     expect(urgencyTier(ev({ start_at: sh('2026-09-30T12:00:00') }), NOW)).toBe(0);

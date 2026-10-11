@@ -65,10 +65,10 @@ export function createDiagnosticReport(limit = 500, now = Date.now()): Record<st
                  THEN 1 ELSE 0 END AS has_placeholder,
             COALESCE((SELECT group_concat(DISTINCT e.type)
                         FROM event_sources es JOIN events e ON e.id = es.event_id
-                       WHERE e.group_id = m.group_id AND es.message_id = m.message_id), '') AS event_types,
+                       WHERE COALESCE(NULLIF(es.group_id,''),e.group_id) = m.group_id AND es.message_id = m.message_id), '') AS event_types,
             COALESCE((SELECT group_concat(DISTINCT e.status)
                         FROM event_sources es JOIN events e ON e.id = es.event_id
-                       WHERE e.group_id = m.group_id AND es.message_id = m.message_id), '') AS event_statuses
+                       WHERE COALESCE(NULLIF(es.group_id,''),e.group_id) = m.group_id AND es.message_id = m.message_id), '') AS event_statuses
        FROM messages m ORDER BY m.sent_at DESC, m.message_id DESC LIMIT ?`,
   ).all(Math.max(1, Math.min(2000, limit))) as unknown as DiagnosticRow[];
 

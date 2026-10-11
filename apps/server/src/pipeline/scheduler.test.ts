@@ -1,18 +1,21 @@
 // 用 :memory: 库；extractEvents 换成假的，不调 LLM
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db, openDb } from '../db/index.js';
 import { env } from '../env.js';
 import { ingestMessages } from '../ingest/index.js';
+import { cleanupOnce } from '../jobs/cleanup.js';
 import { MOCK_DIR } from '../paths.js';
 import type { Message } from '../types.js';
-import { type ExtractInput, type ExtractedEvent, extractEvents } from './extract.js';
+import { type ExtractInput, type ExtractedEvent, type LlmClient, extractEvents } from './extract.js';
 import { isNoise } from './filter.js';
 import { jevAvailable, scoreWithJev } from './jev.js';
 import { getPipelineStats } from './index.js';
 import { llmStats } from './stats.js';
-import { quiesceScheduler, resetLlmRetry, resumeScheduler, runPipelineNow, tick } from './scheduler.js';
+import { LLM_RETRY_MS, quiesceScheduler, resetLlmRetry, resumeScheduler, runPipelineNow, runPipelineGroupNow, tick } from './scheduler.js';
+import { getGroupFailure } from './failures.js';
 import { setDesktopPipelinePaused } from './activity.js';
 
 vi.mock('./extract.js', async (importOriginal) => ({
@@ -86,9 +89,219 @@ beforeEach(() => {
   jevOn.mockReturnValue(false);
   resetLlmRetry();
 });
-afterEach(() => { setDesktopPipelinePaused(false); vi.restoreAllMocks(); });
+afterEach(() => { setDesktopPipelinePaused(false); vi.useRealTimers(); vi.restoreAllMocks(); });
+
+it('AI在途时清理群，迟到响应不能重建事项或来源', async () => {
+  ingestMessages(chat('demo-cleared', 15), 'demo');
+  let resolve!: (events: ExtractedEvent[]) => void;
+  let candidate!: ExtractInput;
+  extract.mockImplementationOnce(input => { candidate = input; return new Promise(done => { resolve = done; }); });
+  const running = tick();
+  await vi.waitFor(() => expect(extract).toHaveBeenCalledOnce());
+  db.prepare('DELETE FROM messages WHERE group_id=?').run('demo-cleared');
+  resolve([created(candidate)]); await running;
+  expect(db.prepare('SELECT COUNT(*) n FROM events').get()!.n).toBe(0);
+  expect(db.prepare('SELECT COUNT(*) n FROM event_sources').get()!.n).toBe(0);
+});
+
+describe('逐群失败控制', () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW);
+    extract.mockRejectedValue(new Error('boom'));
+  });
+
+  it('只尝试三次；等待期间和暂停后不请求 AI；其他群照常处理', async () => {
+    ingestMessages(chat('demo-a', 15), 'demo');
+    for (let i = 0; i < 3; i++) {
+      await tick();
+      expect(extract).toHaveBeenCalledTimes(i + 1);
+      await tick();
+      expect(extract).toHaveBeenCalledTimes(i + 1);
+      vi.setSystemTime(NOW + (i + 1) * LLM_RETRY_MS);
+    }
+    expect(getGroupFailure('demo-a')).toMatchObject({ paused: true, failed_attempts: 3, pending_count: 15 });
+    await tick();
+    expect(extract).toHaveBeenCalledTimes(3);
+
+    ingestMessages(chat('demo-b', 15), 'demo');
+    extract.mockResolvedValue([]);
+    await tick();
+    expect(count("processed = 0 AND group_id = 'demo-b'")).toBe(0);
+    expect(count("processed = 0 AND group_id = 'demo-a'")).toBe(15);
+    expect(extract).toHaveBeenCalledTimes(4);
+  });
+
+  it('暂停状态和消息跨数据库重开保留，重开不追加自动尝试', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'classrep-pipeline-restart-'));
+    const path = join(dir, 'test.db');
+    try {
+      openDb(path);
+      ingestMessages(chat('demo-a', 15), 'demo');
+      for (let i = 0; i < 3; i++) {
+        await tick();
+        vi.setSystemTime(NOW + (i + 1) * LLM_RETRY_MS);
+      }
+      db.prepare('UPDATE messages SET sent_at = ?').run(NOW - 60 * 86400_000);
+      openDb(path);
+      expect(cleanupOnce(Date.now())).toBe(0);
+      await tick();
+      expect(extract).toHaveBeenCalledTimes(3);
+      expect(count('processed = 0')).toBe(15);
+      expect(getGroupFailure('demo-a')?.paused).toBe(true);
+    } finally {
+      openDb(':memory:');
+      if (!dir.startsWith(join(tmpdir(), 'classrep-pipeline-restart-'))) throw new Error('unsafe test cleanup path');
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('仅手动恢复目标群，成功后清掉失败状态，不恢复其他暂停群', async () => {
+    ingestMessages([...chat('demo-a', 15), ...chat('demo-b', 15)], 'demo');
+    for (let i = 0; i < 3; i++) {
+      await tick();
+      vi.setSystemTime(NOW + (i + 1) * LLM_RETRY_MS);
+    }
+    extract.mockResolvedValue([]);
+    await runPipelineGroupNow('demo-a');
+    expect(count("processed = 0 AND group_id = 'demo-a'")).toBe(0);
+    expect(getGroupFailure('demo-a')).toBeNull();
+    expect(getGroupFailure('demo-b')?.paused).toBe(true);
+    expect(count("processed = 0 AND group_id = 'demo-b'")).toBe(15);
+  });
+
+  it('手动重试目标群不等待其他群的慢请求', async () => {
+    ingestMessages(chat('demo-slow', 15), 'demo');
+    let release!: () => void;
+    extract.mockImplementation(async (input) => {
+      if (input.groupId === 'demo-slow') await new Promise<void>((resolve) => { release = resolve; });
+      return [];
+    });
+    const slow = tick();
+    await vi.waitFor(() => expect(extract).toHaveBeenCalledOnce());
+    ingestMessages(chat('demo-target', 2), 'demo');
+    const retry = runPipelineGroupNow('demo-target');
+    try {
+      await vi.waitFor(() => expect(count("processed = 0 AND group_id = 'demo-target'")).toBe(0));
+      expect(count("processed = 0 AND group_id = 'demo-slow'")).toBe(15);
+    } finally {
+      release();
+      await Promise.all([slow, retry]);
+    }
+  });
+
+  it('有效配置改变后恢复，同一密钥重新保存或重启不能绕过暂停', async () => {
+    const key = env.LLM_API_KEY;
+    try {
+      env.LLM_API_KEY = 'test-key-before';
+      ingestMessages(chat('demo-a', 15), 'demo');
+      for (let i = 0; i < 3; i++) {
+        await tick();
+        vi.setSystemTime(NOW + (i + 1) * LLM_RETRY_MS);
+      }
+      env.LLM_API_KEY = 'test-key-before';
+      await tick();
+      expect(extract).toHaveBeenCalledTimes(3);
+      env.LLM_API_KEY = 'test-key-after';
+      extract.mockResolvedValue([]);
+      await tick();
+      expect(count('processed = 0')).toBe(0);
+      expect(getGroupFailure('demo-a')).toBeNull();
+    } finally { env.LLM_API_KEY = key; }
+  });
+
+  it('一个群在等待重试时，新到另一个群的消息不等待同一倒计时', async () => {
+    ingestMessages(chat('demo-a', 15), 'demo');
+    await tick();
+    ingestMessages(chat('demo-b', 15), 'demo');
+    extract.mockResolvedValue([]);
+    await tick();
+    expect(extract).toHaveBeenCalledTimes(2);
+    expect(count("processed = 0 AND group_id = 'demo-b'")).toBe(0);
+    expect(count("processed = 0 AND group_id = 'demo-a'")).toBe(15);
+  });
+
+  it('迟到失败不能写入换号后的数据库，也不能暂停新账号', async () => {
+    ingestMessages(chat('demo-a', 15), 'demo');
+    let reject!: (error: Error) => void;
+    extract.mockImplementation(() => new Promise((_resolve, fail) => { reject = fail; }));
+    const running = tick();
+    await vi.waitFor(() => expect(extract).toHaveBeenCalledOnce());
+    openDb(':memory:');
+    ingestMessages(chat('demo-a', 15), 'demo');
+    reject(new Error('late failure'));
+    await running;
+    expect(getGroupFailure('demo-a')).toBeNull();
+    extract.mockResolvedValue([]);
+    await tick();
+    expect(count('processed = 0')).toBe(0);
+  });
+
+  it('失败状态写库异常时仍控制当前进程重试，换号后不能沿用旧兜底状态', async () => {
+    db.exec("CREATE TRIGGER fail_failure_record BEFORE INSERT ON pipeline_failures BEGIN SELECT RAISE(ABORT, 'test failure'); END");
+    ingestMessages(chat('demo-a', 15), 'demo');
+    for (let i = 0; i < 3; i++) {
+      await tick();
+      vi.setSystemTime(NOW + (i + 1) * LLM_RETRY_MS);
+    }
+    await tick();
+    expect(extract).toHaveBeenCalledTimes(3);
+    expect(getGroupFailure('demo-a')?.paused).toBe(true);
+    expect(getGroupFailure('demo-a')?.state_saved).toBe(false);
+    openDb(':memory:');
+    ingestMessages(chat('demo-a', 15), 'demo');
+    extract.mockResolvedValue([]);
+    await tick();
+    expect(count('processed = 0')).toBe(0);
+  });
+});
 
 describe('desktop QQ pause', () => {
+  function selectedWechat(n = 2) {
+    db.prepare('INSERT INTO groups(group_id,name,enabled,adapter,created_at) VALUES(?,?,1,?,?)')
+      .run('synthetic-wechat', '人工微信群', 'wechat', NOW);
+    ingestMessages(chat('synthetic-wechat', n), 'wechat');
+  }
+
+  it.each(['tick', 'all', 'group'] as const)('QQ pause keeps WeChat processing through %s', async (mode) => {
+    selectedWechat(15); ingestMessages(chat('qq-paused', 15), 'demo');
+    setDesktopPipelinePaused(true);
+    if (mode === 'tick') await tick(NOW + 60_000);
+    else if (mode === 'all') await runPipelineNow();
+    else await runPipelineGroupNow('synthetic-wechat');
+    expect(count("group_id='synthetic-wechat' AND processed=0")).toBe(0);
+    expect(count("group_id='qq-paused' AND processed=0")).toBe(15);
+    expect(extract).toHaveBeenCalledOnce();
+    expect(extract.mock.calls[0]![0].groupId).toBe('synthetic-wechat');
+  });
+
+  it('QQ pause and recovery do not discard an in-flight WeChat AI reply', async () => {
+    selectedWechat();
+    let finish!: (events: ExtractedEvent[]) => void;
+    extract.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const running = runPipelineNow();
+    await vi.waitFor(() => expect(extract).toHaveBeenCalledOnce());
+    setDesktopPipelinePaused(true); setDesktopPipelinePaused(false);
+    finish([created(extract.mock.calls[0]![0])]); await running;
+    expect(count("processed=0")).toBe(0);
+    expect(db.prepare('SELECT group_id FROM events').all()).toEqual([{ group_id: 'synthetic-wechat' }]);
+  });
+
+  it('space-switch quiescing still blocks WeChat replies and waits for them', async () => {
+    selectedWechat();
+    let finish!: (events: ExtractedEvent[]) => void;
+    extract.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const running = runPipelineNow();
+    await vi.waitFor(() => expect(extract).toHaveBeenCalledOnce());
+    const quiet = quiesceScheduler();
+    try {
+      finish([created(extract.mock.calls[0]![0])]); await Promise.all([running, quiet]);
+      expect(count('processed=0')).toBe(2);
+      expect(db.prepare('SELECT * FROM events').all()).toHaveLength(0);
+    } finally { resumeScheduler(false); }
+  });
+
   it('blocks new AI work and retries pending messages after returning', async () => {
     ingestMessages(chat('demo-paused', 2), 'demo');
     setDesktopPipelinePaused(true);
@@ -164,13 +377,19 @@ describe('runPipelineNow', () => {
     expect(ev[0]!.group_id).toBe(msgs[0]!.group_id);
   });
 
-  it('extract 出错也置已处理，不抛', async () => {
+  it('extract 意外抛错：保留消息，自动调度等待，手动重试可恢复', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     ingestMessages(chat('demo-a', 20), 'demo');
     extract.mockRejectedValue(new Error('boom'));
     await expect(runPipelineNow()).resolves.toBeUndefined();
+    expect(count('processed = 0')).toBe(20);
+    expect(extract).toHaveBeenCalledOnce();
+    await tick();
+    expect(extract).toHaveBeenCalledOnce();
+    extract.mockResolvedValue([]);
+    await runPipelineNow();
     expect(count('processed = 0')).toBe(0);
-    expect(count("decision_reason = 'pipeline_error'")).toBe(20);
+    expect(count("decision_reason = 'llm_no_event'")).toBe(20);
   });
 
   it('逐条记录已识别、未识别与待确认原因', async () => {
@@ -187,6 +406,93 @@ describe('runPipelineNow', () => {
     extract.mockImplementationOnce(async (input) => [{ ...created(input), confidence: 0.5 }]);
     await runPipelineNow();
     expect(count("decision_reason = 'pending_confirmation'")).toBe(1);
+  });
+
+  it('真实提取器未配置 AI 时保留消息；之后配置成功可提取入库', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { extractEvents: realExtract } = await vi.importActual<typeof import('./extract.js')>('./extract.js');
+    const key = env.LLM_API_KEY;
+    try {
+      env.LLM_API_KEY = '';
+      ingestMessages(chat('demo-a', 2), 'demo');
+      extract.mockImplementation((input, _client, status) => realExtract(input, undefined, status));
+      await runPipelineNow();
+      expect(count('processed = 0')).toBe(2);
+      expect(llmStats.llm).toBe('unconfigured');
+      expect(db.prepare('SELECT * FROM events').all()).toHaveLength(0);
+
+      extract.mockImplementation(async (input) => [created(input)]);
+      await runPipelineNow();
+      expect(count('processed = 0')).toBe(0);
+      expect(db.prepare('SELECT * FROM events').all()).toHaveLength(1);
+    } finally {
+      env.LLM_API_KEY = key;
+    }
+  });
+
+  it('真实提取器格式错误保留整批，修复输出后成功的空列表可完成处理', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { extractEvents: realExtract } = await vi.importActual<typeof import('./extract.js')>('./extract.js');
+    const create = vi.fn().mockResolvedValue({ choices: [{ message: { content: 'not json' } }] });
+    const client = { chat: { completions: { create } } } as unknown as LlmClient;
+    ingestMessages(chat('demo-a', 20), 'demo');
+    extract.mockImplementation((input, _client, status) => realExtract(input, client, status));
+    await runPipelineNow();
+    expect(count('processed = 0')).toBe(20);
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(llmStats.llm).toBe('error');
+    create.mockResolvedValue({ choices: [{ message: { content: '{"events": []}' } }] });
+    await runPipelineNow();
+    expect(count('processed = 0')).toBe(0);
+    expect(db.prepare('SELECT * FROM events').all()).toHaveLength(0);
+  });
+
+  it('事件入库失败会回滚，消息保留；恢复后可重试', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    ingestMessages(chat('demo-a', 2), 'demo');
+    extract.mockImplementation(async (input) => [created(input)]);
+    db.exec("CREATE TRIGGER fail_events BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'test write failure'); END");
+    await runPipelineNow();
+    expect(count('processed = 0')).toBe(2);
+    expect(db.prepare('SELECT * FROM events').all()).toHaveLength(0);
+    expect(db.prepare('SELECT * FROM event_sources').all()).toHaveLength(0);
+    await tick();
+    expect(extract).toHaveBeenCalledOnce();
+    db.exec('DROP TRIGGER fail_events');
+    await runPipelineNow();
+    expect(count('processed = 0')).toBe(0);
+    expect(db.prepare('SELECT * FROM events').all()).toHaveLength(1);
+  });
+
+  it('事件已写入但处理标记失败时，重试不重复创建事件和来源', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    ingestMessages(chat('demo-a', 2), 'demo');
+    extract.mockImplementation(async (input) => [created(input)]);
+    db.exec("CREATE TRIGGER fail_processed BEFORE UPDATE OF processed ON messages BEGIN SELECT RAISE(ABORT, 'test flag failure'); END");
+    await runPipelineNow();
+    expect(count('processed = 0')).toBe(2);
+    expect(db.prepare('SELECT * FROM events').all()).toHaveLength(1);
+    await tick();
+    expect(extract).toHaveBeenCalledOnce();
+    db.exec('DROP TRIGGER fail_processed');
+    await runPipelineNow();
+    expect(count('processed = 0')).toBe(0);
+    expect(db.prepare('SELECT * FROM events').all()).toHaveLength(1);
+    expect(db.prepare('SELECT * FROM event_sources').all()).toHaveLength(1);
+  });
+
+  it('其他群连续清理多批积压时，本次手动处理只尝试失败群一次', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    ingestMessages([...chat('demo-a', 5), ...chat('demo-b', 95)], 'demo');
+    extract.mockImplementation(async (input) => {
+      if (input.groupId === 'demo-a') throw new Error('boom');
+      return [];
+    });
+    await runPipelineNow();
+    expect(count("processed = 0 AND group_id = 'demo-a'")).toBe(5);
+    expect(count("processed = 0 AND group_id = 'demo-b'")).toBe(0);
+    expect(extract.mock.calls.filter(([input]) => input.groupId === 'demo-a')).toHaveLength(1);
+    expect(extract.mock.calls.filter(([input]) => input.groupId === 'demo-b')).toHaveLength(4);
   });
 
   it('AI 连不上：这批不置已处理，歇一会；之后连上了再处理', async () => {
@@ -318,6 +624,22 @@ describe('tick 阈值（Jev 不可用时的老规则）', () => {
 
 describe('tick：Jev 分数决定等多久', () => {
   beforeEach(() => jevOn.mockReturnValue(true));
+
+  it('不同群相同 message_id 的 Jev 分数互不覆盖', async () => {
+    const t0 = Date.now();
+    const a = chat('demo-a', 1, '今晚约饭吗同学们');
+    const b = chat('demo-b', 1, '明天下午两点 A301 小测');
+    a[0]!.message_id = b[0]!.message_id = 'same-id';
+    ingestMessages([...a, ...b], 'demo');
+    jev.mockImplementation(async (_messages, _context, groupName) => [groupName === 'demo-a' ? 0.01 : 0.95]);
+    await tick(t0 + 1_000);
+    expect(count("processed = 0 AND group_id = 'demo-a'")).toBe(0);
+    expect(count("processed = 0 AND group_id = 'demo-b'")).toBe(1);
+    expect(extract).not.toHaveBeenCalled();
+    await tick(t0 + 3_500);
+    expect(extract).toHaveBeenCalledOnce();
+    expect(extract.mock.calls[0]![0].groupId).toBe('demo-b');
+  });
 
   it('确定是通知（≥0.8）：群里安静 3 秒就处理，不等 20 秒', async () => {
     const t0 = Date.now();

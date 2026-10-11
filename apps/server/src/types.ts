@@ -18,7 +18,7 @@ export type EventEditableField =
 export type Level = 1 | 2 | 3 | 4;
 export type ConnectState =
   | 'qq_conflict' | 'error' | 'kicked' | 'online' | 'waiting_qr' | 'reconnecting' | 'starting';
-export type MessageSource = 'onebot' | 'history' | 'demo' | 'import' | 'forward';
+export type MessageSource = 'onebot' | 'history' | 'demo' | 'import' | 'forward' | 'wechat';
 
 /** 所有来源最终都转成它再入库 */
 export interface Message {
@@ -53,6 +53,9 @@ export interface EventDTO {
 }
 
 export interface SourceMessageDTO {
+  group_id?: string;
+  group_name?: string;
+  platform?: 'qq' | 'wechat' | 'demo' | 'import' | 'unknown';
   message_id: string;
   sender_name: string;
   text: string;
@@ -100,18 +103,35 @@ export interface TrashItemDTO {
 }
 
 export interface TodayDTO {
+  overdue?: EventDTO[];
   date: string;         // 'YYYY-MM-DD'（Asia/Shanghai）
   summary: string;      // 如 "今天 4 件事，最急的是 14:00 高数小测"；没有事件时 "今天没有待办，轻松一天"
   events: EventDTO[];
+}
+
+export type ProcessingFailureReason = 'unconfigured' | 'network' | 'authentication' | 'rate_limit'
+  | 'invalid_output' | 'truncated' | 'storage' | 'processing';
+
+export interface GroupProcessingFailureDTO {
+  pending_count: number;
+  failed_attempts: number;
+  reason: ProcessingFailureReason;
+  paused: boolean;
+  next_retry_at: number | null;
+  last_failed_at: number;
+  state_saved?: boolean;
 }
 
 export interface GroupDTO {
   group_id: string;
   name: string;
   enabled: boolean;
+  platform?: 'qq' | 'wechat' | 'demo' | 'import' | 'unknown';
+  collecting?: boolean; // 微信实际采集状态，与用户的选群开关分开
   message_count: number;
   event_count: number;
   course_name: string | null; // 用户指定的对应课程名；null = AI 按群名猜
+  processing_failure?: GroupProcessingFailureDTO | null;
 }
 
 export interface TodoDTO {
@@ -152,6 +172,10 @@ export interface DesktopQQStatusDTO {
 }
 
 export interface ConnectStatusDTO {
+  wechat?: 'idle' | 'opening' | 'collecting' | 'error';
+  access?: { readonly: boolean };
+  demo_available?: boolean;
+  workspace?: import('../../../shared/workspaces.js').WorkspaceStatus;
   desktop_qq?: DesktopQQStatusDTO;
   state: ConnectState;
   account_epoch: string; // 不含账号信息的数据代次令牌；前端业务读写用它拒绝跨号请求
@@ -181,6 +205,7 @@ export interface PipelineStats {
 }
 
 export interface HealthDTO extends PipelineStats {
+  wechat?: 'idle' | 'opening' | 'collecting' | 'error';
   status: 'ok' | 'degraded';
   db: 'ok' | 'error';
   qq: ConnectState;

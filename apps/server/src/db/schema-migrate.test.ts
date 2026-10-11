@@ -1,5 +1,5 @@
 // schema 版本化迁移验收（D3）：v1 老库 → v2 复合主键；换号时通知订阅者清缓存
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -42,6 +42,30 @@ function insertMsg(groupId: string, mid: string): void {
 const count = (t: string) => (db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n;
 
 describe('schema 迁移（v1 → v2）', () => {
+  it('v8 source snapshots gain provenance columns without inventing old metadata or losing bodies', () => {
+    const file = join(tempDir(), 'old-v8.db');
+    const old = new DatabaseSync(file);
+    old.exec(`CREATE TABLE kv(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      INSERT INTO kv VALUES('schema_version','8');
+      CREATE TABLE event_sources (
+      event_id INTEGER NOT NULL, message_id TEXT NOT NULL, sender_name TEXT NOT NULL,
+      text TEXT NOT NULL, sent_at INTEGER NOT NULL, PRIMARY KEY(event_id,message_id));
+      INSERT INTO event_sources VALUES(1,'synthetic-id','人工发信人','保留的人工通知',1234);`);
+    old.close(); openDb(file);
+    expect(db.prepare('SELECT * FROM event_sources').get()).toEqual({
+      event_id: 1, message_id: 'synthetic-id', sender_name: '人工发信人', text: '保留的人工通知', sent_at: 1234,
+      group_id: '', group_name: '', platform: 'unknown',
+    });
+    const backups = join(dirname(file), 'backups');
+    const snapshots = readdirSync(backups); expect(snapshots).toHaveLength(1);
+    const snapshot = new DatabaseSync(join(backups, snapshots[0]!), { readOnly: true });
+    expect(snapshot.prepare("SELECT value FROM kv WHERE key='schema_version'").get()?.value).toBe('8');
+    expect(snapshot.prepare('SELECT text FROM event_sources').get()?.text).toBe('保留的人工通知');
+    snapshot.close();
+    db.close(); openDb(file);
+    expect(count('event_sources')).toBe(1);
+    expect(readdirSync(backups)).toHaveLength(1);
+  });
   it('老库的 messages/message_seen 重建成复合主键，数据保留，跨群同 id 不再冲突', () => {
     const dir = tempDir();
     const file = join(dir, 'accounts', '10001', 'classrep.db');
@@ -89,6 +113,7 @@ describe('schema 迁移（v1 → v2）', () => {
     expect(eventCols).toContain('manual_locked_fields');
     const v = db.prepare("SELECT value FROM kv WHERE key = 'schema_version'").get() as { value: string };
     expect(v.value).toBe(String(SCHEMA_VERSION));
+
   });
 
   it('v3 过渡库（start_section/end_section）重建回 block+details，节次写进 details', () => {
@@ -189,6 +214,7 @@ describe('schema 迁移（v1 → v2）', () => {
       'reason', 'proposed_changes', 'source_message_ids', 'event_fingerprint', 'base_version',
     ]));
     expect((db.prepare("SELECT value FROM kv WHERE key = 'schema_version'").get() as { value: string }).value).toBe(String(SCHEMA_VERSION));
+
   });
 
   it('v5 create 提案升级时只回填一次原始事件指纹，后续人工编辑不会改写', () => {
@@ -249,6 +275,7 @@ describe('schema 迁移（v1 → v2）', () => {
       event_fingerprint: string;
     }).event_fingerprint).toBe(first);
     expect((db.prepare("SELECT value FROM kv WHERE key = 'schema_version'").get() as { value: string }).value).toBe(String(SCHEMA_VERSION));
+
   });
 });
 

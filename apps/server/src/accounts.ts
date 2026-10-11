@@ -1,4 +1,5 @@
-// 按账号分库（四问题修复 #1）：本项目里的「账号」= 采集端登录的 QQ 号 uin。
+// 生产启动采用空间模式：平台身份与业务空间分开，旧 QQ 库原地引用，新空间使用 UUID 目录。
+// 以下 QQ 分库路径兼容旧调用方与测试：本项目里的「账号」= 采集端登录的 QQ 号 uin。
 // 一个账号一个 SQLite 库：data/accounts/<uin>/classrep.db。换号 = 换库文件，天然物理隔离：
 // 换号登录看不到旧账号任何数据，切回旧号数据完整，删目录即删账号，备份 = 拷目录。
 // 挂载点：onebot.ts 的 lifecycle（登录成功的唯一信号）拿到 self_id 后调 switchAccount(uin)；
@@ -10,12 +11,18 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+
 import { DB_FILE, db, dbGeneration, notifyAccountSwitch, openDb } from './db/index.js';
 import { snapshotDatabase, validateBackupDatabase } from './data-backup.js';
 import { pauseCleanup, resumeCleanup } from './jobs/cleanup.js';
 import { getUin } from './napcat/manager.js';
 import { ACCOUNTS_DIR, DATA_DIR } from './paths.js';
 import { redactSensitive } from './redact.js';
+import { migrateToSingleton } from './workspaces/migrate-singleton.js';
+import { WorkspaceController } from './workspaces/controller.js';
+import { WorkspaceRegistry, WorkspaceError, type PlatformIdentity } from './workspaces/registry.js';
+import type { WechatCapability } from '../../../shared/workspaces.js';
+
 
 /** 未登录时的「无账号」兜底库：就是旧版的 data/classrep.db（演示模式数据落这里）。 */
 export const FALLBACK_DB = DB_FILE;
@@ -39,6 +46,10 @@ let transitionTail: Promise<void> = Promise.resolve();
 let queuedTransitions = 0;
 let activeMutationLeases = 0;
 let automaticBackupTimer: ReturnType<typeof setInterval> | null = null;
+let workspaceController: WorkspaceController | undefined;
+let workspaceRegistry: WorkspaceRegistry | undefined;
+let workspaceSpacesDir = join(DATA_DIR, "spaces");
+
 /** 防止服务重启后 generation/accessEpoch 从相同初值开始，令旧浏览器页面的 epoch 意外复活。 */
 const processAccountNonce = randomUUID();
 const mutationLeaseWaiters = new Set<() => void>();
@@ -46,6 +57,9 @@ const transitionIdleWaiters = new Set<() => void>();
 
 /** 测试用：把账号库目录（和未登录兜底库路径）换到临时目录，不影响真实 data/ */
 export function setAccountsDirForTest(dir: string, fallbackPath?: string): void {
+  workspaceRegistry?.close();
+  workspaceRegistry = undefined;
+  workspaceController = undefined;
   accountsDir = dir;
   if (fallbackPath !== undefined) fallbackDb = fallbackPath;
   current = null;
@@ -58,7 +72,12 @@ export function setAccountsDirForTest(dir: string, fallbackPath?: string): void 
 
 /** 当前挂载的账号；未登录（兜底库）为 null */
 export function currentAccount(): string | null {
-  return current;
+  return workspaceController ? workspaceController.currentQq() : current;
+}
+export function workspaceRuntime(): WorkspaceController | undefined { return workspaceController; }
+/** Stable business identity, separate from an individual platform connection. */
+export function currentDataSpace(): string | null {
+  return workspaceController ? workspaceController.currentSpaceId() : current;
 }
 
 /** 正在切库（true 期间 onebot 会把新消息先攒着，切完按序入库） */
@@ -66,12 +85,13 @@ export function isAccountSwitching(): boolean {
   return switching;
 }
 
-export type AccountDataState = 'ready' | 'switching' | 'error';
+export type AccountDataState = 'ready' | 'switching' | 'error' | 'locked';
 
 /** 账号业务数据是否可以对当前网页公开；切库中或挂库失败时一律 fail closed。 */
 export function accountDataState(): AccountDataState {
   if (switching) return 'switching';
-  return accessBlocked ? 'error' : 'ready';
+  if (accessBlocked) return 'error';
+  return workspaceController?.isLocked() ? 'locked' : 'ready';
 }
 
 /** 等当前已排队的账号操作全部结束；OneBot 用它避免后续删除/登出操作让切库缓冲永远没人冲刷。 */
@@ -129,9 +149,64 @@ export function tryAcquireAccountMutationLease(expectedEpoch?: string): AccountM
   };
 }
 
-function waitForMutationLeases(): Promise<void> {
+/** Also used after HTTP admission closes during graceful shutdown. */
+export function waitForMutationLeases(): Promise<void> {
   if (activeMutationLeases === 0) return Promise.resolve();
   return new Promise((resolve) => mutationLeaseWaiters.add(resolve));
+}
+
+/** Reset the mounted workspace while the account transition gate owns all business writes. */
+export function resetCurrentWorkspaceData(expectedEpoch: string, stopWechat: () => Promise<void>): Promise<void> {
+  if (!workspaceController?.hasAccess() || accountDataState() !== 'ready' || expectedEpoch !== accountEpoch()) {
+    return Promise.reject(new WorkspaceError('WORKSPACE_REQUEST_STALE'));
+  }
+  const spaceId = workspaceController.currentSpaceId();
+  return enqueueAccountTransition(async () => {
+    const { quiesceScheduler, resumeScheduler } = await import('./pipeline/scheduler.js');
+    const wasRunning = await quiesceScheduler();
+    try {
+      if (expectedEpoch !== accountEpoch() || workspaceController?.currentSpaceId() !== spaceId) {
+        throw new WorkspaceError('WORKSPACE_REQUEST_STALE');
+      }
+      await stopWechat();
+      if (expectedEpoch !== accountEpoch() || workspaceController?.currentSpaceId() !== spaceId) {
+        throw new WorkspaceError('WORKSPACE_REQUEST_STALE');
+      }
+      const file = db.prepare('PRAGMA database_list').all().find((row) => row.name === 'main')?.file;
+      if (typeof file !== 'string' || !file) throw new Error('WORKSPACE_DATABASE_UNAVAILABLE');
+      const receipts = join(dirname(file), 'wechat-receipts');
+      const parked = join(dirname(file), `wechat-receipts.reset-${randomUUID()}`);
+      if (existsSync(receipts)) renameSync(receipts, parked);
+      try {
+        const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name<>'kv'").all();
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          for (const row of tables) {
+            if (typeof row.name !== 'string' || !/^[a-zA-Z_][a-zA-Z_0-9]*$/.test(row.name)) throw new Error('WORKSPACE_TABLE_INVALID');
+            db.exec(`DELETE FROM "${row.name}"`);
+          }
+          db.exec("DELETE FROM kv WHERE key <> 'schema_version'");
+          db.exec("INSERT INTO kv (key,value) VALUES ('memory_enabled','1')");
+          db.exec('DELETE FROM sqlite_sequence');
+          db.exec('COMMIT');
+        } catch (error) {
+          db.exec('ROLLBACK');
+          throw error;
+        }
+      } catch (error) {
+        if (existsSync(parked)) renameSync(parked, receipts);
+        throw error;
+      }
+      accessEpoch++;
+      notifyAccountSwitch(current);
+      if (existsSync(parked)) {
+        try { rmSync(parked, { recursive: true }); }
+        catch (error) { console.warn('[accounts] 旧微信回执清理失败，数据重置已完成：', error); }
+      }
+    } finally {
+      resumeScheduler(wasRunning);
+    }
+  });
 }
 
 /** 所有挂库、回退兜底库和账号目录删除都从同一队列串行执行。 */
@@ -142,7 +217,7 @@ function finishAccountTransition(): void {
     // 挂库失败后全局 db 仍指向旧账号。HTTP、OneBot、调度器都已 fail closed，
     // 清理定时器也必须保持暂停，不能在“当前登录 B、旧 A 库仍挂着”的错误状态下改 A。
     // 后续成功 switch/close 会把 accessBlocked 清掉，并由它自己的 finally 恢复清理。
-    if (!accessBlocked) resumeCleanup();
+    if (accountDataState() === 'ready') resumeCleanup();
     for (const resolve of transitionIdleWaiters) resolve();
     transitionIdleWaiters.clear();
   }
@@ -180,13 +255,23 @@ export function accountDbPath(uin: string): string {
   return join(accountsDir, uin, 'classrep.db');
 }
 
-function backupsDir(uin: string): string {
-  return join(accountsDir, uin, 'backups');
+/** Authoritative business path; never derive a workspace target from the QQ login. */
+export function currentBackupDatabase(): string | null {
+  if (workspaceController) {
+    const id = workspaceController.currentSpaceId();
+    if (!id || accessBlocked || !workspaceRegistry) return null;
+    const target = workspaceRegistry.businessDbPath(id, { spaces: workspaceSpacesDir, accounts: accountsDir });
+    const mounted = db?.isOpen ? db.prepare('PRAGMA database_list').all().find(row => row.name === 'main')?.file : null;
+    return typeof mounted === 'string' && resolve(mounted) === resolve(target) ? target : null;
+  }
+  const uin = accountControlUin();
+  return uin === null ? null : accountDbPath(uin);
 }
+function backupsDir(database: string): string { return join(dirname(database), 'backups'); }
 
 /** 每个账号每天第一次挂载后做一致性快照，保留最近 7 份。失败只告警，不阻断登录。 */
-function ensureDailyBackup(uin: string, now = Date.now()): void {
-  const dir = backupsDir(uin);
+function ensureDailyBackup(database: string, now = Date.now()): void {
+  const dir = backupsDir(database);
   const day = new Date(now + 8 * 60 * 60 * 1000).toISOString().slice(0, 10); // Asia/Shanghai 日期
   const target = join(dir, `auto-${day}.db`);
   if (existsSync(target)) {
@@ -220,9 +305,9 @@ export function runAutomaticBackupNow(now = Date.now()): boolean {
   const lease = tryAcquireAccountMutationLease();
   if (!lease) return false;
   try {
-    const uin = current;
-    if (uin === null || !lease.isCurrent()) return false;
-    ensureDailyBackup(uin, now);
+    const database = currentBackupDatabase();
+    if (database === null || !lease.isCurrent()) return false;
+    ensureDailyBackup(database, now);
     return true;
   } finally {
     lease.release();
@@ -243,9 +328,10 @@ export interface AccountBackupStatus {
 }
 
 export function accountBackupStatus(): AccountBackupStatus {
-  if (current === null) return { automatic_count: 0, latest_automatic_at: null, latest_restore_backup_at: null };
+  const database = currentBackupDatabase();
+  if (!database) return { automatic_count: 0, latest_automatic_at: null, latest_restore_backup_at: null };
   let names: string[];
-  const dir = backupsDir(current);
+  const dir = backupsDir(database);
   try { names = readdirSync(dir); } catch { names = []; }
   const mtimes = (prefix: string) => names
     .filter((name) => name.startsWith(prefix) && name.endsWith('.db'))
@@ -269,6 +355,7 @@ export function switchAccount(uin: string): Promise<void> {
     console.warn('[accounts] 收到不合法的账号标识，忽略切库');
     return Promise.resolve();
   }
+  if (workspaceController) return workspaceController.observe({ platform: 'qq', account_id: uin }).then(() => undefined);
   // 没有别的 transition 排队时，同号 lifecycle 才能安全地直接 no-op。
   if (queuedTransitions === 0 && current === uin && db?.isOpen && !accessBlocked) return Promise.resolve();
   return enqueueAccountTransition(async () => {
@@ -286,7 +373,7 @@ export function switchAccount(uin: string): Promise<void> {
       blockedAccount = null;
       schedulerResumePending = false;
       notifyAccountSwitch(uin); // 通知各模块清账号相关的内存缓存（群名、Jev 分数、历史补齐时点…）
-      ensureDailyBackup(uin);
+      ensureDailyBackup(accountDbPath(uin));
       console.log('[accounts] 已挂载当前登录账号的数据库');
       resumeScheduler(shouldResume);
     } catch (error) {
@@ -308,14 +395,16 @@ export type RestoreAccountBackupResult =
  * 用已验证的 SQLite 候选文件替换当前账号库。调用方必须把候选放在当前账号目录内，保证改名原子。
  * 切换前 checkpoint + 关闭句柄；原库永久保留为 pre-restore 快照。任何失败都恢复原库并重新挂载。
  */
-export function restoreCurrentAccountBackup(expectedEpoch: string, candidate: string): Promise<RestoreAccountBackupResult> {
+export function restoreCurrentAccountBackup(expectedEpoch: string, candidate: string, stopWechat: () => Promise<void> = async () => {}): Promise<RestoreAccountBackupResult> {
   // 挂库失败时 current 可能仍指向旧 A，而 blockedAccount 才是当前登录且需修复的 B。
   // 只使用控制面权威账号，避免“修复 B”误替换 A。
   const targetUin = accountControlUin();
-  if (targetUin === null || switching || accountEpoch() !== expectedEpoch) {
+  const targetDatabase = currentBackupDatabase();
+  const targetSpace = currentDataSpace();
+  if (targetDatabase === null || switching || accountEpoch() !== expectedEpoch) {
     return Promise.resolve({ status: 'stale' });
   }
-  const accountDir = join(accountsDir, targetUin);
+  const accountDir = dirname(targetDatabase);
   const resolvedCandidate = resolve(candidate);
   if (dirname(resolvedCandidate) !== resolve(accountDir) || !existsSync(resolvedCandidate)) {
     return Promise.reject(new Error('恢复候选文件不在当前账号目录'));
@@ -323,15 +412,24 @@ export function restoreCurrentAccountBackup(expectedEpoch: string, candidate: st
   validateBackupDatabase(resolvedCandidate);
 
   return enqueueAccountTransition<RestoreAccountBackupResult>(async () => {
-    if (accountControlUin() !== targetUin || accountEpoch() !== expectedEpoch) return { status: 'stale' };
+    const matches = () => accountEpoch() === expectedEpoch && currentDataSpace() === targetSpace && currentBackupDatabase() === targetDatabase;
+    if (!matches()) return { status: 'stale' };
     const { quiesceScheduler, resumeScheduler } = await import('./pipeline/scheduler.js');
     const wasRunning = await quiesceScheduler();
     const shouldResume = wasRunning || schedulerResumePending;
-    const database = accountDbPath(targetUin);
-    const safetyDir = backupsDir(targetUin);
-    mkdirSync(safetyDir, { recursive: true });
+    try {
+      await stopWechat();
+      if (!matches()) { resumeScheduler(shouldResume); return { status: 'stale' }; }
+    } catch (error) { resumeScheduler(shouldResume); throw error; }
+    const database = targetDatabase;
+    const safetyDir = backupsDir(database);
+    try { mkdirSync(safetyDir, { recursive: true }); }
+    catch (error) { resumeScheduler(shouldResume); throw error; }
     const safety = join(safetyDir, `pre-restore-${new Date().toISOString().replace(/[:.]/g, '-')}.db`);
     let candidateMoved = false;
+    const receipts = join(accountDir, 'wechat-receipts');
+    const parkedReceipts = safety + '-wechat-receipts';
+    let receiptsMoved = false;
     try {
       // 正常恢复时这是目标库；挂库失败时可能是 fallback/旧账号库。
       // 只做 checkpoint+关句柄，后面的文件操作始终限定到 targetUin 目录。
@@ -343,15 +441,25 @@ export function restoreCurrentAccountBackup(expectedEpoch: string, candidate: st
         const source = database + suffix;
         if (existsSync(source)) renameSync(source, safety + suffix);
       }
+      if (workspaceController && existsSync(receipts)) { renameSync(receipts, parkedReceipts); receiptsMoved = true; }
       renameSync(resolvedCandidate, database);
       candidateMoved = true;
       openDb(database); // 允许旧 schema 在恢复时走正常迁移
+      if (workspaceController) {
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          db.exec("DELETE FROM kv WHERE key LIKE 'wechat_selection_v1:%'");
+          db.exec("UPDATE groups SET enabled=0 WHERE adapter='wechat'");
+          db.exec('COMMIT');
+        } catch (error) { db.exec('ROLLBACK'); throw error; }
+      }
+      accessEpoch++;
       current = targetUin;
       accessBlocked = false;
       blockedAccount = null;
       schedulerResumePending = false;
       notifyAccountSwitch(targetUin);
-      ensureDailyBackup(targetUin);
+      ensureDailyBackup(database);
       resumeScheduler(shouldResume);
       return { status: 'restored', safetyBackup: safety };
     } catch (error) {
@@ -366,7 +474,9 @@ export function restoreCurrentAccountBackup(expectedEpoch: string, candidate: st
             renameSync(safety + suffix, database + suffix);
           }
         }
+        if (receiptsMoved) renameSync(parkedReceipts, receipts);
         openDb(database);
+        accessEpoch++;
         current = targetUin;
         accessBlocked = false;
         blockedAccount = null;
@@ -414,6 +524,7 @@ async function closeCurrentAccountNow(): Promise<void> {
 }
 
 export function closeCurrentAccount(): Promise<void> {
+  if (workspaceController) return workspaceController.logout('qq', accountEpoch());
   if (queuedTransitions === 0 && current === null && db?.isOpen && !accessBlocked) return Promise.resolve();
   return enqueueAccountTransition(closeCurrentAccountNow);
 }
@@ -423,6 +534,7 @@ export function closeCurrentAccount(): Promise<void> {
  * target 传 null，避免把磁盘中陈旧账号误当成当前会话的破坏性操作目标。
  */
 export function failAccountSession(target: string | null = null): Promise<void> {
+  if (workspaceController) return workspaceController.logout('qq', accountEpoch());
   return enqueueAccountTransition(async () => {
     try {
       await closeCurrentAccountNow();
@@ -441,6 +553,7 @@ export function failAccountSession(target: string | null = null): Promise<void> 
  * 否则“退出并删除 B”会误删仍留在 current 中的 A。
  */
 export function accountControlUin(): string | null {
+  if (workspaceController && !accessBlocked) return workspaceController.controlQq();
   return accessBlocked ? blockedAccount : current;
 }
 
@@ -469,6 +582,15 @@ export function logoutAccountData(opts: {
   const { expectedEpoch, expectedUin, sessionUin, erase, onAccepted, clearSession } = opts;
   if (!isValidUin(expectedUin) || switching || accountEpoch() !== expectedEpoch || sessionUin !== expectedUin) {
     return Promise.resolve('stale');
+  }
+  if (workspaceController) {
+    if (erase) return Promise.reject(new WorkspaceError('WORKSPACE_DELETE_SEPARATE'));
+    if (accountControlUin() !== expectedUin) return Promise.resolve('stale');
+    return workspaceController.logout('qq', expectedEpoch, onAccepted, clearSession)
+      .then(() => 'logged_out' as const).catch((error) => {
+        if (accessBlocked) blockedAccount = expectedUin;
+        throw error;
+      });
   }
   // 非破坏性退出可以清理一个仅残留在 settings 的会话；擦除必须证明目录属于当前权威账号。
   if (erase && accountControlUin() !== expectedUin) return Promise.resolve('stale');
@@ -528,6 +650,7 @@ export function listAccounts(): AccountInfo[] {
 
 /** 删除某账号的全部数据（连库一起）。删当前登录账号会先切回无账号库。 */
 export function deleteAccountData(uin: string): Promise<boolean> {
+  if (workspaceController) return Promise.reject(new WorkspaceError('WORKSPACE_DELETE_SEPARATE'));
   if (!isValidUin(uin)) return Promise.resolve(false);
   return enqueueAccountTransition(async () => {
     const dir = join(accountsDir, uin);
@@ -543,7 +666,7 @@ export function deleteAccountData(uin: string): Promise<boolean> {
   });
 }
 
-export type DeleteInactiveAccountResult = 'deleted' | 'not_found' | 'active';
+export type DeleteInactiveAccountResult = 'deleted' | 'not_found' | 'active' | 'space_owned';
 
 /**
  * 账号管理页专用：只删除与当前 NapCat 会话无关的账号。
@@ -551,6 +674,7 @@ export type DeleteInactiveAccountResult = 'deleted' | 'not_found' | 'active';
  * 内部的“退出并删除本号数据”继续调用 deleteAccountData，只有它可以删当前号。
  */
 export function deleteInactiveAccountData(uin: string): Promise<DeleteInactiveAccountResult> {
+  if (workspaceController) return Promise.resolve('space_owned');
   if (!isValidUin(uin)) return Promise.resolve('not_found');
   return enqueueAccountTransition(async () => {
     if (current === uin || getUin() === uin) return 'active';
@@ -607,11 +731,106 @@ export async function initAccounts(opts?: {
   accountsDir?: string;
   settingsDir?: string;
   fallbackDb?: string;
+  workspace?: {
+    automaticWorkspace?: boolean;
+    registryFile?: string;
+    spacesDir?: string;
+    verifyIdentity(identity: PlatformIdentity): boolean;
+    revalidateIdentity?(identity: PlatformIdentity): Promise<boolean>;
+    stopCollectors(): void;
+    wechatCapability?(): WechatCapability;
+    restartCollectors(): void;
+  };
 }): Promise<void> {
   if (opts?.accountsDir !== undefined) accountsDir = opts.accountsDir;
   if (opts?.fallbackDb !== undefined) fallbackDb = opts.fallbackDb;
+  else if (opts?.workspace) {
+    // Never reuse data/classrep.db for the workspace-mode fallback: the legacy
+    // migration would mistake it for a QQ-owned old DB on the next restart.
+    fallbackDb = join(opts.dataDir ?? DATA_DIR, 'workspace-fallback.db');
+  }
   const { moved, target } = migrateLegacyDb(opts);
-  if (moved && target !== null) console.log('[accounts] 旧库迁移完成');
+  if (moved && target !== null) console.log(`[accounts] 旧库已迁移 → ${target}`);
+  if (opts?.workspace) {
+    const root = opts.dataDir ?? DATA_DIR;
+    mkdirSync(root, { recursive: true });
+    const registry = new WorkspaceRegistry(opts.workspace.registryFile ?? join(root, 'local.workspace-registry.sqlite3'));
+    // Only directory/file metadata is enumerated; old account DBs stay in place.
+    try {
+      const importLegacy = opts.workspace.automaticWorkspace === false || registry.list().length === 0;
+      for (const account of importLegacy ? listAccounts() : []) {
+        if (opts.workspace.automaticWorkspace === false || !registry.find({ platform: 'qq', account_id: account.uin })) {
+          registry.registerLegacyQq(account.uin, `QQ ${account.uin} 的空间`);
+        }
+      }
+      const runtimeOptions = opts.workspace;
+      const spaces = runtimeOptions.spacesDir ?? join(root, 'spaces');
+      workspaceSpacesDir = spaces;
+      if (runtimeOptions.automaticWorkspace !== false) {
+        migrateToSingleton(registry, { spaces, accounts: accountsDir }, join(root, 'backups'));
+      }
+      const controller = new WorkspaceController(registry, {
+        automaticWorkspace: runtimeOptions.automaticWorkspace !== false,
+        wechatCapability: runtimeOptions.wechatCapability,
+        epoch: accountEpoch, verify: runtimeOptions.verifyIdentity,
+        revalidate: runtimeOptions.revalidateIdentity,
+        stopCollectors: runtimeOptions.stopCollectors, restartCollectors: runtimeOptions.restartCollectors,
+        transition: (work, onQueued) => enqueueAccountTransition(async () => {
+          const { quiesceScheduler, resumeScheduler } = await import('./pipeline/scheduler.js');
+          const wasRunning = await quiesceScheduler();
+          const shouldResume = wasRunning || schedulerResumePending;
+          try {
+            await work();
+            accessBlocked = false;
+            blockedAccount = null;
+            schedulerResumePending = false;
+            if (!controller.isLocked()) resumeScheduler(shouldResume);
+            else schedulerResumePending = shouldResume;
+          } catch (error) {
+            const validationOnly = error instanceof WorkspaceError && [
+              'WORKSPACE_REQUEST_STALE', 'WORKSPACE_PLATFORM_ALREADY_BOUND',
+              'WORKSPACE_CHOICE_INVALID', 'WORKSPACE_NAME_INVALID', 'WORKSPACE_LOGIN_NOT_VERIFIED',
+            ].includes(error.message);
+            if (!validationOnly) {
+              accessBlocked = true;
+              blockedAccount = controller.controlQq();
+              accessEpoch++;
+            }
+            schedulerResumePending = shouldResume;
+            if (validationOnly && !controller.isLocked()) resumeScheduler(shouldResume);
+            throw error;
+          }
+        }, onQueued),
+        mount: (space) => {
+          if (space && controller.currentSpaceId() === space.space_id && db?.isOpen && !accessBlocked) return;
+          openDb(space ? registry.businessDbPath(space.space_id, { spaces, accounts: accountsDir }) : fallbackDb);
+        },
+        changed: () => {
+          current = controller.currentQq();
+          accessEpoch++;
+          if (controller.isLocked()) pauseCleanup();
+          notifyAccountSwitch(current);
+          const database = currentBackupDatabase();
+          if (database) ensureDailyBackup(database);
+        },
+      });
+      workspaceRegistry = registry;
+      workspaceController = controller;
+      // Remembered QQ settings are a reconnect hint, never login proof.
+      openDb(fallbackDb);
+      current = null;
+      accessBlocked = false;
+      blockedAccount = null;
+      schedulerResumePending = false;
+      return;
+    } catch (error) {
+      registry.close();
+      workspaceController = undefined;
+      workspaceRegistry = undefined;
+      throw error;
+    }
+  }
+
   const saved = getUin(opts?.settingsDir ?? opts?.dataDir);
   if (saved !== undefined) {
     try {

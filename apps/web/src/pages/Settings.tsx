@@ -3,7 +3,7 @@
 // 「待办」：勾选待办时是否弹确认（对应待办弹窗里的「下次不再提醒」，存在本机）。
 // 「回收站」：最近 30 天取消的事件、群里改期前的旧安排，逐条恢复（TrashSection）。
 import { useCallback, useState } from 'react';
-import { clearMemory, deleteMemoryRule, getMemory, setMemoryEnabled } from '../api/client';
+import { clearMemory, deleteMemoryRule, getMemory, resetWorkspaceData, setMemoryEnabled } from '../api/client';
 import AiSettingsCard from '../components/AiSettingsCard';
 import ConfirmDialog from '../components/ConfirmDialog';
 import LanSection from '../components/LanSection';
@@ -21,6 +21,8 @@ export default function Settings() {
   const toast = useToast();
   const [toggling, setToggling] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [confirmDone, setConfirmDone] = useState(() => readFlag(SKIP_DONE_CONFIRM_KEY) !== '1');
@@ -71,6 +73,20 @@ export default function Settings() {
       toastError(toast, e);
     } finally {
       setClearing(false);
+    }
+  }
+
+  async function onResetData() {
+    setResetting(true);
+    try {
+      await resetWorkspaceData();
+      setConfirmReset(false);
+      toast('当前空间数据已清空');
+      window.location.reload();
+    } catch (e) {
+      toastError(toast, e);
+    } finally {
+      setResetting(false);
     }
   }
 
@@ -234,6 +250,19 @@ export default function Settings() {
       )}
 
       <TrashSection />
+
+      <h2 className="mt-10 text-lg font-semibold text-slate-900">数据管理</h2>
+      <p className="mt-1 text-sm text-slate-500">测试重置当前空间的数据，账号绑定与 AI 配置会保留。</p>
+      <button type="button" onClick={() => setConfirmReset(true)}
+        className="mt-3 rounded-lg border border-rose-200 px-3 py-2 text-sm font-medium text-rose-600 hover:bg-rose-50">
+        清空数据库
+      </button>
+
+      <ConfirmDialog open={confirmReset} title="清空当前空间数据库？" confirmText="确认清空"
+        danger focusCancel busy={resetting} onConfirm={() => void onResetData()}
+        onCancel={() => setConfirmReset(false)}>
+        日程、消息、课表、待办、长期记忆、群选择和微信采集记录会永久删除。账号绑定与 AI 配置保留。清空后需重新选择微信群并启动采集；旧消息需要手动补拉。
+      </ConfirmDialog>
 
       <ConfirmDialog
         open={confirmClear}

@@ -67,6 +67,7 @@ export function registerSetupRoutes(app: Hono): void {
     const uin = c.req.param('uin');
     try {
       const result = await deleteInactiveAccountData(uin);
+      if (result === 'space_owned') return c.json({ error: '账号数据已归属课代表空间，请等待独立的空间数据管理入口' }, 409);
       if (result === 'active') {
         return c.json({ error: '当前 NapCat 登录账号不能直接删除，请使用“退出并删除本号数据”' }, 409);
       }

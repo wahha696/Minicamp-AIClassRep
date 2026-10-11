@@ -12,6 +12,13 @@ const status = (state: ConnectState, over: Partial<ConnectStatusDTO> = {}): Conn
   state, since: 0, first_run: false, account_epoch: 'none:1', ...over,
 });
 
+it('未完成账号连接显示连接入口，不要求选择空间；连接页不重复提示', () => {
+  const pending = status('reconnecting', { workspace: { enabled: true, current: null, wechat_available: false,
+    pending: [{ request_id: 'synthetic', platform: 'qq', account_id: '10001', kind: 'choose', switch_required: false }] } });
+  expect(bannerFor(pending, '/')).toMatchObject({ kind: 'not_connected', linkTo: '/connect', linkText: '查看连接' });
+  expect(bannerFor(pending, '/connect')).toBeNull();
+});
+
 describe('状态灯', () => {
   it('未启用快判：前三个绿，快判灰色', () => {
     const l = lightsFromHealth(health());
@@ -47,6 +54,7 @@ describe('状态灯', () => {
     expect(l[0].tip).toBe('QQ 连接：你的 QQ 在另一台电脑登录了，采集已暂停');
     expect(l[2].tip).toBe('AI：未配置');
     expect(lightsFromHealth(health({ llm: 'error' }))[2].color).toBe('red');
+    expect(lightsFromHealth(health({ llm: 'error' }))[2].tip).toContain('最近一次 AI 整理失败');
   });
 
   it('读不到 /health → 除快判外全红', () => {
@@ -76,7 +84,7 @@ describe('连接黄条', () => {
 
   it('kicked：文案 + 「重新连接」', () => {
     expect(bannerFor(status('kicked'), '/week')).toMatchObject({
-      text: '你的 QQ 在另一台电脑登录了，采集已暂停', action: 'restart', actionText: '重新连接',
+      text: '你的 QQ 在另一台电脑登录了，QQ 采集已暂停', action: 'restart', actionText: '重新连接',
     });
   });
 
@@ -114,8 +122,9 @@ describe('路由守卫', () => {
 });
 
 describe('错误文案', () => {
-  it('403 → 请在电脑上操作；其他用后端 error 字段', () => {
-    expect(errorText(new ApiError('禁止', 403))).toBe('请在电脑上操作');
+  it('保留 403 的具体原因，不将演示关闭或跨站拒绝误报为手机只读', () => {
+    expect(errorText(new ApiError('演示模式已关闭', 403))).toBe('演示模式已关闭');
+    expect(errorText(new ApiError('局域网访问只读', 403))).toBe('局域网访问只读');
     expect(errorText(new ApiError('QQ 未连接', 409))).toBe('QQ 未连接');
     expect(errorText('x')).toBe('操作失败，请重试');
   });

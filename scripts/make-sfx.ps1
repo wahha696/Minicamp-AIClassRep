@@ -61,11 +61,11 @@ Get-ChildItem $nap -Filter '*.log' -ErrorAction SilentlyContinue | Remove-Item -
 
 # 3) 注入脚本（ASCII-only 源文件在本目录 sfx-assets/，避免编码问题）
 #    布局：launch-install.vbs / install.ps1 放 payload 根（SFX 解压根目录，供 ExecuteFile 调用）；
-#          start-hidden.vbs / stop-server.ps1 / stop.bat 放 ClassRep\（随程序安装，供日常使用）
+#          stop-server.ps1 / stop.bat 放 ClassRep\（随程序安装）；日常启动用 ClassRep\启动.bat（可见窗口）
 $assets = Join-Path $PSScriptRoot 'sfx-assets'
 Copy-Item (Join-Path $assets 'launch-install.vbs') $payload -Force
 Copy-Item (Join-Path $assets 'install.ps1')    $payload -Force
-foreach ($f in 'start-hidden.vbs','stop-server.ps1','stop.bat') {
+foreach ($f in 'stop-server.ps1','stop.bat') {
     Copy-Item (Join-Path $assets $f) (Join-Path $payload 'ClassRep') -Force
 }
 

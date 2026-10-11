@@ -20,7 +20,7 @@ export type EventEditableField =
 export type Level = 1 | 2 | 3 | 4;
 export type ConnectState =
   | 'qq_conflict' | 'error' | 'kicked' | 'online' | 'waiting_qr' | 'reconnecting' | 'starting';
-export type MessageSource = 'onebot' | 'history' | 'demo' | 'import' | 'forward';
+export type MessageSource = 'onebot' | 'history' | 'demo' | 'import' | 'forward' | 'wechat';
 
 /** 所有来源最终都转成它再入库 */
 export interface Message {
@@ -55,6 +55,9 @@ export interface EventDTO {
 }
 
 export interface SourceMessageDTO {
+  group_id?: string;
+  group_name?: string;
+  platform?: 'qq' | 'wechat' | 'demo' | 'import' | 'unknown';
   message_id: string;
   sender_name: string;
   text: string;
@@ -119,18 +122,44 @@ export interface TrashItemDTO {
 }
 
 export interface TodayDTO {
+  overdue?: EventDTO[];
   date: string;         // 'YYYY-MM-DD'（Asia/Shanghai）
   summary: string;      // 如 "今天 4 件事，最急的是 14:00 高数小测"；没有事件时 "今天没有待办，轻松一天"
   events: EventDTO[];
+}
+
+export interface SyncGroupStatusDTO {
+  group_id: string;
+  name: string;
+  last_sync_at: number;
+  oldest_at: number | null;
+  complete: number;
+  reason: string;
+}
+
+export type ProcessingFailureReason = 'unconfigured' | 'network' | 'authentication' | 'rate_limit'
+  | 'invalid_output' | 'truncated' | 'storage' | 'processing';
+
+export interface GroupProcessingFailureDTO {
+  pending_count: number;
+  failed_attempts: number;
+  reason: ProcessingFailureReason;
+  paused: boolean;
+  next_retry_at: number | null;
+  last_failed_at: number;
+  state_saved?: boolean;
 }
 
 export interface GroupDTO {
   group_id: string;
   name: string;
   enabled: boolean;
+  platform?: 'qq' | 'wechat' | 'demo' | 'import' | 'unknown';
+  collecting?: boolean;
   message_count: number;
   event_count: number;
   course_name: string | null; // 用户指定的对应课程名；null = AI 按群名猜
+  processing_failure?: GroupProcessingFailureDTO | null;
 }
 
 export interface TodoDTO {
@@ -172,6 +201,10 @@ export interface DesktopQQStatusDTO {
 }
 
 export interface ConnectStatusDTO {
+  wechat?: 'idle' | 'opening' | 'collecting' | 'error';
+  access?: { readonly: boolean };
+  demo_available?: boolean;
+  workspace?: import('../../../../shared/workspaces').WorkspaceStatus;
   desktop_qq?: DesktopQQStatusDTO;
   state: ConnectState;
   /** 当前账号库租约；前端业务读写都带回，换号后旧页面请求会被后端拒绝。 */
@@ -232,6 +265,7 @@ export interface PipelineStats {
 }
 
 export interface HealthDTO extends PipelineStats {
+  wechat?: 'idle' | 'opening' | 'collecting' | 'error';
   status: 'ok' | 'degraded';
   db: 'ok' | 'error';
   qq: ConnectState;
@@ -262,7 +296,15 @@ export interface ScenarioDTO {
 }
 
 /** GET/PUT /api/settings/llm：连接页「AI 接入」卡片。key 只返回打码后的提示，不回传明文 */
-export type LlmProvider = 'deepseek';
+export type LlmProvider = 'deepseek' | 'custom';
+
+/** 大模型接入候选：deepseek 只要 key；custom 要 base_url，模型可留空（检查时自动选第一个） */
+export interface LlmInputDTO {
+  provider: LlmProvider;
+  api_key?: string;
+  base_url?: string;
+  model?: string;
+}
 
 export interface LlmSettingsDTO {
   provider: LlmProvider;
@@ -282,13 +324,15 @@ export interface AiKeyStatusDTO {
 }
 
 export interface AiSettingsDTO {
-  deepseek: AiKeyStatusDTO & { provider: LlmProvider; protection?: 'dpapi' | 'plain' | 'none' };
+  /** 字段名沿用 deepseek：实际是当前大模型配置 */
+  deepseek: AiKeyStatusDTO & { provider: LlmProvider; protection?: 'dpapi' | 'plain' | 'none'; base_url?: string; model?: string };
   jev: AiKeyStatusDTO & { enabled: boolean; mode: 'jev' | 'local' | 'dual'; local_configured: boolean };
 }
 
 /** POST /api/settings/ai/test 的返回：target 省略时两个都测 */
 export interface AiTestResultDTO {
-  deepseek?: { ok: boolean; error?: string };
+  /** model：自定义服务没填模型时自动选中的模型 */
+  deepseek?: { ok: boolean; error?: string; model?: string };
   jev?: { ok: boolean; error?: string };
 }
 

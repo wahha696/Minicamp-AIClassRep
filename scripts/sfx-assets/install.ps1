@@ -34,20 +34,19 @@ try {
     & "$env:SystemRoot\System32\Robocopy.exe" $src $dest /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "robocopy failed with code $LASTEXITCODE" }
 
-    # 3) desktop shortcut -> hidden launcher
+    # 3) desktop shortcut -> visible launcher (closing its window quits ClassRep)
+    $launcher = Get-ChildItem -LiteralPath $dest -Filter '*.bat' | Where-Object { $_.Name -notmatch '^stop' } | Select-Object -First 1
+    if ($null -eq $launcher) { throw 'launcher .bat not found in install dir' }
     $desktop = [Environment]::GetFolderPath('Desktop')
     $ws = New-Object -ComObject WScript.Shell
     $lnk = $ws.CreateShortcut((Join-Path $desktop 'ClassRep.lnk'))
-    $lnk.TargetPath = Join-Path $env:SystemRoot 'System32\wscript.exe'
-    $lnk.Arguments = '"' + (Join-Path $dest 'start-hidden.vbs') + '"'
+    $lnk.TargetPath = $launcher.FullName
     $lnk.WorkingDirectory = $dest
     $lnk.IconLocation = "$env:SystemRoot\System32\shell32.dll,137"
     $lnk.Save()
 
-    # 4) start server hidden; the server itself opens the browser
-    Start-Process -FilePath (Join-Path $dest 'runtime\node.exe') `
-        -ArgumentList ('"' + (Join-Path $dest 'app\server\dist\index.js') + '"') `
-        -WorkingDirectory $dest -WindowStyle Hidden | Out-Null
+    # 4) start in a visible console window; the server itself opens the browser
+    Start-Process -FilePath $launcher.FullName -WorkingDirectory $dest | Out-Null
 }
 catch {
     Fail $_.Exception.Message

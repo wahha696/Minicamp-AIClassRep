@@ -1,6 +1,5 @@
 // 一键启动 / 重启（开发用）
-//   node scripts/dev.mjs              前台模式：黑窗口里看日志，关窗口即退出（scripts\dev-start.bat）
-//   node scripts/dev.mjs --background 后台模式：不显示窗口，网页全关掉后自动退出（桌面快捷方式走这个）
+//   node scripts/dev.mjs   命令窗口里看日志，关窗口 / Ctrl+C 即退出（scripts\dev-start.bat）
 // 步骤：0) 在 main 分支上就先从 GitHub 拉最新代码（依赖变了顺便装）  1) 结束占着 8000~8010 端口的旧后端
 //       2) 前端产物有更新才重新打包（增量缓存）  3) 启动后端并自动打开浏览器
 // 加 --no-update 跳过第 0 步；不在 main 分支（正在开发别的分支）或没网时也会跳过，照常启动。
@@ -10,8 +9,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   findHealthyPort,
+  findRunningServer,
   killOldBackends,
-  openBackgroundLog,
   openBrowser,
   startServerChild,
 } from './lib/start-server.mjs';
@@ -19,12 +18,8 @@ import { webBuildFresh } from './lib/build-cache.mjs';
 import { corepackEnv, resolvePnpm } from './lib/pnpm.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const background = process.argv.includes('--background');
 const noUpdate = process.argv.includes('--no-update');
-
-// 后台模式没有窗口，输出都写进日志文件，出问题时看 data/logs/background.log
-const bgLog = background ? openBackgroundLog(ROOT, !noUpdate) : null; // 更新后重跑时接着写
-const log = bgLog ? bgLog.log : ((msg) => console.log(msg));
+const log = (msg) => console.log(msg);
 
 // pnpm 解析（D02，和 bootstrap.mjs 同一套）：PATH 里的坏 shim 会探活失败自动跳过
 // → corepack 装到 .corepack/bin → 再不行自动下载 pnpm dist 到 .pnpm-dist/ 用 node 跑。
@@ -35,7 +30,7 @@ function runPnpm(args) {
   if (pnpm === null) return false;
   const r = spawnSync(pnpm.cmd, [...pnpm.args, ...args], {
     cwd: ROOT,
-    stdio: bgLog ? bgLog.stdio : 'inherit',
+    stdio: 'inherit',
     shell: pnpm.shell,
     windowsHide: true,
     env: { ...process.env, ...corepackEnv() },
@@ -81,7 +76,13 @@ function updateToLatest() {
 }
 
 async function start() {
-  log(`[1/3] 关闭旧的 ClassRep 后端...${background ? '（后台模式）' : ''}`);
+  const running = await findRunningServer(ROOT);
+  if (running !== null) {
+    openBrowser(`http://localhost:${running}`);
+    log(`课代表已在 http://localhost:${running} 运行，已重新打开页面。若要应用后端更新，请关闭原启动窗口后再启动。`);
+    return;
+  }
+  log('[1/3] 检查端口占用...');
   killOldBackends({ log });
 
   log('[2/3] 检查前端产物...');
@@ -89,7 +90,6 @@ async function start() {
     log('    重新打包前端...');
     if (!runPnpm(['--filter', 'web', 'build'])) {
       log('\n前端打包失败，请把上面的报错发给开发同学。');
-      if (background) openBrowser(join(ROOT, 'data', 'logs', 'background.log'));
       process.exit(1);
     }
   } else {
@@ -97,17 +97,15 @@ async function start() {
   }
 
   log('[3/3] 启动后端，几秒后自动打开浏览器...');
-  if (!background) log('（关闭此窗口 / 按 Ctrl+C 即退出）');
-  // 后台模式：直接 node 跑 tsx（不经 pnpm / cmd）不冒黑窗口；AUTO_EXIT=1 网页全关后自退
-  const { child: server, logFile } = startServerChild({ root: ROOT, background, watch: !background, bg: bgLog });
-  void logFile;
+  log('（关闭此窗口 / 按 Ctrl+C 即退出）');
+  const { child: server, launchId } = startServerChild({ root: ROOT, watch: true });
 
-  const port = await findHealthyPort(60_000);
+  const port = await findHealthyPort(60_000, launchId);
   if (port !== null) {
     openBrowser(`http://localhost:${port}`);
     log(`\n已打开 http://localhost:${port}\n`);
   } else {
-    log('后端 60 秒内没有就绪，可稍后手动打开 http://localhost:8000');
+    log('本次后端 60 秒内没有就绪，请查看启动日志中的地址或错误。');
   }
 
   server.on('exit', (code) => {
@@ -121,8 +119,7 @@ if (!noUpdate && updateToLatest()) {
   log('    启动脚本也更新了，用新版重新启动...');
   const again = spawn(process.execPath, [fileURLToPath(import.meta.url), ...process.argv.slice(2), '--no-update'], {
     cwd: ROOT,
-    stdio: background ? 'ignore' : 'inherit',
-    windowsHide: true,
+    stdio: 'inherit',
   });
   again.on('exit', (code) => process.exit(code ?? 0));
 } else {

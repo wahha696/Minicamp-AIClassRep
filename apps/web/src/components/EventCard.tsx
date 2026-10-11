@@ -1,5 +1,5 @@
 // 事件卡片（D2 今日页用，D3 本周页可复用）：底色与左侧色条按「类型色相 × 危机等级深浅」。
-// pending_confirm → 「待确认」小标签；done → 整张置灰 + 标题划线；有变更记录 →「已按最新通知更新」；
+// pending_confirm → 「待确认」小标签；done → 整张置灰 + 标题划线；版本增加 →「已更新」；
 // 等级被手动锁定 → 图钉图标。
 import type { EventDTO } from '../api/types';
 import { isUpdated, LEVEL_LABEL, levelStyle, typeMeta } from '../lib/eventMeta';
@@ -46,7 +46,7 @@ export default function EventCard({ event, onClick }: { event: EventDTO; onClick
             </span>
           )}
           {isUpdated(event) && (
-            <span className="rounded bg-sky-50 px-1.5 py-0.5 text-xs text-sky-700">已按最新通知更新</span>
+            <span className="rounded bg-sky-50 px-1.5 py-0.5 text-xs text-sky-700">已更新</span>
           )}
           {done && <span className="text-xs text-slate-500">已完成</span>}
           <span className={`ml-auto flex items-center gap-0.5 text-xs font-medium ${lv.text}`}>

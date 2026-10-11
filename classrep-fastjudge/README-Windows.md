@@ -3,7 +3,7 @@
 把整个 `classrep-fastjudge` 目录放到 ClassRep 仓库根下，例如：
 
 ```
-E:\AIClassRep\classrep-fastjudge\
+<仓库根目录>\classrep-fastjudge\
   src\infer.py
   models\local-jev-v1.joblib
   requirements.txt
@@ -16,7 +16,7 @@ E:\AIClassRep\classrep-fastjudge\
 在 PowerShell：
 
 ```powershell
-cd E:\AIClassRep\classrep-fastjudge
+cd <仓库根目录>\classrep-fastjudge
 py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -U pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt

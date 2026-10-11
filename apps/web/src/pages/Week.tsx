@@ -11,10 +11,12 @@ import WeekGrid, { CourseCard } from '../components/WeekGrid';
 import { expandTimetable, findConflicts, DAY } from '../../../../shared/timetable';
 import { usePolling } from '../hooks/usePolling';
 import { isUpdated, levelStyle, typeMeta } from '../lib/eventMeta';
-import { hhmm, weekdayDate } from '../lib/time';
+import { formatWhen, hhmm, weekdayDate } from '../lib/time';
 import { weekOf } from '../lib/timetable';
 import { groupByDay, thisMonday, weekRange, type WeekItem } from '../lib/week';
 import { groupBySlot } from '../lib/slots';
+import ReadStatus from '../components/ReadStatus';
+import { useAccess } from '../components/ConnectStatus';
 
 const WEEK_MS = 7 * 24 * 3_600_000;
 const MODE_KEY = 'weekMode';
@@ -61,7 +63,8 @@ function Item({ item, onClick }: { item: WeekItem; onClick: () => void }) {
               <span className="font-medium text-red-600">{hhmm(at)} 截止</span>
             </>
           ) : (
-            <span className="font-medium text-slate-600">{hhmm(at)}</span>
+            <span className="font-medium text-slate-600">{item.isContinuation && event.end_at !== null
+              ? `进行中 · 至 ${formatWhen(event.end_at)}` : hhmm(at)}</span>
           )}
           <span style={{ color: meta.color }}>{meta.label}</span>
           {event.status === 'pending_confirm' && (
@@ -83,8 +86,10 @@ function Item({ item, onClick }: { item: WeekItem; onClick: () => void }) {
 }
 
 export default function Week() {
+  const { readonly } = useAccess();
   // 当前查看那周的周一 0 点（上海时间）
   const [monday, setMonday] = useState(() => thisMonday());
+  const followCurrent = useRef(true);
   const [mode, setMode] = useState<Mode>(loadMode);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const timetable = usePolling(getTimetable, 60_000);
@@ -99,9 +104,10 @@ export default function Week() {
     return events;
   }, []);
 
-  const { error, loading: firstLoading, refresh } = usePolling(
+  const { error, loading: firstLoading, refresh, lastSuccessAt } = usePolling(
     useCallback(() => fetchWeek(monday), [fetchWeek, monday]),
     10_000,
+    monday,
   );
   // 翻周后立即拉新一周（usePolling 只在定时器到点时才用新的 fn），并预取相邻周
   useEffect(() => {
@@ -115,21 +121,18 @@ export default function Week() {
 
   // B16：跨过午夜时如果正在看「包含今天」的那一周，自动跟到新的一周（每分钟看一眼）
   useEffect(() => {
-    const t = setInterval(() => {
-      setMonday((m) => {
-        const { from, to } = weekRange(m);
-        const now = Date.now();
-        return from <= now && now < to ? thisMonday() : m;
-      });
-    }, 60_000);
-    return () => clearInterval(t);
+    const follow = () => { if (followCurrent.current) setMonday(thisMonday()); };
+    const t = setInterval(follow, 60_000);
+    const visible = () => { if (document.visibilityState === 'visible') follow(); };
+    document.addEventListener('visibilitychange', visible);
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', visible); };
   }, []);
 
   const data = cacheRef.current.get(monday);
-  const loading = firstLoading || data === undefined;
+  const loading = firstLoading || (data === undefined && !error);
   const days = useMemo(() => groupByDay(data ?? [], monday), [data, monday]);
   const { from, to } = weekRange(monday);
-  const total = days.reduce((n, d) => n + d.items.length, 0);
+  const total = new Set(days.flatMap((day) => day.items.map((item) => item.event.id))).size;
   const isThisWeek = monday === thisMonday();
 
   // 周数：有课表才显示「第 N 周」，否则只显示日期范围
@@ -144,7 +147,9 @@ export default function Week() {
   const courseNames = new Map([...courseOccurrences.map(o=>[o.id,o.course.name] as const),...(data??[]).map(e=>[`event-${e.id}`,e.title] as const)]);
 
   const closeDrawer = useCallback(() => setSelectedId(null), []);
-  const nav = (delta: number) => setMonday((m) => m + delta * WEEK_MS);
+  const nav = (delta: number) => setMonday((m) => {
+    const next = m + delta * WEEK_MS; followCurrent.current = next === thisMonday(); return next;
+  });
   const setModeAndSave = (m: Mode) => {
     setMode(m);
     saveMode(m);
@@ -162,7 +167,7 @@ export default function Week() {
             )}
           </h1>
           <p className="mt-1 text-sm text-slate-500">
-            {loading ? '正在读取本周日程…' : `这一周共 ${total} 件事`}
+            {loading ? '正在读取本周日程…' : data === undefined ? '暂时读不到本周日程' : `这一周共 ${total} 件事`}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -179,7 +184,7 @@ export default function Week() {
             {!isThisWeek && (
               <button
                 type="button"
-                onClick={() => setMonday(thisMonday())}
+                onClick={() => { followCurrent.current = true; setMonday(thisMonday()); }}
                 className="border-x border-slate-200 px-2.5 py-1.5 text-slate-600 hover:bg-slate-50"
               >
                 回到本周
@@ -220,16 +225,10 @@ export default function Week() {
         </div>
       </div>
 
-      {error && !data && (
-        <div className="mt-6 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">
-          {error.message}
-          <button type="button" onClick={() => void refresh()} className="ml-3 font-medium underline">
-            重试
-          </button>
-        </div>
-      )}
+      <ReadStatus error={error} cached={data !== undefined} lastSuccessAt={lastSuccessAt} onRetry={() => void refresh()} />
+      <ReadStatus error={timetable.error} cached={timetable.data !== undefined} lastSuccessAt={timetable.lastSuccessAt} onRetry={() => void timetable.refresh()} />
 
-      {mode === 'grid' && !hasCourses && !timetable.loading && (
+      {mode === 'grid' && !hasCourses && timetable.data !== undefined && !readonly && !timetable.loading && (
         <p className="mt-4 rounded-lg bg-sky-50 px-4 py-2.5 text-sm text-sky-800">
           导入课表后这里会显示你的课 →{' '}
           <Link to="/settings" className="font-medium underline underline-offset-2">

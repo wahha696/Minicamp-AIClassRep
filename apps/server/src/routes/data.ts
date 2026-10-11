@@ -8,6 +8,9 @@ import {
   accountControlUin,
   accountDbPath,
   currentAccount,
+  currentBackupDatabase,
+  accountDataState,
+  accountEpoch,
   restoreCurrentAccountBackup,
 } from '../accounts.js';
 import { createPortableBackup, MAX_BACKUP_BYTES, writeParsedBackup } from '../data-backup.js';
@@ -17,7 +20,7 @@ function downloadName(now = new Date()): string {
   return `ClassRep-backup-${now.toISOString().replace(/[-:]/g, '').slice(0, 13)}.classrep-backup`;
 }
 
-export function registerDataRoutes(app: Hono): void {
+export function registerDataRoutes(app: Hono, stopWechat: () => Promise<void> = async () => {}): void {
   app.get('/api/settings/diagnostics', (c) => {
     const report = `${JSON.stringify(createDiagnosticReport(), null, 2)}\n`;
     return c.body(report, 200, {
@@ -29,12 +32,12 @@ export function registerDataRoutes(app: Hono): void {
   });
 
   app.get('/api/settings/data', (c) => {
-    if (currentAccount() === null) return c.json({ error: '请先登录 QQ 再备份账号数据' }, 409);
+    if (accountDataState() !== 'ready' || !currentBackupDatabase()) return c.json({ error: '请先连接平台并打开空间再备份数据' }, 409);
     return c.json(accountBackupStatus());
   });
 
   app.get('/api/settings/data/backup', (c) => {
-    if (currentAccount() === null) return c.json({ error: '请先登录 QQ 再备份账号数据' }, 409);
+    if (accountDataState() !== 'ready' || !currentBackupDatabase()) return c.json({ error: '请先连接平台并打开空间再备份数据' }, 409);
     try {
       const backup = createPortableBackup();
       return c.body(new Uint8Array(backup), 200, {
@@ -54,8 +57,8 @@ export function registerDataRoutes(app: Hono): void {
     const epoch = c.req.header('X-ClassRep-Account-Epoch')?.trim() ?? '';
     // 数据库损坏/挂载失败时 currentAccount 可能为 null 或旧账号，
     // 恢复必须针对 fail-closed 控制面记住的真正目标账号。
-    const uin = accountControlUin();
-    if (uin === null || !accountControlContextMatches(epoch, uin)) {
+    const database = currentBackupDatabase();
+    if (!database || accountEpoch() !== epoch || accountDataState() === 'switching') {
       return c.json({ error: '账号已切换或正在切换，请刷新后重试' }, 409);
     }
     const declared = Number(c.req.header('content-length') ?? 0);
@@ -70,10 +73,11 @@ export function registerDataRoutes(app: Hono): void {
     }
     if (input.byteLength > MAX_BACKUP_BYTES) return c.json({ error: '备份文件超过 256 MB' }, 413);
 
-    const candidate = join(dirname(accountDbPath(uin)), `.restore-upload-${randomUUID()}.db`);
+    if (currentBackupDatabase() !== database || accountEpoch() !== epoch) return c.json({ error: '空间已切换，请重新选择备份文件' }, 409);
+    const candidate = join(dirname(database), `.restore-upload-${randomUUID()}.db`);
     try {
       writeParsedBackup(input, candidate);
-      const result = await restoreCurrentAccountBackup(epoch, candidate);
+      const result = await restoreCurrentAccountBackup(epoch, candidate, stopWechat);
       if (result.status === 'stale') return c.json({ error: '账号已切换，请重新选择备份文件' }, 409);
       return c.json({ ok: true, safety_backup_created: true });
     } catch (error) {

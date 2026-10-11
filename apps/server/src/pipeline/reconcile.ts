@@ -19,6 +19,7 @@ import {
 } from '../event-proposals.js';
 import type { EventStatus, EventType, Message } from '../types.js';
 import type { ActiveEventBrief, ExtractedEvent } from './extract.js';
+import { exactCrossPlatformTarget, messagePlatform } from './cross-platform.js';
 
 interface EventRow {
   id: number;
@@ -73,8 +74,10 @@ export function titleSimilarity(a: string, b: string): number {
 // ---------- SQL ----------
 
 const q = {
-  byId: () => db.prepare(`SELECT * FROM events WHERE id = ? AND group_id = ? AND ${LIVE_SQL}`),
-  sameType: () => db.prepare(`SELECT * FROM events WHERE group_id = ? AND type = ? AND ${LIVE_SQL}`),
+  byId: () => db.prepare(`SELECT * FROM events WHERE id = ? AND (group_id = ? OR EXISTS
+    (SELECT 1 FROM event_sources s WHERE s.event_id=events.id AND s.group_id=?)) AND ${LIVE_SQL}`),
+  sameType: () => db.prepare(`SELECT * FROM events WHERE (group_id = ? OR EXISTS
+    (SELECT 1 FROM event_sources s WHERE s.event_id=events.id AND s.group_id=?)) AND type = ? AND ${LIVE_SQL}`),
   insert: () =>
     db.prepare(
       `INSERT INTO events (group_id, type, title, description, start_at, end_at, deadline_at,
@@ -83,8 +86,8 @@ const q = {
     ),
   source: () =>
     db.prepare(
-      `INSERT OR IGNORE INTO event_sources (event_id, message_id, sender_name, text, sent_at)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT OR IGNORE INTO event_sources (event_id, message_id, sender_name, text, sent_at, group_id, group_name, platform)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ),
   history: () =>
     db.prepare(
@@ -93,35 +96,53 @@ const q = {
     ),
 };
 
-/** create 走模糊匹配、且新消息比目标事件的来源还早（历史补齐）时，两边的关键时间要在这个范围内才算同一件事 */
-const FUZZY_CREATE_TIME_TOLERANCE = 86400_000;
-
+/** New occurrences need compatible dates regardless of message arrival order.
+ * Updates/cancellations keep their explicit target and rescheduling semantics.
+ */
 const keyTime = (e: { start_at: number | null; deadline_at: number | null }) => e.start_at ?? e.deadline_at;
 
-function findTarget(groupId: string, ev: ExtractedEvent, byId: Map<string, Message>): EventRow | undefined {
+function createTimeCompatible(a: EventRow, b: ExtractedEvent): boolean {
+  const differs = (left: number | null, right: number | null) => left !== null && right !== null
+    && Math.floor((left + 8 * 3600_000) / 86400_000) !== Math.floor((right + 8 * 3600_000) / 86400_000);
+  return !differs(a.start_at, b.start_at) && !differs(a.deadline_at, b.deadline_at)
+    && !differs(keyTime(a), keyTime(b));
+}
+
+function originalCreateDates(row: EventRow): EventRow {
+  const original = { ...row }, found = new Set<string>();
+  const history = db.prepare('SELECT changed_fields FROM event_history WHERE event_id=? ORDER BY version,id').all(row.id);
+  for (const record of history) {
+    const changes = JSON.parse(String(record.changed_fields)) as Record<string, { from: unknown }>;
+    for (const field of ['start_at', 'deadline_at'] as const) {
+      if (found.has(field) || !Object.hasOwn(changes, field)) continue;
+      const value = changes[field]?.from;
+      if (value !== null && (typeof value !== 'number' || !Number.isSafeInteger(value))) throw new Error('RECONCILE_HISTORY_INVALID');
+      original[field] = value; found.add(field);
+    }
+  }
+  return original;
+}
+
+function createMatches(row: EventRow, ev: ExtractedEvent): boolean {
+  if (createTimeCompatible(row, ev)) return true;
+  // A retry of a previously consumed create after a real reschedule must not
+  // recreate its old occurrence. Compare the original dates as well as sources;
+  // source overlap alone would swallow two notices extracted from one message.
+  return hasAppliedSources(row.id, ev.source_message_ids) && createTimeCompatible(originalCreateDates(row), ev);
+}
+
+function findTarget(groupId: string, ev: ExtractedEvent): EventRow | undefined {
   if (ev.update_of != null) {
-    const row = q.byId().get(ev.update_of, groupId) as EventRow | undefined;
-    if (row) return row;
+    const row = q.byId().get(ev.update_of, groupId, groupId) as EventRow | undefined;
+    if (row && (ev.action !== 'create' || createMatches(row, ev))) return row;
   }
   if (!ev.title) return undefined;
-  // update_of 没给或无效：同群、同 type、还活着、标题足够像 → 视为同一件事。
-  // 例外：补拉回来的旧消息说「create」，而同名事件是更晚的消息建的、时间差超过 1 天 → 是另一件事
-  // （比如旧消息「周三开会」与新消息「周四开会」），不能合并，否则会把新事件的时间改回旧的。
-  const evTime = keyTime(ev);
+  // New notices on another date are separate occurrences, including newly
+  // arriving messages. Never require the new message to be older to protect it.
   let best: EventRow | undefined;
   let bestScore = FUZZY_THRESHOLD;
-  for (const row of q.sameType().all(groupId, ev.type) as unknown as EventRow[]) {
-    if (ev.action === 'create') {
-      const rowTime = keyTime(row);
-      if (
-        evTime !== null &&
-        rowTime !== null &&
-        Math.abs(evTime - rowTime) > FUZZY_CREATE_TIME_TOLERANCE &&
-        isStale(row.id, ev.source_message_ids, byId)
-      ) {
-        continue;
-      }
-    }
+  for (const row of q.sameType().all(groupId, groupId, ev.type) as unknown as EventRow[]) {
+    if (ev.action === 'create' && !createMatches(row, ev)) continue;
     const s = titleSimilarity(row.title, ev.title);
     if (s > bestScore) [best, bestScore] = [row, s];
   }
@@ -142,7 +163,9 @@ function addSources(eventId: number, ids: string[], byId: Map<string, Message>):
   const stmt = q.source();
   for (const id of ids) {
     const m = byId.get(id);
-    if (m) stmt.run(eventId, m.message_id, m.sender_name, m.text, m.sent_at);
+    if (m) {
+      stmt.run(eventId, m.message_id, m.sender_name, m.text, m.sent_at, m.group_id, m.group_name, messagePlatform(m));
+    }
   }
 }
 
@@ -201,7 +224,15 @@ function applyOne(groupId: string, ev: ExtractedEvent, byId: Map<string, Message
     hasGroupCreateProposalForEventSource(groupId, ev.update_of, ev.source_message_ids)
   ) return;
 
-  const target = findTarget(groupId, ev, byId);
+  const target = findTarget(groupId, ev);
+  if (!target) {
+    const crossPlatform = exactCrossPlatformTarget(groupId, ev, byId);
+    if (crossPlatform !== undefined) {
+      addSources(crossPlatform, ev.source_message_ids, byId);
+      db.prepare('UPDATE events SET updated_at=MAX(updated_at+1,?) WHERE id=?').run(now, crossPlatform);
+      return; // Preserve completion, cancellation and manual fields on the original.
+    }
+  }
   const createFingerprint = {
     type: ev.type,
     title: ev.title,
@@ -290,6 +321,16 @@ function applyOne(groupId: string, ev: ExtractedEvent, byId: Map<string, Message
       changes.level = { from: target.level, to: ev.level };
     }
     const proposed = { ...changes, ...lockedChanges };
+    const proposedStart = proposed.start_at?.to ?? target.start_at;
+    const proposedEnd = proposed.end_at?.to ?? target.end_at;
+    if (typeof proposedStart === 'number' && typeof proposedEnd === 'number' && proposedEnd <= proposedStart) {
+      throw new Error('AI 更新的结束时间必须晚于开始时间');
+    }
+    const appliedStart = changes.start_at?.to ?? target.start_at;
+    const appliedEnd = changes.end_at?.to ?? target.end_at;
+    if (typeof appliedStart === 'number' && typeof appliedEnd === 'number' && appliedEnd <= appliedStart) {
+      throw new Error('AI 更新与人工锁定时间冲突，结束时间必须晚于开始时间');
+    }
     // 低置信度的任何实际变化都保存成结构化提案；现值保持不动，等用户接受、拒绝或手动修正。
     if (ev.confidence < PENDING_BELOW && Object.keys(proposed).length > 0) {
       if (hasEventProposalForSource(target.id, 'update', ev.source_message_ids)) {
@@ -366,6 +407,9 @@ function applyOne(groupId: string, ev: ExtractedEvent, byId: Map<string, Message
     return;
   }
   const status: EventStatus = ev.confidence < PENDING_BELOW ? 'pending_confirm' : 'active';
+  if (ev.start_at !== null && ev.end_at !== null && ev.end_at <= ev.start_at) {
+    throw new Error('AI 新建事件的结束时间必须晚于开始时间');
+  }
   const { lastInsertRowid } = q.insert().run(
     groupId,
     ev.type,
@@ -407,11 +451,11 @@ export function listActiveEvents(groupId: string, now = Date.now()): ActiveEvent
   return db
     .prepare(
       `SELECT id, type, title, start_at, end_at, deadline_at, location, action_required, level FROM events
-       WHERE group_id = ? AND ${LIVE_SQL}
+       WHERE (group_id = ? OR EXISTS (SELECT 1 FROM event_sources s WHERE s.event_id=events.id AND s.group_id=?)) AND ${LIVE_SQL}
          AND COALESCE(end_at, start_at, deadline_at, updated_at) >= ?
        ORDER BY id`,
     )
-    .all(groupId, now - ACTIVE_WINDOW) as unknown as ActiveEventBrief[];
+    .all(groupId, groupId, now - ACTIVE_WINDOW) as unknown as ActiveEventBrief[];
 }
 
 /**
@@ -420,7 +464,7 @@ export function listActiveEvents(groupId: string, now = Date.now()): ActiveEvent
  */
 export function applyEvents(groupId: string, extracted: ExtractedEvent[], sourceMsgs: Message[]): void {
   if (extracted.length === 0) return;
-  const byId = new Map(sourceMsgs.map((m) => [m.message_id, m]));
+  const byId = new Map(sourceMsgs.filter(message => message.group_id === groupId).map((m) => [m.message_id, m]));
   const now = Date.now();
   db.exec('BEGIN');
   try {

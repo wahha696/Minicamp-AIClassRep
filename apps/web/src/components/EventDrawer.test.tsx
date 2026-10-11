@@ -10,6 +10,8 @@ const api = vi.hoisted(() => ({
   patchEvent: vi.fn(),
   resolveEventProposal: vi.fn(),
 }));
+const access = vi.hoisted(() => ({ readonly: false }));
+vi.mock('./ConnectStatus', () => ({ useAccess: () => access }));
 
 vi.mock('../api/client', () => ({
   ...api,
@@ -79,6 +81,7 @@ function renderDrawer(onChanged = vi.fn()) {
 }
 
 beforeEach(() => {
+  access.readonly = false;
   const detail = pendingDetail();
   api.getEvent.mockResolvedValue(detail);
   api.patchEvent.mockResolvedValue(detail);
@@ -90,6 +93,18 @@ beforeEach(() => {
     version: 4,
     pending_proposals: [],
   });
+});
+
+it('手机详情只读：提案确认与调级禁用，来源仍可展开', async () => {
+  access.readonly = true;
+  renderDrawer();
+  await screen.findByText('摄影社招新宣讲');
+  expect((screen.getByRole('button', { name: '接受修改' }) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByText('只读详情，修改请在电脑上操作')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: /查看来源/ }));
+  expect(screen.getAllByText(/招新宣讲可能改到/).length).toBeGreaterThan(0);
+  expect(api.patchEvent).not.toHaveBeenCalled();
+  expect(api.resolveEventProposal).not.toHaveBeenCalled();
 });
 
 afterEach(() => {

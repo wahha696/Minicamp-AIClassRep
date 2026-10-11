@@ -7,6 +7,7 @@ export interface WeekItem {
   event: EventDTO;
   at: number;          // 在这一天里显示/排序用的时间
   isDeadline: boolean; // 落位用的是截止时刻（含「只有截止时间」和「开始在本周外、截止在本周内」）
+  isContinuation?: true;
 }
 
 export interface WeekDay {
@@ -29,10 +30,8 @@ export function thisMonday(now = Date.now()): number {
 }
 
 /**
- * 每个事件只放进一天：有开始时间且落在本周内 → 按开始时间；否则按截止时间。
- * 两个时间都不在本周内（或都为空）的事件不显示；cancelled 不显示（与后端区间查询一致）。
- * isDeadline = 落位用的是 deadline_at（「开始在周外、截止在周内」也算 DDL，修复 FR-14 的标记漏标）。
- * 每天内按时间升序。
+ * Start/continuous days and deadline each remain visible, opening the same
+ * business event. Same-day nodes share one entry, preferring its deadline.
  */
 export function groupByDay(events: EventDTO[], monday: number, now = Date.now()): WeekDay[] {
   const days: WeekDay[] = Array.from({ length: WEEK_DAYS }, (_, i) => {
@@ -40,17 +39,18 @@ export function groupByDay(events: EventDTO[], monday: number, now = Date.now())
     const today = shanghaiDayRange(0, now);
     return { from, to: from + 24 * 3_600_000, isToday: from === today.from, items: [] };
   });
-  const { from, to } = weekRange(monday);
-  const inWeek = (ts: number | null): ts is number => ts !== null && ts >= from && ts < to;
-
   for (const event of events) {
     if (event.status === 'cancelled') continue;
-    const byStart = inWeek(event.start_at);
-    const byDeadline = inWeek(event.deadline_at);
-    const at = byStart ? event.start_at! : byDeadline ? event.deadline_at! : null;
-    if (at === null) continue;
-    const day = days.find((d) => at >= d.from && at < d.to)!;
-    day.items.push({ event, at, isDeadline: !byStart });
+    for (const day of days) {
+      const start = event.start_at, end = event.end_at, deadline = event.deadline_at;
+      if (deadline !== null && deadline >= day.from && deadline < day.to) {
+        day.items.push({ event, at: deadline, isDeadline: true });
+      } else if (start !== null && start >= day.from && start < day.to) {
+        day.items.push({ event, at: start, isDeadline: false });
+      } else if (start !== null && end !== null && start < day.from && end > day.from && end > start) {
+        day.items.push({ event, at: day.from, isDeadline: false, isContinuation: true });
+      }
+    }
   }
 
   for (const d of days) d.items.sort((a, b) => a.at - b.at || a.event.id - b.event.id);

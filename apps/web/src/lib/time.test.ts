@@ -62,10 +62,15 @@ describe('eventTimeText', () => {
     expect(r).toEqual({ text: '23:59 截止', isDeadline: true });
   });
 
-  it('有开始时间时以开始时间为准', () => {
+  it('开始时间不会遮住同一事项的截止时间', () => {
     const r = eventTimeText({ ...base, start_at: sh('2026-09-30T09:00:00'), deadline_at: sh('2026-09-30T23:59:00') }, NOW);
-    expect(r.isDeadline).toBe(false);
-    expect(r.text).toBe('09:00');
+    expect(r.isDeadline).toBe(true);
+    expect(r.text).toBe('09:00 开始；23:59 截止');
+  });
+  it('跨天活动明确标记进行中，结束后不再标记', () => {
+    const e = { ...base, start_at: sh('2026-09-29T09:00:00'), end_at: sh('2026-10-01T18:00:00') };
+    expect(eventTimeText(e, NOW).text).toContain('进行中');
+    expect(eventTimeText(e, e.end_at).text).not.toContain('进行中');
   });
 
   it('不在今天的时间带日期', () => {

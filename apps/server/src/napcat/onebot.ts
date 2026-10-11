@@ -90,6 +90,8 @@ const pending = new Map<string, { resolve: (data: unknown) => void; reject: (err
 const groupNameCache = new Map<string, string>();
 
 export interface OnebotFacts {
+  /** 主动暂停后不会自动重连，不能显示为正在自动重试。 */
+  stopped: boolean;
   wsConnected: boolean;
   everOnline: boolean;
   selfId: string | null;
@@ -263,7 +265,7 @@ export function handleOnebotMessage(text: string): void {
     // OneBot 事件必须显式携带 self_id。不能用当前登录号猜归属，否则旧连接缺字段的迟到帧
     // 会在 A→B 后被误认成 B 的消息，正好绕过账号隔离。
     const eventUin = str(obj.self_id);
-    if (eventUin === '') return; // 无法证明归属的帧不能写账号库
+    if (eventUin === '' || eventUin !== selfId) return; // 无法证明当前会话归属的帧不能写账号库
     if (mentionOf(obj.message, eventUin) === 'other') return;
     const m = toMessage(obj);
     if (m === null) return;
@@ -683,6 +685,7 @@ export function getGroupNameCached(groupId: string): string {
 /** 供 state.ts（A5）推导连接状态用 */
 export function getOnebotFacts(): OnebotFacts {
   return {
+    stopped,
     wsConnected: ws !== null && ws.readyState === WebSocket.OPEN,
     everOnline,
     selfId,

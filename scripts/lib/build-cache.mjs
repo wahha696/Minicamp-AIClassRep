@@ -1,5 +1,5 @@
 // 前端构建的增量缓存判断（问题 2）：apps/web/dist/index.html 比源码新 → 跳过 vite build。
-// dev.mjs 与 bootstrap.mjs 共用。窗口：apps/web 下除 node_modules/dist/.vite 外的全部文件 mtime。
+// dev.mjs 与 bootstrap.mjs 共用；同时检查共享源码和根级构建配置。
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -7,7 +7,16 @@ import { join } from 'node:path';
 export function webBuildFresh(root) {
   const distIndex = join(root, 'apps', 'web', 'dist', 'index.html');
   if (!existsSync(distIndex)) return false;
-  return newestMtime(join(root, 'apps', 'web')) <= statSync(distIndex).mtimeMs;
+  const configFiles = ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'tsconfig.base.json'];
+  const inputMtime = Math.max(
+    newestMtime(join(root, 'apps', 'web')),
+    newestMtime(join(root, 'shared')),
+    ...configFiles.map((name) => {
+      const path = join(root, name);
+      return existsSync(path) ? statSync(path).mtimeMs : 0;
+    }),
+  );
+  return inputMtime <= statSync(distIndex).mtimeMs;
 }
 
 /** 目录里（跳过 node_modules/dist/.vite）最新的文件 mtime */

@@ -5,8 +5,9 @@
 // 换号 = 换库文件：accounts.ts 的 switchAccount 静默流水线后调 openDb(账号库路径)，
 // 换号不会串数据，换回来原样恢复。
 // 整个后端都 import 这里的 db（export let，ESM live binding，openDb 重新赋值即可）。
+import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { DATA_DIR } from '../paths.js';
 import { redactSensitive } from '../redact.js';
@@ -63,6 +64,8 @@ CREATE TABLE IF NOT EXISTS messages (
   processed    INTEGER NOT NULL DEFAULT 0,   -- C 处理完置 1
   filtered_out INTEGER NOT NULL DEFAULT 0,   -- C 规则过滤掉置 1
   decision_reason TEXT NOT NULL DEFAULT 'pending', -- rule_noise / jev_below_threshold / event_recognized / pending_confirmation / llm_no_event / pipeline_error
+  keep_until_processed INTEGER NOT NULL DEFAULT 0, -- 失败积压保护：未处理时不按时间强删
+
   created_at   INTEGER NOT NULL,
   -- 复合主键（schema v2）：NapCat 的 message_id 是本地短 id，不同群可能撞号
   PRIMARY KEY (group_id, message_id)
@@ -93,6 +96,9 @@ CREATE TABLE IF NOT EXISTS event_sources (
   sender_name TEXT NOT NULL,
   text        TEXT NOT NULL,
   sent_at     INTEGER NOT NULL,
+  group_id    TEXT NOT NULL DEFAULT '',
+  group_name  TEXT NOT NULL DEFAULT '',
+  platform    TEXT NOT NULL DEFAULT 'unknown',
   PRIMARY KEY (event_id, message_id)
 );
 -- ingest 按 message_id 查「这条消息是否已经变成过事件」（老版本清理没留 message_seen）
@@ -178,6 +184,16 @@ CREATE TABLE IF NOT EXISTS kv (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+-- 逐群失败与暂停状态持久化：重启不能绕过用户选择的连续失败上限。
+-- 只保存失败分类，不保存 AI 原始响应、错误正文或凭据。
+CREATE TABLE IF NOT EXISTS pipeline_failures (
+  group_id             TEXT PRIMARY KEY,
+  reason               TEXT NOT NULL,
+  failed_attempts      INTEGER NOT NULL,
+  last_failed_at       INTEGER NOT NULL,
+  next_retry_at        INTEGER NOT NULL,
+  config_fingerprint   TEXT NOT NULL
+);
 -- 已处理过的消息 id：清理原始消息时留下，防止 30 天刷新把旧消息再处理一遍。
 -- group_id='' 的是 v1 老库迁来的（当时不记群），去重时同样认。
 CREATE TABLE IF NOT EXISTS message_seen (
@@ -186,10 +202,20 @@ CREATE TABLE IF NOT EXISTS message_seen (
   sent_at      INTEGER NOT NULL,
   PRIMARY KEY (group_id, message_id)
 );
+-- 微信本地投递回执；与业务消息同一事务提交，不含正文或密钥。
+CREATE TABLE IF NOT EXISTS wechat_delivery_batches (
+  destination    TEXT NOT NULL,
+  wechat_account TEXT NOT NULL,
+  batch_id       TEXT NOT NULL,
+  message_count  INTEGER NOT NULL,
+  created_at     INTEGER NOT NULL,
+  PRIMARY KEY (destination, wechat_account, batch_id)
+);
 `;
 
-/** 当前 schema 版本（D3）：v6 = create 提案原始指纹；v7 = 消息处理决策原因。 */
-export const SCHEMA_VERSION = 7;
+/** v10 combines source provenance, pending retention and processing diagnostics. */
+export const SCHEMA_VERSION = 10;
+
 
 function schemaVersion(): number {
   try {
@@ -332,6 +358,10 @@ function migrate(): void {
   // v1→v2 会重建 messages，所以必须在它之后补诊断列。
   ensureColumn('messages', 'decision_reason', "decision_reason TEXT NOT NULL DEFAULT 'pending'");
   if (schemaVersion() < 4) migrateToV4(); // v3 是过渡形状，直接统一到 v4
+  ensureColumn('messages', 'keep_until_processed', 'keep_until_processed INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('event_sources', 'group_id', "group_id TEXT NOT NULL DEFAULT ''");
+  ensureColumn('event_sources', 'group_name', "group_name TEXT NOT NULL DEFAULT ''");
+  ensureColumn('event_sources', 'platform', "platform TEXT NOT NULL DEFAULT 'unknown'");
   db.prepare(
     "INSERT INTO kv (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
   ).run(String(SCHEMA_VERSION));
@@ -364,6 +394,25 @@ export function openDb(path: string): void {
   const previous = db;
   const candidate = new DatabaseSync(path);
   try {
+    // Snapshot the existing business database, including committed WAL pages,
+    // before any schema/PRAGMA writes. No WeChat source database is opened here.
+    const hasTables = !!candidate.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").get();
+    if (hasTables) {
+      const hasKv = !!candidate.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='kv'").get();
+      const saved = hasKv ? candidate.prepare("SELECT value FROM kv WHERE key='schema_version'").get()?.value : undefined;
+      const version = saved === undefined ? 1 : Number(saved);
+      if (!Number.isSafeInteger(version) || version < 1 || version > SCHEMA_VERSION) throw new Error('数据库版本不支持，请使用对应版本的课代表');
+      if (path !== ':memory:' && version < SCHEMA_VERSION) {
+        const directory = join(dirname(path), 'backups');
+        mkdirSync(directory, { recursive: true });
+        const snapshot = join(directory, `${basename(path)}.before-v${SCHEMA_VERSION}.${randomUUID()}.sqlite3`);
+        candidate.prepare('VACUUM INTO ?').run(snapshot);
+        const proof = new DatabaseSync(snapshot, { readOnly: true });
+        try {
+          if (proof.prepare('PRAGMA integrity_check').get()?.integrity_check !== 'ok') throw new Error('迁移前备份校验失败，未修改数据库结构');
+        } finally { proof.close(); }
+      }
+    }
     // migrate() 等旧代码通过模块级 live binding 访问 db；初始化全程同步，期间不会让出事件循环。
     db = candidate;
     db.exec('PRAGMA journal_mode=WAL');

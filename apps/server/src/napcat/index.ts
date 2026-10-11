@@ -6,9 +6,10 @@
 import { accountControlContextMatches, logoutAccountData } from '../accounts.js';
 import { NAPCAT_DIR } from '../paths.js';
 import { newOnebotToken, writeNapcatConfig } from './config.js';
-import { clearUin, getUin, IS_WINDOWS, killTree, napcatInstalled, restart, startManager } from './manager.js';
+import { clearUin, getManagerFacts, getUin, IS_WINDOWS, killTree, napcatInstalled, restart, startManager } from './manager.js';
 import {
   EXTERNAL_ONEBOT,
+  getOnebotFacts,
   pickFreePort,
   resetAfterRestart,
   setOnebotEndpoint,
@@ -57,9 +58,15 @@ export async function restartNapcat(opts: {
 }): Promise<boolean> {
   // 校验与 stop 同步完成；一旦接受请求，旧 WS 就不能在 restart 的 await 窗口切到别的账号。
   const savedUin = getUin() ?? null;
+  // A saved QQ identity is a reconnect hint, not an authenticated session.
+  // Boot conflict has not started a collector, so it also has no QQ session.
+  const manager = LOCAL_INJECT ? getManagerFacts() : null;
+  const bootConflict = manager?.conflictAtBoot === true && manager.pid === null;
+  const pausedQq = (getOnebotFacts().stopped || bootConflict) && !EXTERNAL_ONEBOT
+    && accountControlContextMatches(opts.expectedAccountEpoch, null);
   if (
     savedUin !== opts.expectedUin ||
-    !accountControlContextMatches(opts.expectedAccountEpoch, opts.expectedUin)
+    (!accountControlContextMatches(opts.expectedAccountEpoch, opts.expectedUin) && !pausedQq)
   ) {
     return false;
   }

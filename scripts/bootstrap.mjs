@@ -1,20 +1,21 @@
 // 克隆即用的启动链路（问题 2）：启动.bat 保证 Node 后调这里，五步自检安装 + 启动。
-//   [1/5] Node 可用性（node:sqlite，即 ≥22.13；启动.bat 已保证，这里再验一次给友好报错）
+//   [1/5] Node 可用性（node:sqlite，即 ≥22.15；启动.bat 已保证，这里再验一次给友好报错）
 //   [2/5] 包管理器与依赖：pnpm 不在 PATH 就用 Node 自带 corepack 装到 .corepack/bin（免管理员），
 //         node_modules 落后于 pnpm-lock.yaml 才 install（平时秒过）
 //   [3/5] NapCat 采集端运行包：缺失就跑 scripts/fetch-napcat.mjs（官方 Release 自动下载）
 //   [4/5] 前端产物：apps/web/dist 缺失或源码比产物新才 vite build（增量缓存，不再每次全量打包）
 //   [5/5] 杀旧后端 → tsx 直跑后端 → 轮询 /health → 自动开浏览器（复用 lib/start-server.mjs）
-// 参数：--background（后台模式，网页全关自动退出） --force-build（强制重打前端） --force-deps
+// 参数：--force-build（强制重打前端） --force-deps
 //       --no-update（dev.mjs 的参数，这里仅为透传兼容，忽略）
+// 后端始终在这个命令窗口里运行：关闭窗口 / Ctrl+C 即退出。
 import { existsSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   findHealthyPort,
+  findRunningServer,
   killOldBackends,
-  openBackgroundLog,
   openBrowser,
   startServerChild,
 } from './lib/start-server.mjs';
@@ -23,19 +24,17 @@ import { corepackEnv, resolvePnpm } from './lib/pnpm.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const argv = process.argv.slice(2);
-const background = argv.includes('--background');
 const forceBuild = argv.includes('--force-build');
 const forceDeps = argv.includes('--force-deps');
 
-const bgLog = background ? openBackgroundLog(ROOT, false) : null;
-const log = bgLog ? bgLog.log : console.log;
+const log = console.log;
 const step = (n, msg) => log(`[${n}/5] ${msg}`);
 
 // ---------- [1/5] Node ----------
 try {
   await import('node:sqlite');
 } catch {
-  console.error(`[ClassRep] ❌ 当前 Node ${process.version} 没有 node:sqlite（需要 ≥22.13）。`);
+  console.error(`[ClassRep] ❌ 当前 Node ${process.version} 没有 node:sqlite（需要 ≥22.15）。`);
   console.error('   删除仓库下 runtime\\node.exe 后重新双击 启动.bat 可自动下载新版；或自行升级 Node。');
   process.exit(1);
 }
@@ -51,7 +50,7 @@ if (!depsFresh() || forceDeps) {
   step(2, '安装依赖（首次较慢，之后秒级）…');
   const r = spawnSync(pnpm.cmd, [...pnpm.args, 'install', '--frozen-lockfile'], {
     cwd: ROOT,
-    stdio: background ? bgLog.stdio : 'inherit',
+    stdio: 'inherit',
     shell: pnpm.shell,
     windowsHide: true,
     env: { ...process.env, ...corepackEnv() },
@@ -69,7 +68,7 @@ if (isWin() && !existsSync(join(ROOT, 'napcat', 'NapCatWinBootMain.exe'))) {
   step(3, '缺 NapCat 运行包（napcat/ 不进 git），自动下载官方 Release（约 30MB）…');
   const r = spawnSync(process.execPath, [join(ROOT, 'scripts', 'fetch-napcat.mjs')], {
     cwd: ROOT,
-    stdio: background ? bgLog.stdio : 'inherit',
+    stdio: 'inherit',
     windowsHide: true,
   });
   if (r.status !== 0) {
@@ -81,12 +80,24 @@ if (isWin() && !existsSync(join(ROOT, 'napcat', 'NapCatWinBootMain.exe'))) {
   step(3, 'NapCat 采集端组件已就绪');
 }
 
+// Windows 微信固定使用受控便携 Python，与用户系统 Python 和快判模式无关。
+if (isWin()) {
+  log('[ClassRep] 检查微信与本地快判共享 Python 运行时…');
+  const prepared = spawnSync(process.execPath, [join(ROOT, 'scripts', 'fastjudge-setup.mjs')], {
+    cwd: ROOT, stdio: 'inherit', windowsHide: true,
+  });
+  if (prepared.status !== 0) {
+    console.error('[ClassRep] Python 准备失败；请检查网络后运行 node scripts/fastjudge-setup.mjs 再启动。');
+    process.exit(1);
+  }
+}
+
 // ---------- [4/5] 前端产物（增量构建缓存） ----------
 if (!webBuildFresh(ROOT) || forceBuild) {
   step(4, '前端产物缺失或源码有更新，重新构建…');
   const r = spawnSync(pnpm.cmd, [...pnpm.args, '--filter', 'web', 'build'], {
     cwd: ROOT,
-    stdio: background ? bgLog.stdio : 'inherit',
+    stdio: 'inherit',
     shell: pnpm.shell,
     windowsHide: true,
   });
@@ -100,15 +111,21 @@ if (!webBuildFresh(ROOT) || forceBuild) {
 
 // ---------- [5/5] 启动后端 ----------
 step(5, '启动后端，几秒后自动打开浏览器…');
+const running = await findRunningServer(ROOT);
+if (running !== null) {
+  openBrowser(`http://localhost:${running}`);
+  log(`课代表已在 http://localhost:${running} 运行，已重新打开页面。若要应用后端更新，请关闭原启动窗口后再启动。`);
+  process.exit(0);
+}
 killOldBackends({ log });
-const { child, logFile } = startServerChild({ root: ROOT, background, bg: bgLog });
+const { child, launchId } = startServerChild({ root: ROOT });
 
-const port = await findHealthyPort(90_000);
+const port = await findHealthyPort(90_000, launchId);
 if (port !== null) {
   openBrowser(`http://localhost:${port}`);
-  log(`\n已打开 http://localhost:${port}${logFile ? `\n（后台日志：${logFile}）` : ''}\n`);
+  log(`\n已打开 http://localhost:${port}\n（关闭此窗口 / 按 Ctrl+C 即退出课代表）\n`);
 } else {
-  log('后端 90 秒内没有就绪（可能还在首次启动），可稍后手动打开 http://localhost:8000');
+  log('本次后端 90 秒内没有就绪，请查看启动日志中的地址或错误。');
 }
 
 child.on('exit', (code) => {

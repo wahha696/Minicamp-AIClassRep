@@ -9,10 +9,13 @@ import { getAiSettings, saveAiSettings, testAiSettings } from '../api/client';
 import { useToast } from '../components/Toast';
 import { toastError } from '../lib/errors';
 import { SKIP_CONNECT_KEY, writeAccountFlag } from '../lib/status';
+import { useAccess } from '../components/ConnectStatus';
 
 export default function Setup() {
   // 0 = 读取中：已配过 DeepSeek 时直接续到第 2 步，别让用户以为 key 没存上又被弹回来
   const [step, setStep] = useState<0 | 1 | 2>(0);
+  const [tested, setTested] = useState(false);
+  const { demoAvailable } = useAccess();
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -44,23 +47,23 @@ export default function Setup() {
           helpUrl="https://platform.deepseek.com/api_keys"
           helpText="在 DeepSeek 开放平台创建"
           required
-          onDone={() => setStep(2)}
+          onDone={() => { setTested(true); setStep(2); }}
         />
       )}
       {step === 2 && (
         <Panel>
           <div className="text-center">
             <div className="text-4xl" aria-hidden>🎉</div>
-            <p className="mt-3 text-lg font-medium text-slate-800">AI 配好了，最后一步：登录 QQ</p>
-            <p className="mt-1 text-sm text-slate-400">用手机 QQ 扫码，课代表就开始收群消息</p>
+            <p className="mt-3 text-lg font-medium text-slate-800">{tested ? 'API Key 检查通过，接下来连接账号' : '已有 AI 配置，接下来连接账号'}</p>
+            <p className="mt-1 text-sm text-slate-400">{tested ? '鉴权检查通过不代表每次整理都能成功。' : '保存过配置不代表连接正常，可在设置中检查。'}连接 QQ 或受支持的电脑微信后自动进入空间，在群管理中选择群。</p>
             <button
               type="button"
               onClick={() => navigate('/connect')}
               className="mt-6 w-full rounded-xl bg-slate-900 py-3 text-base font-medium text-white hover:bg-slate-700"
             >
-              去扫码登录 →
+              去连接账号 →
             </button>
-            <button
+            {demoAvailable && <button
               type="button"
               onClick={() => {
                 writeAccountFlag(SKIP_CONNECT_KEY, '1');
@@ -69,7 +72,7 @@ export default function Setup() {
               className="mt-3 w-full text-sm text-slate-400 underline-offset-4 hover:text-slate-600 hover:underline"
             >
               暂不扫码，先逛逛演示模式
-            </button>
+            </button>}
           </div>
         </Panel>
       )}
@@ -119,15 +122,15 @@ function KeyStep({
     setResult(null);
     try {
       // 先存（格式校验在服务端做），再真实连一次——无效 key 不放行
-      await saveAiSettings({ deepseek_key: k });
-      const r = await testAiSettings('deepseek');
+      const r = await testAiSettings('deepseek', k);
       const res = r.deepseek ?? { ok: false, error: '没有返回结果' };
       setResult(res);
       if (res.ok) {
-        toast('已保存，连接正常');
+        await saveAiSettings({ deepseek_key: k });
+        toast('鉴权检查通过，已保存');
         onDone();
       } else {
-        toast('Key 已保存，但连接测试没通过，请检查后再试', 'error');
+        toast('检查未通过，未替换已保存配置', 'error');
       }
     } catch (e) {
       toastError(toast, e);

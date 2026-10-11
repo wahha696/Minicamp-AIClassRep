@@ -113,10 +113,9 @@ export default function WeekGrid({
   const occurrences = expandTimetable(table, days[0]!.from, days[days.length - 1]!.from + DAY);
   const sourceEvents =
     allEvents ??
-    itemsByDay
+    [...new Map(itemsByDay
       .flat()
-      .filter((i) => !i.isDeadline)
-      .map((i) => i.event);
+      .map((i) => [i.event.id, i.event] as const)).values()];
   const events = sourceEvents
     .filter((e) => e.status !== 'cancelled' && e.status !== 'done')
     .map((e) => ({ id: `event-${e.id}`, start: e.start_at ?? NaN, end: e.end_at ?? NaN }));

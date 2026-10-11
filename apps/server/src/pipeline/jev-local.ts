@@ -73,8 +73,8 @@ export function localJevReady(now = Date.now()): boolean {
 /** python 能不能 import 快判依赖（sklearn/jieba/joblib/numpy）；30s 超时按不可用算 */
 function pythonUsable(py: string, root: string): Promise<boolean> {
   return new Promise((resolve) => {
-    const child = spawn(py, ['-c', 'import sklearn,jieba,joblib,numpy;print("ok")'], {
-      cwd: root, env: spawnEnv(), stdio: ['ignore', 'pipe', 'ignore'],
+    const child = spawn(py, ['-c', 'import sklearn,jieba,joblib,numpy,zstandard;assert zstandard.__version__=="0.25.0";print("ok")'], {
+      cwd: root, env: spawnEnv(), windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
     });
     let out = '';
     let settled = false;
@@ -104,7 +104,7 @@ export function ensureFastjudgeRuntime(): void {
       const script = join(ROOT, 'scripts', 'fastjudge-setup.mjs');
       if (!existsSync(script)) return;
       console.warn('[fastjudge] 本地快判 Python 环境缺失，后台供给便携运行时（首次约几分钟）…');
-      spawn(process.execPath, [script, '--root', root], { detached: true, stdio: 'ignore' }).unref();
+      spawn(process.execPath, [script, '--root', root], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
     })
     .catch(() => {});
 }

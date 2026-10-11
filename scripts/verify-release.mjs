@@ -65,7 +65,7 @@ stopper.unref();
     NODE_OPTIONS: `--import=${pathToFileURL(hook).href}`,
     ONEBOT_WS_URL: 'ws://127.0.0.1:1', // Do not launch or interrupt desktop QQ.
   };
-  for (const key of ['CLASSREP_OPEN_BROWSER', 'AUTO_EXIT', 'LLM_API_KEY', 'TYPESAFE_API_KEY',
+  for (const key of ['CLASSREP_OPEN_BROWSER', 'LLM_API_KEY', 'TYPESAFE_API_KEY',
     'FASTJUDGE_ROOT', 'FASTJUDGE_PYTHON', 'LOCAL_JEV_MODEL_PATH']) delete testEnv[key];
   launcher = spawn('cmd.exe', ['/d', '/c', '启动.bat'], {
     cwd: install, env: testEnv, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],

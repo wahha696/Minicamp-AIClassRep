@@ -5,7 +5,7 @@
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { accountDataState, accountEpoch, currentAccount } from './accounts.js';
+import { accountDataState, accountEpoch, currentAccount, currentDataSpace } from './accounts.js';
 import { DATA_DIR } from './paths.js';
 
 interface Saved {
@@ -14,6 +14,7 @@ interface Saved {
   /** null 表示签发给未登录兜底库；undefined 只可能来自升级前的旧配置，按未绑定拒绝。 */
   account_uin?: string | null;
   account_epoch?: string;
+  space_id?: string | null;
 }
 
 let dir = DATA_DIR;
@@ -48,6 +49,7 @@ function read(): Saved {
             : undefined,
         account_epoch:
           typeof raw.account_epoch === 'string' && raw.account_epoch.length > 0 ? raw.account_epoch : undefined,
+        space_id: raw.space_id === null || typeof raw.space_id === 'string' ? raw.space_id : undefined,
       };
     }
   } catch {
@@ -71,7 +73,7 @@ function bindingIsCurrent(s: Saved): boolean {
   return (
     accountDataState() === 'ready' &&
     s.account_uin !== undefined &&
-    s.account_uin === currentAccount() &&
+    (s.space_id !== undefined ? s.space_id === currentDataSpace() : s.account_uin === currentAccount()) &&
     s.account_epoch === accountEpoch()
   );
 }
@@ -108,6 +110,7 @@ export function setLanEnabled(enabled: boolean): Saved {
         // 换号后重新开启时必须同时换 token，避免旧链接持有人借新绑定进入另一个账号。
         token: s.token !== '' && sameBinding ? s.token : newToken(),
         account_uin: currentAccount(),
+        space_id: currentDataSpace(),
         account_epoch: accountEpoch(),
       }
     : { ...s, enabled: false };
@@ -121,6 +124,7 @@ export function rotateLanToken(): Saved {
     enabled: read().enabled,
     token: newToken(),
     account_uin: currentAccount(),
+    space_id: currentDataSpace(),
     account_epoch: accountEpoch(),
   };
   write(next);

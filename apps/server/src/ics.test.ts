@@ -125,17 +125,46 @@ describe('buildIcs', () => {
     expect(ls).toContain('LOCATION:A301');
   });
 
+  it('取消时两个日历节点均标记取消，恢复保持 UID 并推进 SEQUENCE', () => {
+    const base = { start_at: SHANGHAI_1400, deadline_at: SHANGHAI_1500 };
+    const cancelled = buildIcs([ev({ ...base, status: 'cancelled', version: 2 })], NOW, 'space');
+    const restored = buildIcs([ev({ ...base, status: 'active', version: 3 })], NOW, 'space');
+    expect(lines(cancelled).filter(l => l === 'STATUS:CANCELLED')).toHaveLength(2);
+    expect(lines(cancelled).filter(l => l === 'SEQUENCE:1')).toHaveLength(2);
+    expect(lines(restored).filter(l => l === 'SEQUENCE:2')).toHaveLength(2);
+    expect(restored).not.toContain('STATUS:CANCELLED');
+    expect(lines(restored).filter(l => l.startsWith('UID:'))).toEqual(lines(cancelled).filter(l => l.startsWith('UID:')));
+  });
+
   it('有 end_at 时用 end_at', () => {
     const ics = buildIcs([ev({ start_at: SHANGHAI_1400, end_at: SHANGHAI_1500 })], NOW);
     expect(lines(ics)).toContain('DTEND;TZID=Asia/Shanghai:20260926T150000');
   });
 
-  it('只有 deadline_at：DTSTART = DTEND = 截止时刻，标题前加【截止】', () => {
+  it('最晚四位年份的默认时长不导出五位年份', () => {
+    const ics = buildIcs([ev({ start_at: Date.parse('9999-12-31T23:59:59+08:00') })], NOW);
+    expect(lines(ics)).toContain('DTSTART;TZID=Asia/Shanghai:99991231T235959');
+    expect(lines(ics).some(l => l.startsWith('DTEND'))).toBe(false);
+  });
+
+  it('只有 deadline_at：用无结束时间的截止节点，不写相等的 DTEND', () => {
     const ics = buildIcs([ev({ type: 'assignment', title: '交实验报告', deadline_at: SHANGHAI_1500 })], NOW);
     const ls = lines(ics);
     expect(ls).toContain('DTSTART;TZID=Asia/Shanghai:20260926T150000');
-    expect(ls).toContain('DTEND;TZID=Asia/Shanghai:20260926T150000');
+    expect(ls.some(l => l.startsWith('DTEND'))).toBe(false);
     expect(ls).toContain('SUMMARY:【截止】[作业]交实验报告');
+  });
+
+  it('开始和截止不同则导出两个关联节点；同一时刻保留一个并明确截止', () => {
+    const both = buildIcs([ev({ start_at: SHANGHAI_1400, deadline_at: SHANGHAI_1500 })], NOW, 'space');
+    expect(lines(both).filter(l => l === 'BEGIN:VEVENT')).toHaveLength(2);
+    expect(lines(both)).toContain('UID:classrep-space-1-deadline@classrep');
+    expect(lines(both)).toContain('RELATED-TO:classrep-space-1@classrep');
+    expect(lines(both)).toContain('DTSTART;TZID=Asia/Shanghai:20260926T150000');
+    const same = buildIcs([ev({ start_at: SHANGHAI_1400, deadline_at: SHANGHAI_1400 })], NOW);
+    expect(lines(same).filter(l => l === 'BEGIN:VEVENT')).toHaveLength(1);
+    expect(lines(same)).toContain('SUMMARY:【同时截止】[考试]高数小测');
+    expect(same).not.toContain('BEGIN:VALARM');
   });
 
   it('两个时间都没有的事件不导出；全都不能导出时返回 null', () => {

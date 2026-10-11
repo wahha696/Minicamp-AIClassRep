@@ -18,6 +18,7 @@ import { useToast } from '../components/Toast';
 import { usePolling } from '../hooks/usePolling';
 import { toastError } from '../lib/errors';
 import { parseTimetable, type ParsedTimetable } from '../lib/timetable';
+import ReadStatus from './ReadStatus';
 
 async function parseFile(file: File): Promise<{ name: string; result: ParsedTimetable }[]> {
   if (file.size > 10 * 1024 * 1024) throw new Error('课表文件不能超过 10 MB');
@@ -33,7 +34,7 @@ async function parseFile(file: File): Promise<{ name: string; result: ParsedTime
 }
 
 export default function TimetableSection() {
-  const { data, loading, refresh } = usePolling(getTimetable, 60_000);
+  const { data, error, loading, refresh, lastSuccessAt } = usePolling(getTimetable, 60_000);
   const toast = useToast();
   const fileRef = useRef<HTMLInputElement>(null);
   const [parsing, setParsing] = useState(false);
@@ -173,6 +174,7 @@ export default function TimetableSection() {
   return (
     <section id="timetable">
       <h2 className="text-lg font-semibold text-slate-900">课表</h2>
+      <ReadStatus error={error} cached={data !== undefined} lastSuccessAt={lastSuccessAt} onRetry={() => void refresh()} />
       <p className="mt-1 text-sm text-slate-500">
         两种导入:① 电脑连着校园网时,用教务系统学号一键拉取(下面);② 教务系统导出的 xls
         文件(浏览器本地解析,不上传)。
@@ -342,7 +344,7 @@ export default function TimetableSection() {
       )}
 
       {/* 没有课表时的引导 */}
-      {!loading && !hasSaved && !draft && (
+      {!loading && data !== undefined && !hasSaved && !draft && (
         <div className="mt-3 rounded-2xl border border-dashed border-slate-300 bg-white px-6 py-8 text-center">
           <p className="text-lg font-medium text-slate-700">还没有课表</p>
           <p className="mt-2 text-sm text-slate-400">选一个教务系统导出的课表文件（xls / xlsx）</p>

@@ -69,6 +69,16 @@ describe('memoryEnabled', () => {
 });
 
 describe('summarize', () => {
+  it.each([
+    reply({}),
+    { choices: [{ message: { content: '{"rules":[]}' }, finish_reason: 'length' }] },
+  ])('缺字段或截断响应不能清空已保存规则', async (response) => {
+    addFeedback();
+    db.prepare("INSERT INTO level_rules (text, level, feedback_ids, created_at) VALUES ('旧规则', 3, '[]', ?)").run(Date.now());
+    createMock.mockResolvedValueOnce(response);
+    await summarize();
+    expect(rules().map((r) => r.text)).toEqual(['旧规则']);
+  });
   it('没有未忽略的记录 → 规则清空', async () => {
     db.prepare("INSERT INTO level_rules (text, level, feedback_ids, created_at) VALUES ('旧规则', 4, '[]', ?)").run(Date.now());
     await summarize();

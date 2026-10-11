@@ -5,19 +5,20 @@ const T0 = 1_000_000;
 const track = (over = {}) => ({ total: 20, base: 5, startedAt: T0, fails: 0, ...over });
 
 describe('补拉后的整理进度', () => {
-  it('只算比补拉前多出来的，且不超过本次补回的条数', () => {
-    expect(syncLeft(track(), 25)).toBe(20);
-    expect(syncLeft(track(), 12)).toBe(7);
-    expect(syncLeft(track(), 40)).toBe(20); // 群里又来了新消息，不算进来
-    expect(syncLeft(track(), 3)).toBe(0);
+  it('只能报告全局积压，不用基线相减猜本次任务进度', () => {
+    expect(syncLeft(track(), 25)).toBe(25);
+    expect(syncLeft(track(), 12)).toBe(12);
+    expect(syncLeft(track(), 40)).toBe(40);
+    expect(syncLeft(track(), 3)).toBe(3);
   });
 
-  it('降到基线以下 → 整理完了', () => {
-    expect(trackStep(track(), { pending: 5, llm: 'ok' }, T0 + 3000)).toEqual({ kind: 'done' });
+  it('只有全局待整理为零才结束，不因旧积压消化而提前宣布完成', () => {
+    expect(trackStep(track({ base: 100 }), { pending: 20, llm: 'ok' }, T0 + 3000)).toEqual({ kind: 'progress', left: 20 });
+    expect(trackStep(track(), { pending: 0, llm: 'ok' }, T0 + 3000)).toEqual({ kind: 'done' });
   });
 
   it('还有剩余 → 显示剩余数', () => {
-    expect(trackStep(track(), { pending: 12, llm: 'ok' }, T0 + 3000)).toEqual({ kind: 'progress', left: 7 });
+    expect(trackStep(track(), { pending: 12, llm: 'ok' }, T0 + 3000)).toEqual({ kind: 'progress', left: 12 });
   });
 
   it('没配 AI → 停止跟踪，不再一直转圈', () => {

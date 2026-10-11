@@ -10,10 +10,21 @@ import { logoutNapcat, restartNapcat } from '../napcat/index.js';
 import { getConnectStatus } from '../napcat/state.js';
 import { desktopSession } from '../napcat/desktop-qq.js';
 import { DesktopSessionError } from '../napcat/desktop-session.js';
+import { WorkspaceError } from '../workspaces/registry.js';
+import { isLocalAddress, remoteAddressOf } from '../lan-guard.js';
+import { env } from '../env.js';
 
-export function registerConnectRoutes(app: Hono): void {
+export function registerConnectRoutes(app: Hono, options: { wechatState?: () => 'idle' | 'opening' | 'collecting' | 'error' } = {}): void {
   // GET /api/connect/status → ConnectStatusDTO（前端每 2s 轮询）
-  app.get('/api/connect/status', (c) => c.json(getConnectStatus()));
+  app.get('/api/connect/status', (c) => {
+    let status = getConnectStatus();
+    if (status.workspace && !isLocalAddress(remoteAddressOf(c))) {
+      // Phone read-only users need the current data context, not pending logins/bindings.
+      status = { ...status, workspace: { ...status.workspace, pending: [], current: status.workspace.current
+        ? { ...status.workspace.current, bindings: [] } : null } };
+    }
+    return c.json({ ...status, ...(options.wechatState ? { wechat: options.wechatState() } : {}), access: { readonly: !isLocalAddress(remoteAddressOf(c)) }, demo_available: env.DEMO_MODE });
+  });
 
   app.post('/api/connect/desktop-qq', (c) => desktopControl(c, false));
   app.post('/api/connect/desktop-qq/return', (c) => desktopControl(c, true));
@@ -70,6 +81,7 @@ export function registerConnectRoutes(app: Hono): void {
       if (!loggedOut) return c.json({ error: '账号已发生变化，请刷新后重试' }, 409);
       return c.json({ ok: true });
     } catch (err) {
+      if (err instanceof WorkspaceError) return c.json({ error: '平台退出不会删除空间数据；数据管理将单独提供' }, 409);
       return c.json({ error: `退出登录失败：${err instanceof Error ? err.message : String(err)}` }, 500);
     }
   });
@@ -100,7 +112,7 @@ export function registerConnectRoutes(app: Hono): void {
   });
 
   // GET /api/sync/status：每群最近一次历史补齐的结果（R03，只读，离线也能看上次补到哪）
-  // complete=0 的群 = 可能被截断/中途失败，前端可提示「这群没补全，建议再同步一次」
+  // complete=0 保留具体截断/失败原因；再次请求不代表一定能补齐客户端缺失历史。
   app.get('/api/sync/status', (c) => {
     try {
       const rows = db
@@ -113,7 +125,7 @@ export function registerConnectRoutes(app: Hono): void {
         .all();
       return c.json(rows);
     } catch {
-      return c.json([]); // 表还没建（旧库首启）→ 空数组，不 500
+      return c.json({ error: '历史刷新状态读取失败，请稍后重试' }, 503);
     }
   });
 }

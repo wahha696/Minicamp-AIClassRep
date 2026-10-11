@@ -2,20 +2,22 @@
 // 读 .env → openDb() → 建 Hono app → 局域网只读中间件 → 注册路由 → 静态文件
 // → 监听（8000 起顺延）→ startScheduler() → startNapcat() → 清理任务 → 打包版才自动开浏览器
 import { exec } from 'node:child_process';
-import { existsSync, statSync } from 'node:fs';
+import { randomUUID, createHash } from 'node:crypto';
+import { existsSync, statSync, realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, join, relative } from 'node:path';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { env } from './env.js';
-import { db } from './db/index.js';
-import { accountDataState, initAccounts, startAutomaticBackupScheduler } from './accounts.js';
+import { db, onAccountSwitch } from './db/index.js';
+import { accountDataState, accountEpoch, initAccounts, workspaceRuntime, waitForAccountTransitions, waitForMutationLeases, startAutomaticBackupScheduler } from './accounts.js';
+
 import { startNapcat, stopNapcat } from './napcat/index.js';
 import { getConnectStatus } from './napcat/state.js';
 import { getPipelineStats, startScheduler } from './pipeline/index.js';
 import { getDualScoreLog } from './pipeline/jev.js';
 import { ensureFastjudgeRuntime, getFastjudgeRoot, localJevAvailable, stopLocalWorker } from './pipeline/jev-local.js';
-import { startCleanupJob } from './jobs/cleanup.js';
+import { startCleanupJob, pauseCleanup } from './jobs/cleanup.js';
 import { accessGuard } from './lan-guard.js';
 import { currentLanToken, lanEnabledAtBoot } from './lan-settings.js';
 import { accountMutationGuard } from './account-request-guard.js';
@@ -32,27 +34,48 @@ import { registerTodoRoutes } from './routes/todos.js';
 import { registerTrashRoutes } from './routes/trash.js';
 import { registerDataRoutes } from './routes/data.js';
 import { redactSensitive } from './redact.js';
-import { registerPresence } from './presence.js';
+import { registerReminderRoutes } from './routes/reminders.js';
+import { quiesceScheduler } from './pipeline/scheduler.js';
+import { registerWorkspaceRoutes } from './routes/workspaces.js';
+import { registerWechatConnectionRoutes } from './routes/wechat-connect.js';
+import { registerWechatGroupRoutes } from './routes/wechat-groups.js';
+import { registerWechatMessageRoutes } from './routes/wechat-messages.js';
+import { WechatPreparation } from './ingest/wechat-preparation.js';
+import { wechatCapability } from './ingest/wechat-python.js';
+import { getOnebotFacts, resetAfterRestart, stopOnebotClient } from './napcat/onebot.js';
+
 import { startUpdateChecker } from './update-check.js';
-import { DATA_DIR, WEB_DIST } from './paths.js';
+import { DATA_DIR, ROOT, WEB_DIST } from './paths.js';
 import { desktopSession } from './napcat/desktop-qq.js';
 import { desktopModeGuard } from './napcat/desktop-guard.js';
 import type { HealthDTO } from './types.js';
+import type { Server } from 'node:http';
+
+let httpServer: Server | undefined;
 
 trustSystemCertificates(); // 杀毒软件拦截 HTTPS 时也能连上 AI（见 system-ca.ts）
 
 const START_PORT = 8000;
 const END_PORT = 8010;
 const STARTED_AT = Date.now();
+const LAUNCH_ID = process.env.CLASSREP_LAUNCH_ID || randomUUID();
+const INSTALLATION_ID = createHash('sha256').update(realpathSync(ROOT).toLowerCase()).digest('hex');
+let stopping = false;
 
 // 启动.bat（launcher.mjs 设 CLASSREP_OPEN_BROWSER=1）才自动开浏览器；pnpm dev 时用 Vite 的 5173，不开
 const openBrowserOnStart = process.env.CLASSREP_OPEN_BROWSER === '1';
 
 /** @hono/node-server 会把 Node 的 req/res 挂在 c.env 上（lan-guard 里读 remoteAddress） */
 const app = new Hono();
+// All coordinators are inert: user consent/actions are required before any
+// WeChat discovery, identity, contact, key or message read is started.
+const wechat = new WechatPreparation({ root: ROOT, epoch: accountEpoch, workspace: workspaceRuntime,
+  stopWechatIntake: () => {}, settled: waitForAccountTransitions });
+onAccountSwitch(() => wechat.workspaceChanged());
 
 // 局域网只读中间件：非 loopback 且方法不是 GET/HEAD → 403。
 // 来源 IP 取不到时按「非本机」处理（宁可只读，也不放行写操作）。
+app.use('*', async (c, next) => stopping ? c.json({ error: '课代表正在退出，请稍候重新启动' }, 503) : next());
 app.use('*', accessGuard({ lanToken: currentLanToken }));
 app.use('*', accountMutationGuard());
 app.use('*', desktopModeGuard());
@@ -80,8 +103,10 @@ app.get('/health', (c) => {
   // 恢复入口无需 epoch，但切换/挂库失败时绝不能从仍挂着的旧账号库或内存统计泄露聚合信息。
   const stats = getPipelineStats(accountReady);
   const qq = getConnectStatus().state;
+  const wechatState = wechat.intake.status().state;
   const body: HealthDTO = {
-    status: dbState === 'ok' && qq === 'online' && stats.llm !== 'error' ? 'ok' : 'degraded',
+    status: dbState === 'ok' && (qq === 'online' || wechatState === 'collecting') && stats.llm !== 'error' ? 'ok' : 'degraded',
+    wechat: wechatState,
     db: dbState,
     qq,
     llm: stats.llm,
@@ -100,26 +125,30 @@ app.get('/health', (c) => {
   if (env.DEMO_MODE && accountReady) {
     body.dual_score_log = getDualScoreLog(10);
   }
-  return c.json(body);
+  return c.json({ ...body, app: 'classrep', launch_id: LAUNCH_ID, installation_id: INSTALLATION_ID, demo_available: env.DEMO_MODE });
 });
 
-registerBusinessRoutes(app);
-registerConnectRoutes(app);
+registerBusinessRoutes(app, { setWechatGroupEnabled: (id, enabled) => wechat.setGroupEnabled(id, enabled),
+  wechatCollectingGroupIds: () => wechat.collectingGroupIds() });
+registerConnectRoutes(app, { wechatState: () => wechat.intake.status().state });
+registerWorkspaceRoutes(app, async () => { wechat.invalidate(); await wechat.intake.stop(); });
+registerWechatConnectionRoutes(app, wechat.connection);
+registerWechatGroupRoutes(app, wechat.catalog);
+registerWechatMessageRoutes(app, wechat.intake, wechat.catalog);
 // 局域网只读开关：启动时读一次决定监听地址；默认只监听本机
 const LISTEN_LAN = lanEnabledAtBoot();
 let listenPort = START_PORT;
 registerSetupRoutes(app);
 registerSettingsRoutes(app, { listening: LISTEN_LAN, port: () => listenPort });
+registerReminderRoutes(app);
 registerPetChatRoutes(app);
 registerTodoRoutes(app);
 registerTimetableRoutes(app);
 registerMemoryRoutes(app);
 registerTrashRoutes(app);
-registerDataRoutes(app);
+registerDataRoutes(app, async () => { await wechat.catalog.stop(); await wechat.intake.stop(); });
 
-// 后台模式（scripts/dev.mjs --background 设 AUTO_EXIT=1）：网页全关掉后自动退出
-const AUTO_EXIT = process.env.AUTO_EXIT === '1';
-if (AUTO_EXIT) registerPresence(app, () => shutdown(), { keepAlive: () => desktopSession.isActive() });
+// 运行期 = 启动窗口：关闭命令窗口或 Ctrl+C 即退出（SIGINT/SIGHUP → shutdown），关网页不影响。
 
 // 00-总约定 §7：错误一律 { error: '中文' }；不存在的接口也不例外（默认是纯文本 404）
 app.notFound((c) => c.json({ error: '接口不存在' }, 404));
@@ -185,7 +214,10 @@ function mimeOf(file: string): string {
 async function listenWithFallback(): Promise<number> {
   for (let port = START_PORT; port <= END_PORT; port++) {
     const ok = await new Promise<boolean>((resolve) => {
-      const server = serve({ fetch: app.fetch, port, hostname: LISTEN_LAN ? '0.0.0.0' : '127.0.0.1' }, () => resolve(true));
+      const server = serve({ fetch: app.fetch, port, hostname: LISTEN_LAN ? '0.0.0.0' : '127.0.0.1' }, () => {
+        httpServer = server as Server;
+        resolve(true);
+      });
       server.on('error', (err: NodeJS.ErrnoException) => {
         if (err.code === 'EADDRINUSE') {
           console.log(`端口 ${port} 被占用，换 ${port + 1} 试试`);
@@ -204,9 +236,21 @@ async function listenWithFallback(): Promise<number> {
 // 放在 openDb() 之前：启动阶段（建库、建目录）出问题也要能记下来。防 EPIPE 死循环 / 日志上限见 crash-log.ts
 installCrashHandlers(join(DATA_DIR, 'logs', 'server.log'));
 
-// 按账号分库（修复计划第一节 + 四问题修复 #1）：迁移旧单库 → 挂记住的账号库（无 uin 则开兜底库）
-await initAccounts();
+// 空间登记与安全兜底启动。记住的 QQ 只用于重连，已验证 lifecycle 才能开放其空间。
+await initAccounts({ workspace: {
+  wechatCapability: () => wechatCapability(ROOT),
+  verifyIdentity: (identity) => {
+    if (identity.platform === 'wechat') return wechat.connection.verifies(identity.account_id);
+    const facts = getOnebotFacts();
+    return facts.wsConnected && !facts.kicked && facts.selfId === identity.account_id;
+  },
+  revalidateIdentity: (identity) => identity.platform === 'wechat'
+    ? wechat.connection.revalidate(identity.account_id) : Promise.resolve(true),
+  stopCollectors: () => { stopOnebotClient(); wechat.invalidate(); },
+  restartCollectors: resetAfterRestart,
+} });
 startAutomaticBackupScheduler();
+
 
 const port = await listenWithFallback();
 listenPort = port;
@@ -230,11 +274,24 @@ if (openBrowserOnStart && process.platform === 'win32') {
   startUpdateChecker();
 }
 
-let stopping = false;
-function shutdown(): void {
+async function shutdown(): Promise<void> {
   if (stopping) return;
   stopping = true;
   desktopSession.dispose();
+  stopOnebotClient();
+  try { await wechat.stop(); } catch { /* Still release the other local services. */ }
+  await waitForAccountTransitions();
+  await quiesceScheduler(); // Let already-running AI batches commit before closing their database.
+  await waitForMutationLeases(); // Accepted business requests may still be completing an import/sync.
+  if (httpServer) {
+    const server = httpServer;
+    httpServer = undefined;
+    await new Promise<void>(resolve => {
+      server.close(() => resolve());
+      server.closeIdleConnections();
+    });
+  }
+  pauseCleanup();
   try {
     stopLocalWorker(); // R1：常驻快判子进程随主进程回收
   } catch {
@@ -251,6 +308,7 @@ function shutdown(): void {
     // 同上
   }
   console.log('ClassRep 已退出');
+  await new Promise<void>(resolve => setImmediate(resolve));
   process.exit(0);
 }
 
@@ -261,6 +319,7 @@ process.on('SIGHUP', shutdown);
 
 // process.exit() 也会走这里：再兜一次 stopNapcat（可能已经停过了，幂等）
 process.on('exit', () => {
+  void wechat.stop(); // Kill owned children synchronously; exit cannot await reaping.
   try {
     stopNapcat();
   } catch {

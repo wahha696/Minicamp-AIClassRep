@@ -7,9 +7,11 @@ import EventCard from '../components/EventCard';
 import EventDrawer from '../components/EventDrawer';
 import SlotStack from '../components/SlotStack';
 import TodoBox from '../components/TodoBox';
+import ReadStatus from '../components/ReadStatus';
+import { useAccess } from '../components/ConnectStatus';
 import { usePolling } from '../hooks/usePolling';
 import { groupBySlot } from '../lib/slots';
-import { SORT_LABEL, type SortMode, sortEvents } from '../lib/sort';
+import { SORT_LABEL, type SortMode, sortEvents, sortTime } from '../lib/sort';
 import { shanghaiDayRange } from '../lib/time';
 
 const UPCOMING_DAYS = 3;
@@ -24,7 +26,8 @@ function loadSort(): SortMode {
 }
 
 export default function Today() {
-  const { data, error, loading, refresh } = usePolling(getToday, 10_000);
+  const { readonly, demoAvailable } = useAccess();
+  const { data, error, loading, refresh, lastSuccessAt } = usePolling(getToday, 10_000);
   const todos = usePolling(getTodos, 10_000);
   // 接下来 3 天（明天 0 点起）：周末 / 周日也能一眼看到下周初的事。
   // 日期区间在 fn 里现算（B16），跨过午夜后下一次轮询自动换到新的一天
@@ -62,7 +65,11 @@ export default function Today() {
     () => sortEvents((upcoming.data ?? []).filter((e) => e.status !== 'done'), 'time'),
     [upcoming.data],
   );
-  const groups = useMemo(() => groupBySlot(sortEvents(data?.events ?? [], sort)), [data, sort]);
+  const groups = useMemo(() => {
+    const overdueIds = new Set((data?.overdue ?? []).map(e => e.id));
+    const now = Date.now();
+    return groupBySlot(sortEvents((data?.events ?? []).filter(e => !overdueIds.has(e.id)), sort, now), e => sortTime(e, now));
+  }, [data, sort]);
 
   const onChanged = useCallback(() => {
     void refresh();
@@ -92,14 +99,7 @@ export default function Today() {
         </div>
       </div>
 
-      {error && !data && (
-        <div className="mt-6 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">
-          {error.message}
-          <button type="button" onClick={() => void refresh()} className="ml-3 font-medium underline">
-            重试
-          </button>
-        </div>
-      )}
+      <ReadStatus error={error} cached={data !== undefined} lastSuccessAt={lastSuccessAt} onRetry={() => void refresh()} />
 
       <div className="mt-6 lg:flex lg:items-start lg:gap-6">
         {/* 待办框：窄屏在事件列表上方，宽屏挪到右栏 */}
@@ -107,12 +107,19 @@ export default function Today() {
           <TodoBox
             data={todos.data}
             loading={todos.loading}
+            error={todos.error}
+            lastSuccessAt={todos.lastSuccessAt}
+            onRetry={() => void todos.refresh()}
             onChanged={onChanged}
             onOpenEvent={setSelectedId}
           />
         </div>
 
         <div className="min-w-0 flex-1">
+          {(data?.overdue?.length ?? 0) > 0 && <section className="mb-6" aria-label="已逾期，待处理">
+            <h2 className="mb-3 text-sm font-semibold text-rose-700">已逾期，待处理 · {data!.overdue!.length} 件作业</h2>
+            <ul className="space-y-3">{data!.overdue!.map(e => <li key={e.id}><EventCard event={e} onClick={() => setSelectedId(e.id)} /></li>)}</ul>
+          </section>}
           {loading && (
             <div className="space-y-3" aria-busy>
               {[0, 1, 2].map((i) => (
@@ -154,22 +161,23 @@ export default function Today() {
             </ul>
           )}
 
-          {data && data.events.length === 0 && (
+          {data && data.events.length === 0 && !data.overdue?.length && (
             <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-6 py-14 text-center">
               <div className="text-5xl" aria-hidden>
                 ☕️
               </div>
-              <p className="mt-4 text-lg font-medium text-slate-700">今天没有安排，轻松一天 🎉</p>
-              <p className="mt-2 text-sm text-slate-400">群里有新通知时会自动出现在这里</p>
-              <Link
+              <p className="mt-4 text-lg font-medium text-slate-700">今天暂无已整理的日程</p>
+              <p className="mt-2 text-sm text-slate-400">可检查待办；已启用群的新通知整理后会出现在这里</p>
+              {!readonly && demoAvailable && <Link
                 to="/demo"
                 className="mt-6 inline-block rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700"
               >
                 去演示控制台看看效果 →
-              </Link>
+              </Link>}
             </div>
           )}
 
+          <ReadStatus error={upcoming.error} cached={upcoming.data !== undefined} lastSuccessAt={upcoming.lastSuccessAt} onRetry={() => void upcoming.refresh()} />
           {upcomingEvents.length > 0 && (
             <div className="mt-8">
               <h2 className="text-sm font-semibold text-slate-600">

@@ -1,11 +1,11 @@
 // LLM 提取（FR-4）：把一批候选消息交给 LLM，拿回结构化的事件（新建 / 改期 / 取消）。
-// 任何失败都只返回 []、不抛异常——调度器照样把消息置为已处理，避免死循环（FR-5.4）。
-// 例外是「AI 连不上」：通过 status.llmFailed 告诉调用方，这批留着稍后重试。
+// 提取失败通过 status.llmFailed 通知调度器，保留本批消息供重试。
 import OpenAI from 'openai';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 import { redactSensitive } from '../redact.js';
 import { z } from 'zod';
 import { getLlmConfig } from '../ai-settings.js';
+import { createJsonCompletion, jsonBody } from './llm-json.js';
 import { groupCourseName, occurrences } from '../timetable.js';
 import type { EventType, Level, Message } from '../types.js';
 import { memoryEnabled, preferenceRules } from './preferences.js';
@@ -64,14 +64,19 @@ export function fmtShanghai(ms: number): string {
   );
 }
 
-const TIME_RE = /^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2})(?::\d{2}(?:\.\d+)?)?)?\s*(Z|[+-]\d{2}:?\d{2})?$/;
+const TIME_RE = /^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2})(?::(\d{2}(?:\.\d+)?))?)?\s*(Z|[+-]\d{2}:?\d{2})?$/;
 
 /** LLM 给的时间串 → 毫秒。缺时区按 +08:00；只有日期按当天 23:59。不认识返回 NaN。 */
 export function parseTime(s: string): number {
   const m = TIME_RE.exec(s.trim());
   if (!m) return NaN;
-  const [, date, hm = '23:59', zone = '+08:00'] = m;
-  return Date.parse(`${date}T${hm}:00${zone}`);
+  const [, date, hm = '23:59', seconds = '00', zone = '+08:00'] = m;
+  // Date.parse 会把二月三十日和 24:00 自动进位；通知时间必须对应真实日期。
+  const day = new Date(`${date}T00:00:00Z`);
+  if (!Number.isFinite(day.getTime()) || day.toISOString().slice(0, 10) !== date) return NaN;
+  const [hour, minute] = hm.split(':').map(Number);
+  if (hour! > 23 || minute! > 59 || Number(seconds) >= 60) return NaN;
+  return Date.parse(`${date}T${hm}:${seconds}${zone}`);
 }
 
 // ---------- 输出 schema ----------
@@ -128,7 +133,7 @@ export function parseExtraction(
 ): { ok: true; events: ExtractedEvent[] } | { ok: false; error: string } {
   let json: unknown;
   try {
-    json = JSON.parse(raw);
+    json = JSON.parse(jsonBody(raw));
   } catch (e) {
     return { ok: false, error: `不是合法 JSON：${(e as Error).message}` };
   }
@@ -147,8 +152,23 @@ export function parseExtraction(
 
 // ---------- prompt ----------
 
-function fmtMsg(m: Message): string {
-  return `[${m.message_id}] ${fmtShanghai(m.sent_at)} ${m.sender_name}：${m.text}`;
+const shanghaiDay = (ms: number) => Math.floor((ms + TZ_OFFSET) / DAY);
+const fmtDay = (day: number) => {
+  const d = new Date(day * DAY);
+  return `${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+};
+
+/**
+ * 不是当天发的消息（补拉的历史）附上按发送日算好的「今天/明天/后天」，
+ * 避免模型拿当前时间去换算相对日期（10-09 发的「明天」被算成 10-11）。
+ */
+function fmtMsg(m: Message, now: number): string {
+  const day = shanghaiDay(m.sent_at);
+  const ago = shanghaiDay(now) - day;
+  const anchor = ago > 0
+    ? `（${ago} 天前发送；对这条消息而言：今天=${fmtDay(day)}，明天=${fmtDay(day + 1)}，后天=${fmtDay(day + 2)}）`
+    : '';
+  return `[${m.message_id}] ${fmtShanghai(m.sent_at)}${anchor} ${m.sender_name}：${m.text}`;
 }
 
 function fmtEvent(e: ActiveEventBrief): string {
@@ -206,7 +226,7 @@ ${calendar(now, earliest)}
 
 规则：
 1. 只提取需要学生行动或到场的事项：考试/小测、作业与提交截止、开会、活动、需要照做的通知（选课、填表、缴费等）。**只要说定了具体时间（或日期）要去做的事，不管内容是什么都算**，包括聚餐、吃饭、出游、打球、开黑等约定（type 用 activity），比如「周二早上 6:00 去餐馆吃饭」「周六晚 7 点北门聚餐」。不算的只有：没有定下时间的随口提议或询问（「晚上约饭吗」「有人开黑吗」「有人拼外卖吗」）、闲聊、吐槽、二手买卖、失物招领。没有 @ 任何人的通知视为对全体同学的通知，照常提取；[at] 表示 @全体成员 或 @了我，同样照常提取。
-2. 相对时间（今天、明天、后天、今晚、下周三……）以**该消息的发送时间**为基准换算成绝对时间，先在日历里找到发送日期所在的那一行，再查表，不要心算星期：「周五 / 本周五」指发送日期所在那一行的周五，若该时刻在发送时间之前（已经过了）则指下一行的周五；「下周X」指发送日期所在行的下一行的周X——哪怕本周的周X还没到，「下周X」也不是本周的周X（周一发的「下周三」是 9 天后，不是 2 天后；周日发的「下周三」是 3 天后）。
+2. 相对时间（今天、明天、后天、今晚、下周三……）以**该消息的发送时间**为基准换算成绝对时间，先在日历里找到发送日期所在的那一行，再查表，不要心算星期：「周五 / 本周五」指发送日期所在那一行的周五，若该时刻在发送时间之前（已经过了）则指下一行的周五；「下周X」指发送日期所在行的下一行的周X——哪怕本周的周X还没到，「下周X」也不是本周的周X（周一发的「下周三」是 9 天后，不是 2 天后；周日发的「下周三」是 3 天后）。**「当前时间」只用来判断事情是否已经过去，不能作为相对时间的基准**；消息后面若给出了「对这条消息而言：今天=…，明天=…」，直接照用。消息里出现的其他日期要看清楚角色：例如「明天上 10.7 的课」是明天按 10 月 7 日的课表上课（调课/补课），事件日期是明天，10.7 只是被替代的原日期。
 3. 所有时间输出为 "YYYY-MM-DDTHH:mm+08:00" 字符串。考试/会议/活动填 start_at（知道结束时间再填 end_at）；作业/截止类填 deadline_at。只说了日期没说具体时间的截止，按当天 23:59。
 4. 不确定的字段给 null，不要编造。
 5. 下面会给出本群已有的事件（带 id）。如果某条消息是对已有事件的改期、换地点、补充要求，输出 action="update"、update_of=该事件 id，并**只填变化后的字段**，没变的字段给 null（填了的字段会整个覆盖旧值：补充要求时 action_required 要写「已有事件的 action_required + 新要求」合并后的完整要求，旧要求一条都不能丢；description 除非事项内容本身变了，否则给 null）；如果是取消，输出 action="cancel"、update_of=该事件 id。名字相近但不是同一件事的（比如「高数期中」和「线代期中」）不要混为一谈。已有事件的单纯重复提醒不要输出。
@@ -297,14 +317,15 @@ export function buildUserPrompt(input: ExtractInput): string {
   const earliest = input.candidates[0]?.sent_at ?? input.now;
   if (input.now - earliest > 3600_000) {
     parts.push(
-      '注意：下面有些新消息是补拉回来的历史消息，发送时间明显早于当前时间。相对时间一律按各自的发送时间换算；' +
+      '注意：下面有些新消息是补拉回来的历史消息，发送时间明显早于当前时间。相对时间一律按各自的发送时间换算，' +
+        '直接使用消息后面括号里给出的「今天/明天/后天」日期，绝不能用当前时间换算（例：10-09 发的「明天」是 10-10，即使现在已经是 10-10 或更晚）；' +
         '已有事件可能是根据更晚的消息建立的——旧消息和已有事件说的是同一件事时不要输出，说的是别的事（哪怕标题相近、日期不同）照常 create。',
     );
   }
   if (input.context.length) {
-    parts.push('之前的消息（仅供理解上下文，不要从这里提取事项）：\n' + input.context.map(fmtMsg).join('\n'));
+    parts.push('之前的消息（仅供理解上下文，不要从这里提取事项）：\n' + input.context.map((m) => fmtMsg(m, input.now)).join('\n'));
   }
-  parts.push('需要处理的新消息：\n' + input.candidates.map(fmtMsg).join('\n'));
+  parts.push('需要处理的新消息：\n' + input.candidates.map((m) => fmtMsg(m, input.now)).join('\n'));
   return parts.join('\n\n');
 }
 
@@ -334,7 +355,15 @@ function getClient(): LlmClient {
 
 /** 单次调用的结果标记。按调用传，不看全局计数——多个群并发时别的群失败不会连累这一批。 */
 export interface ExtractStatus {
-  llmFailed: boolean; // AI 没调通（网络 / 鉴权等），不是输出格式问题
+  llmFailed: boolean; // 未得到完整有效的提取结果：未配置、调用失败、格式错误或无法恢复的截断
+  failureReason?: import('../types.js').ProcessingFailureReason;
+}
+
+function markExtractionFailed(status: ExtractStatus, reason: NonNullable<ExtractStatus['failureReason']>): void {
+  status.llmFailed = true;
+  status.failureReason = reason;
+  llmStats.llm = 'error';
+  llmStats.failed++;
 }
 
 export async function extractEvents(
@@ -342,23 +371,47 @@ export async function extractEvents(
   client: LlmClient | undefined = undefined,
   status: ExtractStatus = { llmFailed: false },
 ): Promise<ExtractedEvent[]> {
+  // Platform IDs (notably WeChat's 71-character IDs) are easy for an LLM to
+  // shorten or mistype. Use request-local references, then restore the exact
+  // original IDs before reconciliation. Context has a separate namespace and
+  // is never accepted as evidence for a new event.
+  const sources = new Map(input.candidates.map((message, index) => [`m${index + 1}`, message.message_id]));
+  const events = await extractReferencedEvents({
+    ...input,
+    candidates: input.candidates.map((message, index) => ({ ...message, message_id: `m${index + 1}` })),
+    context: input.context.map((message, index) => ({ ...message, message_id: `c${index + 1}` })),
+  }, client, status);
+  return events.map(event => ({ ...event, source_message_ids: event.source_message_ids.map(id => sources.get(id)!) }));
+}
+
+/** References remain stable across truncation splits and correction attempts. */
+async function extractReferencedEvents(
+  input: ExtractInput,
+  client: LlmClient | undefined,
+  status: ExtractStatus,
+): Promise<ExtractedEvent[]> {
   if (input.candidates.length === 0) return [];
   if (!client && !getLlmConfig().apiKey) {
     llmStats.llm = 'unconfigured';
+    status.llmFailed = true;
+    status.failureReason = 'unconfigured';
     return [];
   }
   const llm = client ?? getClient();
   const r = await extractOnce(input, llm, status);
   if (r !== 'truncated') return r;
   // 输出被 max_tokens 截断（一批事项太多，历史补齐时常见）：对半拆开各跑一次，而不是整批丢掉
-  if (input.candidates.length <= 1) return [];
+  if (input.candidates.length <= 1) {
+    markExtractionFailed(status, 'truncated');
+    return [];
+  }
   const mid = Math.ceil(input.candidates.length / 2);
   const head = input.candidates.slice(0, mid);
   const tail = input.candidates.slice(mid);
   console.warn(`[extract] 输出被截断，拆成 ${head.length} + ${tail.length} 条重试`);
-  const a = await extractEvents({ ...input, candidates: head }, llm, status);
-  if (status.llmFailed) return []; // 前半就连不上了，整批留着重试
-  const b = await extractEvents(
+  const a = await extractReferencedEvents({ ...input, candidates: head }, llm, status);
+  if (status.llmFailed) return []; // 前半提取失败，整批留着重试
+  const b = await extractReferencedEvents(
     { ...input, candidates: tail, context: [...input.context, ...head].slice(-Math.max(input.context.length, 10)) },
     llm,
     status,
@@ -377,7 +430,9 @@ async function extractOnce(
   const prefs = preferenceSection();
   const earliest = input.candidates[0]?.sent_at ?? input.now;
   const messages: ChatCompletionMessageParam[] = [
-    { role: 'system', content: buildSystemPrompt(input.now, earliest) + (prefs ? `\n\n${prefs}` : '') },
+    { role: 'system', content: buildSystemPrompt(input.now, earliest)
+      + '\n\n来源规则：source_message_ids 只填写“需要处理的新消息”行首方括号内的短编号（例如 m1）。原样复制编号，不填写消息正文里的编号或平台 ID；上下文消息不能作为新事项的来源。'
+      + (prefs ? `\n\n${prefs}` : '') },
     { role: 'user', content: buildUserPrompt(input) },
   ];
 
@@ -387,10 +442,9 @@ async function extractOnce(
     try {
       llmStats.called++;
       const t0 = Date.now();
-      const res = await llm.chat.completions.create({
+      const res = await createJsonCompletion(llm, {
         model: getLlmConfig().model,
         messages,
-        response_format: { type: 'json_object' },
         temperature: 0,
         max_tokens: 4096,
       });
@@ -398,23 +452,27 @@ async function extractOnce(
       truncated = res.choices[0]?.finish_reason === 'length';
       llmStats.lastMs = Date.now() - t0;
     } catch (e) {
-      llmStats.llm = 'error';
-      llmStats.failed++;
-      status.llmFailed = true;
-      console.warn('[extract] LLM 调用失败：', redactSensitive(e));
+      const code = e && typeof e === 'object' && 'status' in e ? e.status : undefined;
+      const reason = code === 401 || code === 403 ? 'authentication' : code === 429 ? 'rate_limit' : 'network';
+      markExtractionFailed(status, reason);
+      console.warn('[extract] LLM 调用失败：', reason);
+
       return [];
     }
-    llmStats.llm = 'ok';
-
-    const r = raw ? parseExtraction(raw, validIds) : ({ ok: false, error: '输出为空' } as const);
-    if (r.ok) return r.events;
+    // 即使 JSON 恰好可解析，length 也不保证完整，不能把部分事项当作整批成功。
     if (truncated) return 'truncated';
+    const r = raw ? parseExtraction(raw, validIds) : ({ ok: false, error: '输出为空' } as const);
+    if (r.ok) {
+      llmStats.llm = 'ok';
+      return r.events;
+    }
 
     console.warn(`[extract] 第 ${attempt + 1} 次输出不合法：${r.error}`);
     messages.push(
       { role: 'assistant', content: raw || '（空）' },
-      { role: 'user', content: `上面的输出不合法：${r.error}\n请严格按要求的 JSON 格式重新输出。` },
+      { role: 'user', content: `上面的输出不合法：${r.error}\n本次可用的 source_message_ids 仅有：${[...validIds].join(', ')}。\n请严格按要求的 JSON 格式重新输出。` },
     );
   }
+  markExtractionFailed(status, 'invalid_output');
   return [];
 }

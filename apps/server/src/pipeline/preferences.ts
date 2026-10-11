@@ -5,6 +5,8 @@ import { accountDataState, accountEpoch } from '../accounts.js';
 import { beginTx, commitTx, db, dbGeneration, onAccountSwitch, rollbackTx } from '../db/index.js';
 import { getLlmConfig } from '../ai-settings.js';
 import { redactSensitive } from '../redact.js';
+import { createJsonCompletion } from './llm-json.js';
+
 import type { Level } from '../types.js';
 import type { LlmClient } from './extract.js';
 
@@ -41,8 +43,7 @@ const SummarySchema = z.object({
         feedback_ids: z.array(z.number().int()).default([]),
       }),
     )
-    .max(12)
-    .default([]),
+    .max(12),
 });
 
 const PROMPT = `你在维护「用户对日程事件危机等级的偏好」。输入是用户手动调级的记录（JSON 数组）：
@@ -145,17 +146,21 @@ export async function summarize(
 
   let rules: z.infer<typeof SummarySchema>['rules'];
   try {
-    const resp = await getClient().chat.completions.create({
+    const resp = await createJsonCompletion(getClient(), {
       model: cfg.model,
       temperature: 0,
       max_tokens: 1024,
-      response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: PROMPT },
         { role: 'user', content: JSON.stringify(feedback) },
       ],
     });
-    const raw = resp.choices[0]?.message?.content ?? '';
+    const choice = resp.choices[0];
+    if (choice?.finish_reason && choice.finish_reason !== 'stop') {
+      console.warn('[preferences] incomplete rules response, keep old rules');
+      return;
+    }
+    const raw = choice?.message?.content ?? '';
     const start = raw.indexOf('{');
     const end = raw.lastIndexOf('}');
     const parsed = SummarySchema.safeParse(JSON.parse(start >= 0 && end > start ? raw.slice(start, end + 1) : raw));

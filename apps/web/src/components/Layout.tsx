@@ -4,9 +4,9 @@ import Avatar from './Avatar';
 import ConnectBanner from './ConnectBanner';
 import Pet from './Pet';
 import StatusLights from './StatusLights';
-import SyncButton from './SyncButton';
 import ReturnQQ from './ReturnQQ';
-import { useConnectStatus } from './ConnectStatus';
+import SyncButton from './SyncButton';
+import { useAccess, useConnectStatus } from './ConnectStatus';
 
 interface NavItem {
   to: string;
@@ -33,6 +33,8 @@ function Icon({ d }: { d: string }) {
 
 export default function Layout() {
   const { data } = useConnectStatus();
+  const { readonly, demoAvailable } = useAccess();
+  const navigation = NAV.filter(n => (!readonly || n.to === '/' || n.to === '/week') && (n.to !== '/demo' || demoAvailable));
   const paused = data?.desktop_qq !== undefined && data.desktop_qq.state !== 'idle';
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800" inert={paused || undefined}>
@@ -41,9 +43,11 @@ export default function Layout() {
           <NavLink to="/" className="shrink-0 text-lg font-semibold tracking-tight text-slate-900">
             AI课代表
           </NavLink>
-          <ReturnQQ />
+          {!readonly && <SyncButton />}
+          {!readonly && <ReturnQQ />}
+          {readonly && <span className="text-xs text-slate-500">只读浏览</span>}
           <nav className="hidden flex-1 gap-1 lg:flex">
-            {NAV.map((n) => (
+            {navigation.map((n) => (
               <NavLink
                 key={n.to}
                 to={n.to}
@@ -59,10 +63,9 @@ export default function Layout() {
             ))}
           </nav>
           <div className="ml-auto flex items-center gap-2 sm:gap-3">
-            <SyncButton />
             <StatusLights />
             {/* 中小屏跟在状态灯后面；宽屏贴到整个页面的最右上角 */}
-            <Avatar className="xl:absolute xl:right-5 xl:top-[10px]" />
+            {!readonly && <Avatar className="xl:absolute xl:right-5 xl:top-[10px]" />}
           </div>
         </div>
         <ConnectBanner />
@@ -73,8 +76,8 @@ export default function Layout() {
         <Outlet />
       </main>
 
-      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-6 border-t border-slate-200 bg-white pb-[env(safe-area-inset-bottom)] lg:hidden">
-        {NAV.map((n) => (
+      <nav style={{ gridTemplateColumns: `repeat(${navigation.length}, minmax(0, 1fr))` }} className="fixed inset-x-0 bottom-0 z-30 grid border-t border-slate-200 bg-white pb-[env(safe-area-inset-bottom)] lg:hidden">
+        {navigation.map((n) => (
           <NavLink
             key={n.to}
             to={n.to}
@@ -90,7 +93,7 @@ export default function Layout() {
       </nav>
 
       {/* 桌宠（PET-1~6）：纯装饰浮层，交互与层级说明见 components/Pet.tsx 顶部注释 */}
-      {!paused && <Pet />}
+      {!paused && !readonly && <Pet />}
     </div>
   );
 }

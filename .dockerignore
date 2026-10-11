@@ -11,3 +11,14 @@ tools/
 .env.release
 *.log
 docs/
+
+.review-research/
+.agents/
+apps/server/data/
+classrep-fastjudge/py/
+classrep-fastjudge/.venv/
+classrep-fastjudge/data/
+classrep-fastjudge/reports/
+unsloth_compiled_cache/
+response_only_train.py
+**/__pycache__/

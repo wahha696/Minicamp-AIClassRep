@@ -217,8 +217,9 @@ function createProposalFingerprintsForSource(
     `SELECT p.event_fingerprint, e.type, e.title, e.description, e.start_at, e.end_at, e.deadline_at,
             e.location, e.action_required, e.level
        FROM event_proposals p JOIN events e ON e.id = p.event_id
-      WHERE e.group_id = ? AND p.kind = 'create' AND p.source_message_ids = ?`,
-  ).all(groupId, normalizedSourceMessageIds(sourceMessageIds)) as unknown as CreateProposalFingerprintRow[];
+      WHERE (e.group_id = ? OR EXISTS (SELECT 1 FROM event_sources s WHERE s.event_id=e.id AND s.group_id=?))
+        AND p.kind = 'create' AND p.source_message_ids = ?`,
+  ).all(groupId, groupId, normalizedSourceMessageIds(sourceMessageIds)) as unknown as CreateProposalFingerprintRow[];
   return rows.map((row) => {
     // 兼容极旧或损坏的 v5 行；v6 迁移会正常把这些行一次性回填。
     return parseCreateProposalFingerprint(row.event_fingerprint) ?? row;
@@ -238,9 +239,9 @@ export function hasGroupCreateProposalForEventSource(
   return db.prepare(
     `SELECT 1 AS ok
        FROM event_proposals p JOIN events e ON e.id = p.event_id
-      WHERE e.group_id = ? AND p.event_id = ? AND p.kind = 'create'
+      WHERE (e.group_id = ? OR EXISTS (SELECT 1 FROM event_sources s WHERE s.event_id=e.id AND s.group_id=?)) AND p.event_id = ? AND p.kind = 'create'
         AND p.source_message_ids = ? LIMIT 1`,
-  ).get(groupId, eventId, normalizedSourceMessageIds(sourceMessageIds)) !== undefined;
+  ).get(groupId, groupId, eventId, normalizedSourceMessageIds(sourceMessageIds)) !== undefined;
 }
 
 /**

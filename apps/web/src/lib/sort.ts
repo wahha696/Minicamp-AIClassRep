@@ -12,8 +12,9 @@ export const SOON_MS = 2 * 3_600_000;
 
 type Sortable = Pick<EventDTO, 'id' | 'status' | 'level' | 'start_at' | 'deadline_at'>;
 
-function sortTime(e: Sortable): number | null {
-  return e.start_at ?? e.deadline_at;
+export function sortTime(e: Sortable, now: number): number | null {
+  const upcoming = [e.start_at, e.deadline_at].filter((time): time is number => time !== null && time >= now);
+  return upcoming.length ? Math.min(...upcoming) : e.deadline_at ?? e.start_at;
 }
 
 /**
@@ -22,15 +23,15 @@ function sortTime(e: Sortable): number | null {
  */
 export function urgencyTier(e: Sortable, now = Date.now()): number {
   if (e.status === 'done') return 4;
-  const t = sortTime(e);
+  const t = sortTime(e, now);
   if (t === null) return 2;
   if (t < now) return 3;
   return t - now <= SOON_MS ? 0 : 1;
 }
 
-function byTime(a: Sortable, b: Sortable): number {
-  const ta = sortTime(a);
-  const tb = sortTime(b);
+function byTime(a: Sortable, b: Sortable, now: number): number {
+  const ta = sortTime(a, now);
+  const tb = sortTime(b, now);
   if (ta !== tb) {
     if (ta === null) return 1;
     if (tb === null) return -1;
@@ -42,12 +43,12 @@ function byTime(a: Sortable, b: Sortable): number {
 /** 返回排好序的新数组，不改原数组 */
 export function sortEvents<T extends Sortable>(events: readonly T[], mode: SortMode, now = Date.now()): T[] {
   const list = [...events];
-  if (mode === 'time') return list.sort(byTime);
+  if (mode === 'time') return list.sort((a, b) => byTime(a, b, now));
   return list.sort(
     (a, b) =>
       (a.status === 'done' ? 1 : 0) - (b.status === 'done' ? 1 : 0) ||
       b.level - a.level ||
       urgencyTier(a, now) - urgencyTier(b, now) ||
-      byTime(a, b),
+      byTime(a, b, now),
   );
 }

@@ -71,6 +71,9 @@ export function eventTimeText(
     if (e.end_at !== null && e.end_at > e.start_at) {
       text += `–${dayIndex(e.end_at) === dayIndex(e.start_at) ? hhmm(e.end_at) : short(e.end_at)}`;
     }
+    const ongoing = e.end_at !== null && e.start_at <= now && e.end_at > now;
+    if (e.deadline_at !== null) return { text: `${ongoing ? '进行中 · ' : ''}${text}${e.end_at !== null && e.end_at > e.start_at ? '' : ' 开始'}；${short(e.deadline_at)} 截止`, isDeadline: true };
+    if (ongoing) text = `进行中 · ${text}`;
     return { text, isDeadline: false };
   }
   if (e.deadline_at !== null) return { text: `${short(e.deadline_at)} 截止`, isDeadline: true };

@@ -24,7 +24,7 @@ export default function ReturnQQ() {
     if (desktop.state !== 'idle') awayRef.current = true;
     else if (awayRef.current) {
       awayRef.current = false;
-      toast('已返回 ClassRep，正在补读间断期间的群消息');
+      toast('已返回 ClassRep，正在补读间断期间的 QQ 群消息');
       window.dispatchEvent(new Event('classrep:resumed'));
     }
   }, [desktop, toast]);
@@ -92,7 +92,7 @@ export default function ReturnQQ() {
             <h2 id="return-qq-title" className="text-xl font-semibold tracking-tight text-slate-900">{title}</h2>
             <p id="return-qq-description" className="mt-3 text-sm leading-6 text-slate-500">
               {phase === 'qq'
-                ? 'ClassRep 已暂停。关闭 QQ 窗口或点击下方按钮即可返回，期间的群消息会自动补读。'
+                ? 'QQ 采集已暂停，微信采集不受影响。关闭 QQ 窗口或点击下方按钮即可返回，期间的 QQ 群消息会自动补读。'
                 : phase === 'opening' ? '正在打开当前账号的电脑版 QQ，请稍候。'
                   : phase === 'error' ? desktop.message : '正在恢复 QQ 连接，随后自动补读间断期间的群消息。'}
             </p>

@@ -21,6 +21,7 @@ import {
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ensureNodeExe } from './lib/fetch-node.mjs';
+import { copyWechatIdentityRuntime } from './lib/wechat-runtime.mjs';
 
 const REPO = dirname(dirname(fileURLToPath(import.meta.url))); // 仓库根
 const releaseDir = join(REPO, 'release');
@@ -119,11 +120,11 @@ if (existsSync(join(fjSrc, 'src', 'infer.py'))) {
   // R2：文件在 ≠ 可用。打包前必须验证便携 Python 能 import 快判依赖——
   // 打包版没有 scripts/fastjudge-setup.mjs，残缺 py/ 进了包就是静默死亡（只剩 30s 退避日志）。
   const fjPy = join(fjSrc, 'py', 'python.exe');
-  const usable = spawnSync(fjPy, ['-c', 'import sklearn,jieba,joblib,numpy;print("ok")'], {
+  const usable = spawnSync(fjPy, ['-c', 'import sklearn,jieba,joblib,numpy,zstandard;assert zstandard.__version__=="0.25.0";print("ok")'], {
     encoding: 'utf8', timeout: 60_000, cwd: fjSrc,
   });
   if (usable.status !== 0 || !String(usable.stdout).includes('ok')) {
-    fail('classrep-fastjudge/py 便携 Python 依赖校验不过（删掉 py/ 后重跑 node scripts/fastjudge-setup.mjs）');
+    fail('便携 Python 依赖不完整，请运行 node scripts/fastjudge-setup.mjs 补齐后重新打包');
   }
   const FJ_SKIP = new Set(['.venv', '__pycache__', 'best', 'data', 'reports']); // best/ 是 models/ 下重复的训练检查点；data/reports 是本地训练产物（R3）
   function copyFastjudge(src, dst) {
@@ -141,6 +142,9 @@ if (existsSync(join(fjSrc, 'src', 'infer.py'))) {
 } else {
   log('⚠️ 缺 classrep-fastjudge/src/infer.py：本包不带本地快判（用户可自行放入项目根目录自动启用）');
 }
+
+// 身份读取源码先随包备齐；正式连接仍受产品入口控制，不因打包启动。
+copyWechatIdentityRuntime(REPO, outDir);
 
 // ---------- 6. app/ 与 data/mock/ ----------
 cpSync(join(REPO, 'apps', 'server', 'dist', 'index.js'), join(outDir, 'app', 'server', 'dist', 'index.js'));

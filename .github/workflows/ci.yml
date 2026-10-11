@@ -28,6 +28,14 @@ jobs:
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
 
+      - name: 准备独立 Python 运行时
+        run: |
+          node scripts/fastjudge-setup.mjs
+          "WECHAT4_TEST_PYTHON=$((Resolve-Path classrep-fastjudge/py/python.exe).Path)" >> $env:GITHUB_ENV
+
+      - name: 微信 Python 人工数据回归
+        run: node scripts/test-wechat-python.mjs
+
       - name: 类型检查（server + web）
         run: pnpm -r typecheck
 
@@ -35,13 +43,16 @@ jobs:
         run: pnpm -r test
 
       - name: 自动更新故障与中断恢复测试
-        run: node --test scripts/update.test.mjs
+        run: node --test scripts/lib/*.test.mjs scripts/update.test.mjs
 
       - name: v1.0.0 旧版救援升级测试
         run: node --test scripts/rescue-upgrade.test.mjs
 
       - name: 构建（esbuild + vite）
         run: pnpm -r build
+
+      - name: 无凭证安全启动冒烟
+        run: node scripts/smoke-clean.mjs
 
   smoke-linux:
     name: Ubuntu · 全新克隆冒烟（/health）
@@ -59,7 +70,7 @@ jobs:
       - name: 安装依赖并构建
         run: |
           pnpm install --frozen-lockfile
-          pnpm --filter web build
+          pnpm build
 
       # R6：本地快判端到端冒烟（Node 之外独立验证 Python→joblib→UTF-8 链路，smoke-utf8.json 不再闲置）
       - name: 本地快判冒烟（infer.py + smoke-utf8.json）
@@ -73,18 +84,4 @@ jobs:
           echo "$out" | python3 -c "import json,sys; s=json.load(sys.stdin)['scores']; assert len(s)==4, f'len: {s}'; assert s[2]>=0.2, f'考试通知得分过低: {s}'; assert s[1]<0.2, f'闲聊得分过高: {s}'"
 
       - name: 起后端并打 /health（clone 即用冒烟，不需要 QQ/NapCat）
-        run: |
-          cd apps/server
-          node --import tsx src/index.ts &
-          SRV=$!
-          for i in $(seq 1 60); do
-            if curl -fsS http://localhost:8000/health; then
-              echo
-              echo "fresh-clone smoke OK"
-              kill $SRV
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "后端 60 秒内没有就绪"
-          exit 1
+        run: node scripts/smoke-clean.mjs

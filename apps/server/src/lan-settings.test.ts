@@ -7,12 +7,14 @@ const account = vi.hoisted(() => ({
   state: 'ready' as 'ready' | 'switching' | 'error',
   uin: '10001' as string | null,
   epoch: 'epoch-a',
+  space: undefined as string | null | undefined,
 }));
 
 vi.mock('./accounts.js', () => ({
   accountDataState: () => account.state,
   accountEpoch: () => account.epoch,
   currentAccount: () => account.uin,
+  currentDataSpace: () => account.space === undefined ? account.uin : account.space,
 }));
 
 import {
@@ -32,6 +34,7 @@ beforeEach(() => {
   account.state = 'ready';
   account.uin = '10001';
   account.epoch = 'epoch-a';
+  account.space = undefined;
 });
 
 afterEach(() => {
@@ -39,6 +42,14 @@ afterEach(() => {
 });
 
 describe('LAN 链接账号绑定', () => {
+  it('微信单独使用时按空间绑定，两个无 QQ 的空间不混用链接', () => {
+    account.uin = null;
+    account.space = 'synthetic-space-A';
+    const saved = setLanEnabled(true);
+    expect(currentLanToken()).toBe(saved.token);
+    account.space = 'synthetic-space-B';
+    expect(currentLanToken()).toBeNull();
+  });
   it('开启时绑定当前账号与数据代次', () => {
     const saved = setLanEnabled(true);
 

@@ -38,6 +38,26 @@ function freshApp(): Hono {
   return makeApp();
 }
 
+it('微信群的选中状态与实际采集分开返回，平台以保存来源为准', async () => {
+  openDb(':memory:');
+  const app = new Hono(); let collecting: string[] = [];
+  registerBusinessRoutes(app, { wechatCollectingGroupIds: () => collecting });
+  for (const [id, adapter, enabled] of [['wx-a', 'wechat', 1], ['wx-b', 'wechat', 0], ['123', 'import', 1], ['qq-a', 'onebot', 1]] as const) {
+    db.prepare('INSERT INTO groups(group_id,name,enabled,adapter,created_at) VALUES (?,?,?,?,?)').run(id, '同名群', enabled, adapter, FIXED_NOW);
+  }
+  const groups = async () => (await app.request('/api/groups')).json() as Promise<Record<string, unknown>[]>;
+  expect(await groups()).toEqual(expect.arrayContaining([
+    expect.objectContaining({ group_id: 'wx-a', platform: 'wechat', enabled: true, collecting: false }),
+    expect.objectContaining({ group_id: '123', platform: 'import' }),
+    expect.objectContaining({ group_id: 'qq-a', platform: 'qq' }),
+  ]));
+  collecting = ['wx-a', 'wx-b'];
+  expect(await groups()).toEqual(expect.arrayContaining([
+    expect.objectContaining({ group_id: 'wx-a', collecting: true }),
+    expect.objectContaining({ group_id: 'wx-b', collecting: false }),
+  ]));
+});
+
 function addGroup(group_id: string, name: string): void {
   db.prepare(
     'INSERT OR IGNORE INTO groups (group_id, name, enabled, adapter, created_at) VALUES (?, ?, 1, ?, ?)',
@@ -185,6 +205,20 @@ function aiLocationUpdate(eventId: number, messageId: string, location: string, 
 // ===== /api/today
 
 describe('GET /api/today', () => {
+  it('仅未完成作业保留在逾期区，普通活动留在原日历，完成和取消不保留', async () => {
+    const app = freshApp();
+    addGroup('g1', '课程');
+    const yesterday = shTime(shiftDay(shanghaiToday(), -1), '20:00');
+    const kept = addEvent({ type: 'assignment', title: '报告', deadline_at: yesterday });
+    const awaiting = addEvent({ type: 'assignment', title: '待确认作业', deadline_at: yesterday, status: 'pending_confirm' });
+    addEvent({ type: 'assignment', deadline_at: yesterday, status: 'done' });
+    addEvent({ type: 'assignment', deadline_at: yesterday, status: 'cancelled' });
+    addEvent({ type: 'meeting', deadline_at: yesterday });
+    addEvent({ type: 'assignment', deadline_at: Date.now() + 1000 });
+    const { body } = await getJson(app, '/api/today');
+    expect((body as TodayDTO).overdue?.map(e => e.id)).toEqual([kept, awaiting]);
+    expect((body as TodayDTO).summary).toContain('2 件作业已逾期');
+  });
   it('只返回落在上海时间今天的事件，并按时间升序', async () => {
     const app = freshApp();
     const today = shanghaiToday();
@@ -233,13 +267,13 @@ describe('GET /api/today', () => {
 
     const { body } = await getJson(app, '/api/today');
     expect((body as TodayDTO).events).toEqual([]);
-    expect((body as TodayDTO).summary).toBe('今天没有待办，轻松一天');
+    expect((body as TodayDTO).summary).toBe('今天暂无未完成的日程；另有 1 件待办');
   });
 
   it('摘要：无事件时是固定文案', async () => {
     const app = freshApp();
     const { body } = await getJson(app, '/api/today');
-    expect((body as TodayDTO).summary).toBe('今天没有待办，轻松一天');
+    expect((body as TodayDTO).summary).toBe('今天暂无未完成的日程');
     expect((body as TodayDTO).events).toEqual([]);
   });
 
@@ -255,7 +289,7 @@ describe('GET /api/today', () => {
     const b = body as TodayDTO;
     expect(b.events).toHaveLength(2);
     // 两件都已过去（现在是 12:00）→ 回落到第一个（00:30 那件）
-    expect(b.summary).toBe('今天 2 件事，最急的是 00:30 凌晨已过的事');
+    expect(b.summary).toBe('今天 2 件未完成安排，请核对处理状态');
   });
 
   it('摘要：未来那件优先于已过去的那件', async () => {
@@ -268,7 +302,31 @@ describe('GET /api/today', () => {
     const { body } = await getJson(app, '/api/today');
     const b = body as TodayDTO;
     expect(b.events.map((e) => e.title)).toEqual(['已过去的事', '稍后的事']);
-    expect(b.summary).toBe('今天 2 件事，最急的是 14:00 稍后的事');
+    expect(b.summary).toBe('今天 2 件未完成安排，接下来 14:00 稍后的事');
+  });
+
+  it('完成项不成为下一件；过去开始的事项仍按未来截止提醒，并计入手动待办', async () => {
+    const app = freshApp();
+    const today = shanghaiToday();
+    addGroup('g1', '课程');
+    addEvent({ title: '已经完成', start_at: shTime(today, '12:30'), status: 'done' });
+    addEvent({ title: '报告提交', type: 'assignment', start_at: shTime(shiftDay(today, -2), '09:00'), deadline_at: shTime(today, '13:00') });
+    addEvent({ title: '会议', start_at: shTime(today, '14:00') });
+    db.prepare("INSERT INTO todos (title, note, level, created_at) VALUES ('买材料', '', 2, ?)").run(Date.now());
+    const { body } = await getJson(app, '/api/today');
+    expect((body as TodayDTO).summary).toBe('今天 2 件未完成安排，接下来 13:00 报告提交；另有 1 件待办');
+  });
+
+  it('跨天活动在查询区间内可见，但结束恰在区间开始和无效区间不算持续中', async () => {
+    const app = freshApp();
+    const today = shanghaiToday();
+    addGroup('g1', '课程');
+    const from = shTime(today, '00:00'), to = from + 86400000;
+    const ongoing = addEvent({ title: '持续活动', start_at: from - 86400000, end_at: to + 3600000 });
+    addEvent({ title: '已结束', start_at: from - 86400000, end_at: from });
+    addEvent({ title: '无效结束', start_at: from - 3600000, end_at: from - 7200000 });
+    expect(((await getJson(app, `/api/events?from=${from}&to=${to}`)).body as EventDTO[]).map(e => e.id)).toEqual([ongoing]);
+    expect(((await getJson(app, '/api/today')).body as TodayDTO).events.map(e => e.id)).toEqual([ongoing]);
   });
 
   it('跨时区边界：上海 00:30（UTC 还是前一天）时「今天」按上海算', async () => {
@@ -559,7 +617,7 @@ describe('PATCH /api/events/:id', () => {
     });
   });
 
-  it('手动设级：level+locked+history（不升 version），记一条 level_feedback（ai_level=调整前的值）', async () => {
+  it('手动设级：level+locked+history 并升 version，记一条 level_feedback（ai_level=调整前的值）', async () => {
     const app = freshApp();
     addGroup('g1', '高数(2)班');
     const id = addEvent({ title: '大物实验报告' }); // 默认 level=2, unlocked
@@ -569,7 +627,7 @@ describe('PATCH /api/events/:id', () => {
     const event = body as EventDetailDTO;
     expect(event.level).toBe(4);
     expect(event.level_locked).toBe(true);
-    expect(event.version).toBe(1); // 不升版本，否则卡片会误显示「已按最新通知更新」
+    expect(event.version).toBe(2);
     expect(event.history.at(-1)?.source_message_id).toBeNull();
     const levelChange = event.history.at(-1)?.changed_fields['level'] as { from: number; to: number };
     expect(levelChange).toEqual({ from: 2, to: 4 });
@@ -611,7 +669,7 @@ describe('PATCH /api/events/:id', () => {
       level: 4,
       level_locked: true,
       status: 'active',
-      version: 1,
+      version: 3,
       pending_proposals: [],
     });
     expect(db.prepare('SELECT status FROM event_proposals WHERE id = ?').get(proposalId)).toEqual({
@@ -713,6 +771,17 @@ describe('PATCH /api/events/:id', () => {
       level_locked: number;
     };
     expect(row).toEqual({ level: 2, level_locked: 0 });
+  });
+
+  it('超出日历可表示范围的人工时间不能落库', async () => {
+    const app = freshApp();
+    const id = addEvent({ title: '高数小测' });
+    for (const field of ['start_at', 'end_at', 'deadline_at']) {
+      for (const value of [Number.MAX_SAFE_INTEGER, 253402300800000]) {
+        expect((await patchJson(app, `/api/events/${id}`, { [field]: value, expected_version: 1 })).status).toBe(400);
+      }
+    }
+    expect((await getJson(app, `/api/events/${id}`)).body).toMatchObject({ version: 1 });
   });
 
   it('status + level 一起 PATCH 都生效', async () => {
@@ -852,7 +921,7 @@ describe('PATCH /api/events/:id', () => {
     });
     expect(statusWrite.status).toBe(200);
     const afterStatus = statusWrite.body as EventDetailDTO;
-    expect(afterStatus.version).toBe(initial.version); // 群通知/ICS 版本语义保持不变
+    expect(afterStatus.version).toBe(initial.version + 1);
     expect(afterStatus.updated_at).toBeGreaterThan(initial.updated_at);
     expect(await patchJson(app, `/api/events/${id}`, {
       level: 4, expected_version: initial.version, expected_updated_at: initial.updated_at,

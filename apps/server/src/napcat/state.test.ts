@@ -16,7 +16,19 @@ function base(over: Partial<ConnectInputs> = {}): ConnectInputs {
 
 const CONNECTED = { wsConnected: true, everOnline: true, selfId: '10001', kicked: false };
 
+describe('主动暂停 QQ', () => {
+  it.each([false, true])('暂停后明确要求人工恢复（external=%s）', (externalOnebot) => {
+    const result = deriveConnectStatus(base({ externalOnebot, uin: '10001',
+      onebot: { ...CONNECTED, wsConnected: false, stopped: true } }));
+    expect(result).toMatchObject({ state: 'reconnecting', message: 'QQ 采集已暂停，请重新连接后确认课代表空间' });
+  });
+});
+
 describe('deriveConnectStatus（架构.md §4，自上而下先命中为准）', () => {
+  it('启动冲突保留已保存的 QQ 号供接管请求核对，不宣告已登录', () => {
+    const result = deriveConnectStatus(base({ uin: '10001', manager: { ...base().manager, conflictAtBoot: true, pid: null } }));
+    expect(result).toMatchObject({ state: 'qq_conflict', uin: '10001' });
+  });
   it('1. qq_conflict：启动时 QQ 在运行且尚未 spawn，文案为 §7 冲突提示', () => {
     const r = deriveConnectStatus(base({ manager: { ...base().manager, conflictAtBoot: true, pid: null } }));
     expect(r.state).toBe('qq_conflict');

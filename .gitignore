@@ -4,8 +4,93 @@ node_modules/
 dist/
 *.log
 
+# 本机审查/接收验证资料与二进制（可能含群身份和组件日志）
+/.review-research/
+
 # 本地工具与账号数据（含 API Key、WebUI token、QQ 账号配置）
 tools/
+!/tools/
+/tools/*
+
+# 新版内存读取原型：只公开列出的源码，不公开输入库、密钥或运行资料。
+!/tools/wechat4-read-probe/
+/tools/wechat4-read-probe/*
+!/tools/wechat4-read-probe/cng.py
+!/tools/wechat4-read-probe/reader.py
+!/tools/wechat4-read-probe/test_reader.py
+!/tools/wechat4-read-probe/probe.py
+!/tools/wechat4-read-probe/README.md
+!/tools/wechat4-read-probe/acquisition.py
+!/tools/wechat4-read-probe/native.py
+!/tools/wechat4-read-probe/snapshot.py
+!/tools/wechat4-read-probe/test_acquisition.py
+!/tools/wechat4-read-probe/NOTICE.md
+!/tools/wechat4-read-probe/LICENSE-APACHE-2.0
+!/tools/wechat4-read-probe/inspect-installer.ps1
+!/tools/wechat4-read-probe/canary.py
+!/tools/wechat4-read-probe/test_canary.py
+!/tools/wechat4-read-probe/textdecode.py
+!/tools/wechat4-read-probe/test_textdecode.py
+!/tools/wechat4-read-probe/runtime.py
+!/tools/wechat4-read-probe/runtime_probe.py
+!/tools/wechat4-read-probe/test_runtime.py
+!/tools/wechat4-read-probe/test_polling.py
+!/tools/wechat4-read-probe/receipts.py
+!/tools/wechat4-read-probe/test_receipts.py
+!/tools/wechat4-read-probe/delivery.py
+!/tools/wechat4-read-probe/test_delivery.py
+!/tools/wechat4-read-probe/account_candidate.py
+!/tools/wechat4-read-probe/account_candidate_probe.py
+!/tools/wechat4-read-probe/catalog.py
+!/tools/wechat4-read-probe/catalog_probe.py
+!/tools/wechat4-read-probe/catalog_worker.py
+!/tools/wechat4-read-probe/catalog_worker_fixture.py
+!/tools/wechat4-read-probe/catalog_channel_probe.ts
+!/tools/wechat4-read-probe/test_catalog_worker.py
+!/tools/wechat4-read-probe/catalog_scope.py
+!/tools/wechat4-read-probe/test_catalog_scope.py
+!/tools/wechat4-read-probe/window_observation.py
+!/tools/wechat4-read-probe/window_class_probe.py
+!/tools/wechat4-read-probe/static_types.py
+!/tools/wechat4-read-probe/static_type_probe.py
+!/tools/wechat4-read-probe/static_window_map.py
+!/tools/wechat4-read-probe/window_map_snapshot.py
+!/tools/wechat4-read-probe/managed_windows.py
+!/tools/wechat4-read-probe/managed_window_probe.py
+!/tools/wechat4-read-probe/identity_snapshot.py
+!/tools/wechat4-read-probe/identity_bound_capture.py
+!/tools/wechat4-read-probe/identity_calibration_probe.py
+!/tools/wechat4-read-probe/identity_worker.py
+!/tools/wechat4-read-probe/identity_worker_fixture.py
+!/tools/wechat4-read-probe/identity_channel_probe.ts
+!/tools/wechat4-read-probe/identity_monitor_probe.ts
+!/tools/wechat4-read-probe/identity_discovery.py
+!/tools/wechat4-read-probe/test_account_candidate.py
+!/tools/wechat4-read-probe/test_catalog.py
+!/tools/wechat4-read-probe/test_catalog_probe.py
+!/tools/wechat4-read-probe/test_window_observation.py
+!/tools/wechat4-read-probe/test_static_types.py
+!/tools/wechat4-read-probe/test_window_map.py
+!/tools/wechat4-read-probe/test_managed_windows.py
+!/tools/wechat4-read-probe/test_identity_snapshot.py
+!/tools/wechat4-read-probe/test_identity_bound_capture.py
+!/tools/wechat4-read-probe/test_identity_calibration.py
+!/tools/wechat4-read-probe/test_identity_worker.py
+!/tools/wechat4-read-probe/test_identity_discovery.py
+!/tools/wechat4-read-probe/selected_intake.py
+!/tools/wechat4-read-probe/test_selected_intake.py
+!/tools/wechat4-read-probe/history.py
+!/tools/wechat4-read-probe/test_history.py
+!/tools/wechat4-read-probe/selected_intake_probe.py
+!/tools/wechat4-read-probe/test_selected_intake_probe.py
+!/tools/wechat4-read-probe/group_intake.py
+!/tools/wechat4-read-probe/test_group_intake.py
+!/tools/wechat4-read-probe/message_source.py
+!/tools/wechat4-read-probe/message_worker.py
+!/tools/wechat4-read-probe/message_worker_fixture.py
+!/tools/wechat4-read-probe/test_message_worker.py
+!/tools/wechat4-read-probe/zstd_package.py
+!/tools/wechat4-read-probe/test_zstd_package.py
 
 # 采集端 NapCat 4.18.28（程序随仓库提交，克隆即可用；见 napcat/README.md）。
 # 只忽略账号数据、运行时生成的文件和非 Windows x64 的原生库。
@@ -63,3 +148,9 @@ classrep-fastjudge/**/*.cache
 /classrep-fastjudge/reports/
 skills-lock.json
 docs/architecture/
+
+# 本机测试与训练产物，不属于产品交付
+/apps/server/data/
+/unsloth_compiled_cache/
+/response_only_train.py
+**/__pycache__/

@@ -4,7 +4,7 @@
 // 2. 群消息改期 / 改地点 / 改标题前的旧版本（event_history 里有来源消息、改了 RESTORABLE 字段的那条）；
 //    恢复 = 把还在生效的字段改回 from。恢复过的、被之后的群消息又改掉的不再列出（见 pendingRevert）。
 // 只列最近 30 天的（按取消 / 改动时间算），过期的只是不显示，库里的数据不删。
-// 恢复都算「手动调整」：写一条 source_message_id 为 NULL 的 history，不升 version（同手动调级的约定）。
+// 恢复都算「手动调整」：递增 version，写一条 source_message_id 为 NULL 的 history。
 import type { Hono } from 'hono';
 import { db } from '../db/index.js';
 import { parseLockedFields } from '../event-proposals.js';
@@ -232,7 +232,7 @@ function writeManualHistory(row: EventRow, changes: Changes, now: number): void 
   db.prepare(
     `INSERT INTO event_history (event_id, version, changed_fields, source_message_id, changed_at)
      VALUES (?, ?, ?, NULL, ?)`,
-  ).run(row.id, row.version, JSON.stringify(changes), now);
+  ).run(row.id, row.version + 1, JSON.stringify(changes), now);
 }
 
 function restoreCancelled(eventId: number, now: number): void {
@@ -242,7 +242,7 @@ function restoreCancelled(eventId: number, now: number): void {
   if (row.status !== 'cancelled' || !item) throw new RestoreError('这条已经不在回收站里了', 409);
   const prev = item.changes['status']?.from;
   const to: EventStatus = RESTORE_STATUSES.includes(prev as EventStatus) ? (prev as EventStatus) : 'active';
-  db.prepare('UPDATE events SET status = ?, updated_at = MAX(updated_at + 1, ?) WHERE id = ?').run(to, now, row.id);
+  db.prepare('UPDATE events SET status = ?, version = version + 1, updated_at = MAX(updated_at + 1, ?) WHERE id = ?').run(to, now, row.id);
   writeManualHistory(row, { status: { from: 'cancelled', to } }, now);
 }
 
@@ -257,9 +257,14 @@ function restoreChanged(historyId: number, now: number): void {
   if (!changedItem(h, row, now)) throw new RestoreError('这条已经不在回收站里了', 409);
 
   const revert = pendingRevert(row, parseChanges(h.changed_fields));
+  const start = 'start_at' in revert ? revert.start_at : row.start_at;
+  const end = 'end_at' in revert ? revert.end_at : row.end_at;
+  if (typeof start === 'number' && typeof end === 'number' && end <= start) {
+    throw new RestoreError('恢复后的结束时间必须晚于开始时间，请在事件详情中修正时间', 409);
+  }
   const fields = Object.keys(revert) as RestorableField[];
   const sets = fields.map((f) => `${f} = ?`).join(', ');
-  db.prepare(`UPDATE events SET ${sets}, updated_at = MAX(updated_at + 1, ?) WHERE id = ?`).run(
+  db.prepare(`UPDATE events SET ${sets}, version = version + 1, updated_at = MAX(updated_at + 1, ?) WHERE id = ?`).run(
     ...fields.map((f) => revert[f] as string | number | null),
     now,
     row.id,

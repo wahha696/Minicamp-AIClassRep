@@ -1,6 +1,6 @@
 // 调度（FR-5）：轮询 messages.processed=0，按群分批跑 stages（filter → Jev → extract → reconcile）。
 // 别人入库后不用通知这里；同一个群同一时刻只跑一个批次，不同群最多并发 GROUP_CONCURRENCY 个；一批消息处理完置 processed=1。
-// 例外：AI 连不上（网络 / 证书 / 服务挂了）时这批不置已处理，等 LLM_RETRY_MS 后重试，免得通知白白丢掉。
+// 处理失败（包括 AI 未配置、输出无效、入库异常）时这批不置已处理，等 LLM_RETRY_MS 后重试。
 //
 // 什么时候处理一个群（isDue）——Jev 分数决定等多久（阈值见 jev.ts）：
 //   · 攒够 MIN_PENDING 条，或最早一条等了 MAX_WAIT_MS（Jev 不可用时的老规则，兜底）；
@@ -10,14 +10,18 @@
 // Jev 分数在攒批期间就提前打好（triage），处理批次时直接复用，不再多等一次 Jev。
 import { accountDataState } from '../accounts.js';
 import { desktopPipelineEpoch, desktopPipelinePaused } from './activity.js';
-import { db, dbGeneration, onAccountSwitch } from '../db/index.js';
+import { beginTx, commitTx, db, dbGeneration, onAccountSwitch, rollbackTx } from '../db/index.js';
+import type { Message, ProcessingFailureReason } from '../types.js';
 import { redactSensitive } from '../redact.js';
-import type { Message } from '../types.js';
+
 import { type ExtractStatus, type ExtractedEvent, extractEvents } from './extract.js';
 import { isNoise } from './filter.js';
 import { JEV_DROP_BELOW, JEV_URGENT_AT, jevAvailable, scoreWithJev } from './jev.js';
 import { jevStats, resetPipelineStats } from './stats.js';
 import { applyEvents, listActiveEvents } from './reconcile.js';
+import { clearGroupFailure, getGroupFailure, groupCanRetry, llmConfigFingerprint,
+  recordGroupFailure, resetGroupFailure, resetRetryWaitForTest } from './failures.js';
+export { LLM_RETRY_MS } from './failures.js';
 
 const TICK_MS = 1_000;
 const MIN_PENDING = 15; // 攒够这么多条就处理
@@ -30,12 +34,15 @@ const GROUP_CONCURRENCY = 3; // 不同群同时处理的批次数（LLM 调用�
 const BATCH = 30;
 const CONTEXT = 10;
 const SCORE_CACHE_MAX = 10_000;
-export const LLM_RETRY_MS = 60_000; // AI 连不上后，隔这么久再试
-
-let llmRetryAt = 0; // 在这之前不自动处理（手动 runPipelineNow 不受限）
-
-/** 待处理消息的 Jev 分数（message_id → 分数）。批次处理完就删；重启丢了也没关系，会重新打分。 */
+/** 待处理消息的 Jev 分数（群 + message_id → 分数），不同群的同号消息必须隔离。 */
 const jevScores = new Map<string, number>();
+const scoreKey = (m: Pick<Message, 'group_id' | 'message_id'>) => JSON.stringify([m.group_id, m.message_id]);
+
+// Returning to desktop QQ must not interrupt the independent WeChat pipeline.
+// Trust the stored adapter rather than guessing the platform from a group ID.
+const isWechatGroup = (groupId: string) => db.prepare('SELECT adapter FROM groups WHERE group_id=?').get(groupId)?.adapter === 'wechat';
+const groupIsPaused = (groupId: string) => pipelineIsPaused() || (desktopPipelinePaused() && !isWechatGroup(groupId));
+const groupActivityEpoch = (groupId: string) => isWechatGroup(groupId) ? 0 : desktopPipelineEpoch();
 
 /** 一个批次在各 stage 之间传递的状态 */
 export interface Batch {
@@ -49,8 +56,10 @@ export interface Batch {
   context: Message[]; // 此前最近 10 条非噪声消息
   candidates: Message[]; // 过滤后留下的
   extracted: ExtractedEvent[];
-  llmFailed?: boolean; // AI 没调通：这批留着下次重试
-  processingError?: boolean; // 非网络错误：本批会收尾，但诊断中必须明确标出
+  llmFailed?: boolean; // 未得到完整有效的 AI 提取结果：这批留着下次重试
+  discarded?: boolean; // 清理使本批证据失效，不能确认剩余消息已整理
+  failureReason?: ProcessingFailureReason;
+
   timing: { jevMs: number; llmMs: number };
 }
 
@@ -73,16 +82,16 @@ const filterStage: Stage = (b) => {
 
 const jevStage: Stage = async (b) => {
   // 攒批期间已打过分的直接用；剩下的（大批积压、刚来的）一次请求补打
-  const unscored = b.candidates.filter((m) => !jevScores.has(m.message_id));
+  const unscored = b.candidates.filter((m) => !jevScores.has(scoreKey(m)));
   if (unscored.length) {
     const t0 = Date.now();
     const scores = await scoreWithJev(unscored, b.context, b.groupName);
-    if (pipelineIsPaused() || desktopPipelineEpoch() !== b.activityEpoch || dbGeneration() !== b.generation) return;
+    if (dbGeneration() !== b.generation || groupIsPaused(b.groupId) || groupActivityEpoch(b.groupId) !== b.activityEpoch) return;
     b.timing.jevMs = Date.now() - t0;
-    scores?.forEach((s, i) => jevScores.set(unscored[i]!.message_id, s));
+    scores?.forEach((s, i) => jevScores.set(scoreKey(unscored[i]!), s));
   }
   // 没分数（未配置 / 失败）的保留，交给 LLM
-  const dropped = b.candidates.filter((m) => (jevScores.get(m.message_id) ?? 1) < JEV_DROP_BELOW);
+  const dropped = b.candidates.filter((m) => (jevScores.get(scoreKey(m)) ?? 1) < JEV_DROP_BELOW);
   if (dropped.length) {
     const { changes } = db.prepare(
       "UPDATE messages SET filtered_out = 1, decision_reason = 'jev_below_threshold' WHERE group_id = ? AND filtered_out = 0 AND message_id IN (SELECT value FROM json_each(?))",
@@ -110,6 +119,7 @@ const extractStage: Stage = async (b) => {
   b.timing.llmMs = Date.now() - t0;
   if (status.llmFailed) {
     b.llmFailed = true;
+    b.failureReason = status.failureReason ?? 'processing';
     throw new LlmUnavailable(); // 后面的 stage 不用跑了
   }
 };
@@ -118,6 +128,10 @@ class LlmUnavailable extends Error {}
 
 const reconcileStage: Stage = (b) => {
   if (dbGeneration() !== b.generation) return;
+  // A group may have been cleared while AI was working. Never recreate its
+  // removed evidence from the batch's in-memory copy when the response arrives.
+  const present = db.prepare('SELECT 1 FROM messages WHERE group_id=? AND message_id=?');
+  if (b.messages.some(message => !present.get(b.groupId, message.message_id))) { b.discarded = true; return; }
   applyEvents(b.groupId, b.extracted, b.candidates);
 };
 
@@ -171,9 +185,10 @@ const toMessage = (g: PendingGroup) => ({ created_at: _, ...m }: Row): Message =
 
 /** 处理某群最早的一批未处理消息，返回置为已处理的条数 */
 async function processBatch(g: PendingGroup, expectedGeneration: number): Promise<number> {
-  const activityEpoch = desktopPipelineEpoch();
-  if (pipelineIsPaused() || dbGeneration() !== expectedGeneration) return 0;
+  if (dbGeneration() !== expectedGeneration || groupIsPaused(g.group_id)) return 0;
+  const activityEpoch = groupActivityEpoch(g.group_id);
   const gen = expectedGeneration; // 换号守卫：攒批期间切了账号，下面的读属于旧号，绝不能写进新号库
+  const fingerprint = llmConfigFingerprint();
   const rows = pendingRows(g.group_id);
   if (rows.length === 0) return 0;
 
@@ -189,35 +204,39 @@ async function processBatch(g: PendingGroup, expectedGeneration: number): Promis
     extracted: [],
     timing: { jevMs: 0, llmMs: 0 },
   };
+  let failed = false;
+  let failureReason: ProcessingFailureReason = 'processing';
   try {
     for (const stage of stages) {
-      if (pipelineIsPaused() || desktopPipelineEpoch() !== activityEpoch || dbGeneration() !== gen) return 0;
+      if (dbGeneration() !== gen || groupIsPaused(g.group_id) || groupActivityEpoch(g.group_id) !== activityEpoch) return 0;
+      failureReason = stage === reconcileStage ? 'storage' : 'processing';
       await stage(b);
-      if (pipelineIsPaused() || desktopPipelineEpoch() !== activityEpoch || dbGeneration() !== gen) return 0; // 切号或暂停期间的迟到回包留待重试
+      if (b.discarded) return 0;
+      if (dbGeneration() !== gen || groupIsPaused(g.group_id) || groupActivityEpoch(g.group_id) !== activityEpoch) return 0; // 切号或本平台暂停期间的迟到回包留待重试
     }
   } catch (e) {
-    if (!b.llmFailed) {
-      b.processingError = true;
-      console.warn(`[pipeline] 某群这批处理出错，消息仍置为已处理：${redactSensitive(e)}`);
-    }
+    failed = true;
+    if (!b.llmFailed) console.warn('[pipeline] 这批处理出错，保留待处理消息：', redactSensitive(e));
   }
-  if (pipelineIsPaused() || desktopPipelineEpoch() !== activityEpoch || dbGeneration() !== gen) return 0;
-  if (b.llmFailed) {
-    llmRetryAt = Date.now() + LLM_RETRY_MS;
-    console.warn(`[pipeline] AI 连不上，某群的 ${rows.length} 条消息 ${LLM_RETRY_MS / 1000}s 后重试`);
+  if (dbGeneration() !== gen || groupIsPaused(g.group_id) || groupActivityEpoch(g.group_id) !== activityEpoch) return 0;
+  if (failed) {
+    recordGroupFailure(g.group_id, b.failureReason ?? failureReason, fingerprint);
+    console.warn(`[pipeline] 处理未完成，群 ${g.group_id} 的 ${rows.length} 条消息保留待重试`);
     return 0;
   }
-  const { changes } = db
-    .prepare('UPDATE messages SET processed = 1 WHERE group_id = ? AND message_id IN (SELECT value FROM json_each(?))')
-    .run(b.groupId, ids(b.messages));
+  let changes: number | bigint;
+  beginTx();
+  try {
+    ({ changes } = db
+      .prepare('UPDATE messages SET processed = 1 WHERE group_id = ? AND message_id IN (SELECT value FROM json_each(?))')
+      .run(b.groupId, ids(b.messages)));
   if (b.candidates.length) {
     db.prepare(
       `UPDATE messages
           SET decision_reason = CASE
-            WHEN ? = 1 THEN 'pipeline_error'
             WHEN EXISTS (
               SELECT 1 FROM event_sources es JOIN events e ON e.id = es.event_id
-               WHERE e.group_id = messages.group_id AND es.message_id = messages.message_id
+               WHERE COALESCE(NULLIF(es.group_id,''),e.group_id) = messages.group_id AND es.message_id = messages.message_id
                  AND (e.status = 'pending_confirm' OR EXISTS (
                    SELECT 1 FROM event_proposals ep
                     WHERE ep.event_id = e.id AND ep.status = 'pending'
@@ -226,14 +245,23 @@ async function processBatch(g: PendingGroup, expectedGeneration: number): Promis
             ) THEN 'pending_confirmation'
             WHEN EXISTS (
               SELECT 1 FROM event_sources es JOIN events e ON e.id = es.event_id
-               WHERE e.group_id = messages.group_id AND es.message_id = messages.message_id
+               WHERE COALESCE(NULLIF(es.group_id,''),e.group_id) = messages.group_id AND es.message_id = messages.message_id
             ) THEN 'event_recognized'
             ELSE 'llm_no_event'
           END
         WHERE group_id = ? AND message_id IN (SELECT value FROM json_each(?))`,
-    ).run(b.processingError ? 1 : 0, b.groupId, ids(b.candidates));
+    ).run(b.groupId, ids(b.candidates));
   }
-  for (const m of b.messages) jevScores.delete(m.message_id);
+    clearGroupFailure(b.groupId);
+    commitTx();
+  } catch (e) {
+    rollbackTx();
+    recordGroupFailure(g.group_id, 'storage', fingerprint);
+    console.warn('[pipeline] 无法保存处理标记，保留待重试消息：', redactSensitive(e));
+    return 0;
+  }
+  for (const m of b.messages) jevScores.delete(scoreKey(m));
+
   if (b.candidates.length) {
     // 延迟排查用：从最早一条入库到处理完，各段各花了多久
     const waited = b.now - Math.min(...rows.map((r) => r.created_at));
@@ -250,8 +278,8 @@ const lastTriage = new Map<string, number>(); // 群 → 上次分诊时间
 
 /** 给某群还没打分的待处理候选打分（一群一次请求）。已打分的待处理消息作为上下文，零碎的补充也能看懂。 */
 async function triage(g: PendingGroup, expectedGeneration: number): Promise<void> {
-  const activityEpoch = desktopPipelineEpoch();
-  if (pipelineIsPaused() || dbGeneration() !== expectedGeneration) return;
+  if (dbGeneration() !== expectedGeneration || groupIsPaused(g.group_id)) return;
+  const activityEpoch = groupActivityEpoch(g.group_id);
   // 刷屏的群每秒都有新消息：同一个群至少隔 TRIAGE_MIN_INTERVAL_MS 才再打一次分，攒几条一起问
   const now = Date.now();
   if (now - (lastTriage.get(g.group_id) ?? 0) < TRIAGE_MIN_INTERVAL_MS) return;
@@ -259,13 +287,13 @@ async function triage(g: PendingGroup, expectedGeneration: number): Promise<void
   const rows = pendingRows(g.group_id).map(toMessage(g));
   if (rows.length === 0) return; // B5：空批次不能碰 rows[0]
   const candidates = rows.filter((m) => !isNoise(m.text));
-  const firstNew = candidates.findIndex((m) => !jevScores.has(m.message_id));
+  const firstNew = candidates.findIndex((m) => !jevScores.has(scoreKey(m)));
   if (firstNew < 0) return;
-  const unscored = candidates.slice(firstNew).filter((m) => !jevScores.has(m.message_id));
+  const unscored = candidates.slice(firstNew).filter((m) => !jevScores.has(scoreKey(m)));
   const context = [...contextBefore(g, rows[0]!.sent_at), ...candidates.slice(0, firstNew)].slice(-CONTEXT);
   const scores = await scoreWithJev(unscored, context, g.name);
-  if (pipelineIsPaused() || desktopPipelineEpoch() !== activityEpoch || dbGeneration() !== expectedGeneration) return;
-  scores?.forEach((s, i) => jevScores.set(unscored[i]!.message_id, s));
+  if (dbGeneration() !== expectedGeneration || groupIsPaused(g.group_id) || groupActivityEpoch(g.group_id) !== activityEpoch) return;
+  scores?.forEach((s, i) => jevScores.set(scoreKey(unscored[i]!), s));
 }
 
 /** 该不该现在处理这个群（规则见文件头） */
@@ -273,8 +301,8 @@ function isDue(g: PendingGroup, t: number): boolean {
   if (g.pending >= MIN_PENDING || t - g.oldest >= MAX_WAIT_MS) return true;
   const rows = pendingRows(g.group_id);
   const candidates = rows.filter((m) => !isNoise(m.text));
-  if (candidates.some((m) => !jevScores.has(m.message_id))) return false; // 没打上分：按老规则等
-  const scored = candidates.map((m) => ({ m, s: jevScores.get(m.message_id)! }));
+  if (candidates.some((m) => !jevScores.has(scoreKey(m)))) return false; // 没打上分：按老规则等
+  const scored = candidates.map((m) => ({ m, s: jevScores.get(scoreKey(m))! }));
   const urgent = scored.filter((x) => x.s >= JEV_URGENT_AT);
   if (urgent.length) {
     const newest = Math.max(...rows.map((r) => r.created_at));
@@ -307,12 +335,18 @@ async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
 
 /** 开始处理某群的一批；该群已在处理中就返回那一批 */
 function launch(g: PendingGroup, expectedGeneration: number): Promise<number> {
-  if (pipelineIsPaused() || dbGeneration() !== expectedGeneration) return Promise.resolve(0);
+  if (dbGeneration() !== expectedGeneration || groupIsPaused(g.group_id)) return Promise.resolve(0);
   const running = inflight.get(g.group_id);
   if (running) return running;
+  const activityEpoch = groupActivityEpoch(g.group_id);
+  const fingerprint = llmConfigFingerprint();
   const p = withSlot(() => processBatch(g, expectedGeneration))
     .catch((e) => {
-      console.warn(`[pipeline] 某群调度出错：${redactSensitive(e)}`);
+      if (dbGeneration() === expectedGeneration && groupActivityEpoch(g.group_id) === activityEpoch && !groupIsPaused(g.group_id)) {
+        recordGroupFailure(g.group_id, 'storage', fingerprint);
+      }
+      console.warn('[pipeline] 调度出错，保留待处理消息：', redactSensitive(e));
+
       return 0;
     })
     .finally(() => inflight.delete(g.group_id));
@@ -337,12 +371,15 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (x: T) => Promise<R
 
 let ticking = false;
 let quiescing = false;
-const pipelineIsPaused = () => quiescing || desktopPipelinePaused();
+const pipelineIsPaused = () => quiescing;
 const activeEntrypoints = new Set<Promise<void>>();
 
 function trackEntrypoint(promise: Promise<void>): Promise<void> {
   activeEntrypoints.add(promise);
-  void promise.finally(() => activeEntrypoints.delete(promise));
+  void promise.then(
+    () => activeEntrypoints.delete(promise),
+    () => activeEntrypoints.delete(promise),
+  );
   return promise;
 }
 
@@ -351,21 +388,21 @@ function trackEntrypoint(promise: Promise<void>): Promise<void> {
  * 返回的 Promise 在本次交出去的批次都处理完后才 resolve。now 只给测试用。
  */
 async function tickOnce(now?: number): Promise<void> {
-  if (accountDataState() !== 'ready' || pipelineIsPaused() || ticking || Date.now() < llmRetryAt) return; // 上一次分诊还没完 / AI 刚连不上，先歇一会
+  if (accountDataState() !== 'ready' || pipelineIsPaused() || ticking) return;
   const gen = dbGeneration();
-  const activityEpoch = desktopPipelineEpoch();
   ticking = true;
   let launched: Promise<number>[] = [];
   try {
     if (jevScores.size > SCORE_CACHE_MAX) jevScores.clear(); // 删群 / 重置演示留下的残余，清掉重打即可
     const t = () => now ?? Date.now();
-    const idle = pendingGroups().filter((g) => !inflight.has(g.group_id));
+    const fingerprint = llmConfigFingerprint();
+    const idle = pendingGroups().filter((g) => !groupIsPaused(g.group_id) && !inflight.has(g.group_id) && groupCanRetry(g.group_id, fingerprint));
     // 已经到点的不用分诊（批次里会补打分）；其余的先分诊再判断
     const early = idle.filter((g) => !(g.pending >= MIN_PENDING || t() - g.oldest >= MAX_WAIT_MS));
     if (early.length && jevAvailable()) {
       await mapLimit(early, GROUP_CONCURRENCY, (g) => triage(g, gen));
     }
-    if (pipelineIsPaused() || desktopPipelineEpoch() !== activityEpoch || dbGeneration() !== gen) return;
+    if (pipelineIsPaused() || dbGeneration() !== gen) return;
     launched = idle.filter((g) => isDue(g, t())).map((g) => launch(g, gen));
   } catch (e) {
     console.warn(`[pipeline] 调度出错：${redactSensitive(e)}`);
@@ -380,19 +417,25 @@ export function tick(now?: number): Promise<void> {
   return trackEntrypoint(tickOnce(now));
 }
 
-/** 立即把所有群处理完（不看阈值，不看 AI 重试等待）；有批次在跑就等它结束。不抛异常。 */
-async function runPipelineUntilIdle(): Promise<void> {
+/** 立即处理可用群（不看攒批阈值和重试等待），已达失败上限的群需明确手动恢复。 */
+async function runPipelineUntilIdle(onlyGroupId?: string): Promise<void> {
   const gen = dbGeneration();
-  const activityEpoch = desktopPipelineEpoch();
+  // 一个群失败后，本次手动处理不反复重试它；其他群仍可继续清空积压。
+  const deferred = new Set<string>();
   try {
     for (;;) {
-      if (pipelineIsPaused() || desktopPipelineEpoch() !== activityEpoch || dbGeneration() !== gen) return;
-      await Promise.all(inflight.values());
-      if (pipelineIsPaused() || desktopPipelineEpoch() !== activityEpoch || dbGeneration() !== gen) return;
-      const groups = pendingGroups();
+      if (pipelineIsPaused() || dbGeneration() !== gen) return;
+      if (onlyGroupId === undefined) await Promise.all(inflight.values());
+      else await inflight.get(onlyGroupId);
+      if (pipelineIsPaused() || dbGeneration() !== gen) return;
+      const fingerprint = llmConfigFingerprint();
+      const groups = pendingGroups().filter((g) =>
+        !groupIsPaused(g.group_id) && (onlyGroupId === undefined || g.group_id === onlyGroupId) && !deferred.has(g.group_id)
+        && (groupCanRetry(g.group_id, fingerprint) || !getGroupFailure(g.group_id)?.paused));
       if (groups.length === 0) return;
       const done = await Promise.all(groups.map((g) => launch(g, gen)));
-      if (pipelineIsPaused() || desktopPipelineEpoch() !== activityEpoch || dbGeneration() !== gen) return;
+      if (pipelineIsPaused() || dbGeneration() !== gen) return;
+      done.forEach((n, i) => { if (n === 0) deferred.add(groups[i]!.group_id); });
       if (done.every((n) => n === 0)) return; // 置不上 processed 就别空转
     }
   } catch (e) {
@@ -405,19 +448,31 @@ export function runPipelineNow(): Promise<void> {
   return trackEntrypoint(runPipelineUntilIdle());
 }
 
+/** 用户明确点击重试：等该群在途批次结束，再恢复该群；不恢复其他已暂停的群。 */
+export function runPipelineGroupNow(groupId: string): Promise<void> {
+  if (accountDataState() !== 'ready' || groupIsPaused(groupId)) return Promise.resolve();
+  const gen = dbGeneration();
+  const epoch = groupActivityEpoch(groupId);
+  return trackEntrypoint((async () => {
+    await inflight.get(groupId);
+    if (dbGeneration() !== gen || groupIsPaused(groupId) || groupActivityEpoch(groupId) !== epoch) return;
+    resetGroupFailure(groupId);
+    await runPipelineUntilIdle(groupId);
+  })());
+}
+
 let timer: ReturnType<typeof setInterval> | undefined;
 
-/** 测试用：清掉「AI 连不上，歇一会」的状态和 Jev 分数缓存 */
+/** 测试用：重置逐群重试等待和 Jev 缓存，不清除失败次数或暂停状态。 */
 export function resetLlmRetry(): void {
-  llmRetryAt = 0;
+  resetRetryWaitForTest();
   jevScores.clear();
   lastTriage.clear();
 }
 
-// 换号（修复计划第一节）：Jev 分数、分诊时间、重试等待、统计计数都是旧号的，清掉；
+// 换号：Jev 分数、分诊时间和统计计数清掉；持久失败状态随账号数据库隔离。
 // 在飞的批次由 processBatch 里的 dbGeneration 守卫拦下，不会写进新号库。
 onAccountSwitch(() => {
-  llmRetryAt = 0;
   jevScores.clear();
   lastTriage.clear();
   resetPipelineStats();

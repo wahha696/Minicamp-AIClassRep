@@ -170,6 +170,10 @@ describe('db 建表', () => {
     expect(courseCols).toContain('details'); // 精确节次等在 details JSON
     const kv = db.prepare("SELECT value FROM kv WHERE key = 'schema_version'").get() as { value: string };
     expect(kv.value).toBe(String(SCHEMA_VERSION));
+    expect(tableNames()).toContain('pipeline_failures');
+    expect((db.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>)
+      .map((column) => column.name)).toContain('keep_until_processed');
+
   });
 
   it('文件库的 journal_mode 是 WAL', () => {

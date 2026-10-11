@@ -87,8 +87,10 @@ describe('回收站：取消的事件', () => {
     db.prepare('UPDATE events SET manual_locked_fields = ? WHERE id = ?').run('["location"]', id);
 
     const detail = await patch(app, id, { status: 'cancelled' });
-    // 手动改状态记一条 history，不升 version
-    expect(detail.version).toBe(1);
+    expect(detail.version).toBe(2);
+    const cancelledIcs = await (await app.request(`/api/events/${id}/export.ics`)).text();
+    expect(cancelledIcs).toContain('STATUS:CANCELLED');
+    expect(cancelledIcs).toContain('SEQUENCE:1');
     expect(detail.history.at(-1)).toMatchObject({
       changed_fields: { status: { from: 'active', to: 'cancelled' } },
       source_message_id: null,
@@ -112,6 +114,10 @@ describe('回收站：取消的事件', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual([]);
     expect((await calendar(app)).map((e) => e.id)).toEqual([id]);
+    const restoredIcs = await (await app.request(`/api/events/${id}/export.ics`)).text();
+    expect(restoredIcs).not.toContain('STATUS:CANCELLED');
+    expect(restoredIcs).toContain('SEQUENCE:2');
+    expect(restoredIcs.match(/UID:[^\r\n]+/g)).toEqual(cancelledIcs.match(/UID:[^\r\n]+/g));
   });
 
   it('群消息取消 → by=group，带原文；取消前是待确认的恢复回待确认', async () => {
@@ -124,7 +130,7 @@ describe('回收站：取消的事件', () => {
 
     await restore(app, `cancel-${id}`);
     const row = db.prepare('SELECT status, version FROM events WHERE id = ?').get(id) as { status: string; version: number };
-    expect(row).toEqual({ status: 'pending_confirm', version: 2 });
+    expect(row).toEqual({ status: 'pending_confirm', version: 3 });
   });
 
   it('拒绝低置信度新增只是确认误识别，不伪装成可恢复的取消项', async () => {
@@ -172,7 +178,19 @@ describe('回收站：取消的事件', () => {
 });
 
 describe('回收站：群消息改期 / 改地点', () => {
-  it('改期后旧版本进回收站；恢复 → 时间地点改回去，写手动 history，不升 version', async () => {
+  it('部分恢复不能生成结束早于开始的时间区间', async () => {
+    const app = freshApp();
+    const oldStart = FIXED_NOW + 2 * DAY;
+    const newStart = FIXED_NOW + DAY;
+    const id = addEvent({ start_at: oldStart });
+    db.prepare('UPDATE events SET end_at = ? WHERE id = ?').run(oldStart + HOUR, id);
+    groupChange(id, { start_at: { from: oldStart, to: newStart } }, 'm1', '改期', FIXED_NOW - HOUR);
+    db.prepare('UPDATE events SET end_at = ? WHERE id = ?').run(newStart + HOUR, id);
+    const [item] = await getTrash(app);
+    expect((await restore(app, item!.id)).status).toBe(409);
+    expect(db.prepare('SELECT start_at, end_at FROM events WHERE id = ?').get(id)).toEqual({ start_at: newStart, end_at: newStart + HOUR });
+  });
+  it('改期后旧版本进回收站；恢复 → 时间地点改回去，写手动 history 并升 version', async () => {
     const app = freshApp();
     const oldT = FIXED_NOW + 2 * DAY;
     const newT = FIXED_NOW + 3 * DAY;
@@ -200,7 +218,7 @@ describe('回收站：群消息改期 / 改地点', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual([]);
     const row = db.prepare('SELECT start_at, location, level, version FROM events WHERE id = ?').get(id);
-    expect(row).toEqual({ start_at: oldT, location: 'A301', level: 3, version: 2 });
+    expect(row).toEqual({ start_at: oldT, location: 'A301', level: 3, version: 3 });
     const last = db.prepare('SELECT changed_fields, source_message_id FROM event_history ORDER BY id DESC LIMIT 1').get() as {
       changed_fields: string;
       source_message_id: string | null;

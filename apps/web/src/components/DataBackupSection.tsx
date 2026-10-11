@@ -37,7 +37,7 @@ export default function DataBackupSection() {
       anchor.download = filename;
       anchor.click();
       URL.revokeObjectURL(url);
-      toast('账号数据备份已下载');
+      toast('空间数据备份已下载');
       await refresh();
     } catch (error) {
       toastError(toast, error);
@@ -85,9 +85,9 @@ export default function DataBackupSection() {
     <section className="mt-3 rounded-xl border border-slate-200 bg-white p-4">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0 flex-1">
-          <h3 className="text-sm font-semibold text-slate-800">账号数据备份</h3>
+          <h3 className="text-sm font-semibold text-slate-800">空间数据备份</h3>
           <p className="mt-1 text-sm leading-relaxed text-slate-500">
-            导出当前账号的日程、消息、课表、待办和记忆。API Key 不在账号数据库中，不会写进备份。
+            导出当前空间的日程、消息、课表、待办和记忆。API Key 不在空间数据库中，不会写进备份。
           </p>
           <p className="mt-2 text-xs text-slate-400">
             每日自动快照 {data?.automatic_count ?? 0} 份 · 最近 {timeText(data?.latest_automatic_at ?? null)}
@@ -150,7 +150,7 @@ export default function DataBackupSection() {
 
       <ConfirmDialog
         open={confirming && selected !== null}
-        title="恢复账号数据？"
+        title="恢复空间数据？"
         confirmText="确认恢复"
         danger
         busy={restoring}
@@ -159,7 +159,7 @@ export default function DataBackupSection() {
           setConfirming(false);
         }}
       >
-        当前账号数据库会先自动备份，再替换为所选备份。恢复过程中不要关闭启动窗口。
+        当前空间数据库会先自动备份，再替换为所选备份。恢复会停止微信采集并停用旧回执；完成后需重新开启微信群并按需补历史。登录和 API Key 不随备份恢复。恢复过程中不要关闭启动窗口。
       </ConfirmDialog>
     </section>
   );

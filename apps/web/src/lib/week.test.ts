@@ -53,6 +53,19 @@ describe('weekRange / thisMonday / weekdayDate', () => {
 });
 
 describe('groupByDay', () => {
+  it('开始和截止分别落位，但保持同一个事件 ID', () => {
+    const event = ev({ start_at: MON + 9 * 3600000, deadline_at: MON + 4 * 86400000 + 23 * 3600000 });
+    const days = groupByDay([event], MON, NOW);
+    expect(days[0]!.items[0]).toMatchObject({ event, at: event.start_at, isDeadline: false });
+    expect(days[4]!.items[0]).toMatchObject({ event, at: event.deadline_at, isDeadline: true });
+  });
+  it('跨天区间在进行期间可见，恰好在零点结束不多展示一天', () => {
+    const event = ev({ start_at: MON - 86400000, end_at: MON + 2 * 86400000 });
+    const days = groupByDay([event], MON, NOW);
+    expect(days[0]!.items[0]).toMatchObject({ event, isContinuation: true });
+    expect(days[1]!.items[0]).toMatchObject({ event, isContinuation: true });
+    expect(days[2]!.items).toHaveLength(0);
+  });
   it('7 天，第一天是周一，今天有 isToday', () => {
     const days = groupByDay([], MON, NOW);
     expect(days).toHaveLength(7);

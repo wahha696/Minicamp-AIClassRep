@@ -1,8 +1,9 @@
 // 业务路由：今日 / 事件查询 / 事件详情 / 改状态 / 导出 .ics / 群管理 / 演示。主人是 B。
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
-import { currentAccount } from '../accounts.js';
+import { currentDataSpace } from '../accounts.js';
 import { beginTx, commitTx, db, rollbackTx } from '../db/index.js';
+import { clearGroupEventData } from '../event-group-data.js';
 import {
   EDITABLE_EVENT_FIELDS,
   listPendingEventProposals,
@@ -20,6 +21,10 @@ import { buildIcs } from '../ics.js';
 import { buildDemoMessages, listScenarios, parseImportedText, scenarioGroupId } from '../ingest/demo.js';
 import { ingestMessages } from '../ingest/index.js';
 import { runPipelineNow } from '../pipeline/index.js';
+import { runPipelineGroupNow } from '../pipeline/scheduler.js';
+import { getGroupFailure, clearGroupFailure } from '../pipeline/failures.js';
+import { desktopPipelinePaused } from '../pipeline/activity.js';
+import { TODO_SQL } from './todos.js';
 import { schedulePreferenceSummary } from '../pipeline/preferences.js';
 import type {
   EventDTO,
@@ -63,8 +68,9 @@ function shanghaiHHmm(ts: number): string {
 }
 
 /** 排序时间 = start_at ?? deadline_at */
-function sortTime(e: EventDTO): number | null {
-  return e.start_at ?? e.deadline_at;
+function sortTime(e: EventDTO, now: number): number | null {
+  const next = [e.start_at, e.deadline_at].filter((t): t is number => t !== null && t >= now);
+  return next.length ? Math.min(...next) : e.deadline_at ?? e.start_at;
 }
 
 // ===== 数据库 → DTO
@@ -141,8 +147,9 @@ function selectEventsInRange(from: number, to: number): EventDTO[] {
   return selectEvents(
     `WHERE e.status <> 'cancelled' AND ${NOT_TODO_SQL}
        AND ((e.start_at IS NOT NULL AND e.start_at >= ? AND e.start_at < ?)
-         OR (e.deadline_at IS NOT NULL AND e.deadline_at >= ? AND e.deadline_at < ?))`,
-    [from, to, from, to],
+         OR (e.deadline_at IS NOT NULL AND e.deadline_at >= ? AND e.deadline_at < ?)
+         OR (e.start_at < ? AND e.end_at > ? AND e.end_at > e.start_at))`,
+    [from, to, from, to, to, from],
   );
 }
 
@@ -165,7 +172,7 @@ function getEventDetail(id: number): EventDetailDTO | null {
 
   const sources = db
     .prepare(
-      'SELECT message_id, sender_name, text, sent_at FROM event_sources WHERE event_id = ? ORDER BY sent_at, message_id',
+      'SELECT message_id, sender_name, text, sent_at, group_id, group_name, platform FROM event_sources WHERE event_id = ? ORDER BY sent_at, message_id',
     )
     .all(id) as unknown as SourceMessageDTO[];
 
@@ -212,15 +219,14 @@ function applyManualLevel(row: EventRow, level: number | null, now: number): voi
   const aiLevel = lastFeedback !== undefined && !aiChangedSince ? lastFeedback.ai_level : row.level;
 
   if (level !== row.level) {
-    // 手动调级不升 version：version>1 表示「按群里新通知改过」，卡片据此显示「已按最新通知更新」。
-    // 仍写一条 history（沿用当前 version、source_message_id 为 NULL），详情页按 id 排序展示。
+    // 实际内容变更递增版本，供并发检查和日历 SEQUENCE 使用。
     db.prepare(
-      'UPDATE events SET level = ?, level_locked = 1, updated_at = MAX(updated_at + 1, ?) WHERE id = ?',
+      'UPDATE events SET level = ?, level_locked = 1, version = version + 1, updated_at = MAX(updated_at + 1, ?) WHERE id = ?',
     ).run(level, now, row.id);
     db.prepare(
       `INSERT INTO event_history (event_id, version, changed_fields, source_message_id, changed_at)
        VALUES (?, ?, ?, NULL, ?)`,
-    ).run(row.id, row.version, JSON.stringify({ level: { from: row.level, to: level } }), now);
+    ).run(row.id, row.version + 1, JSON.stringify({ level: { from: row.level, to: level } }), now);
   } else {
     db.prepare('UPDATE events SET level_locked = 1, updated_at = MAX(updated_at + 1, ?) WHERE id = ?').run(now, row.id);
   }
@@ -235,23 +241,25 @@ function applyManualLevel(row: EventRow, level: number | null, now: number): voi
 // ===== 摘要文案
 
 /** 「今天 N 件事，最急的是 HH:mm 标题」；无事件时「今天没有待办，轻松一天」 */
-function buildSummary(events: EventDTO[], now: number): string {
-  if (events.length === 0) return '今天没有待办，轻松一天';
-  // events 已按排序时间升序：最急 = 排序时间 ≥ 现在的第一个，没有则第一个
-  const urgent = events.find((e) => {
-    const t = sortTime(e);
-    return t !== null && t >= now;
-  });
-  const pick = urgent ?? events[0]!;
-  const t = sortTime(pick);
-  const when = t === null ? '待定' : shanghaiHHmm(t);
-  return `今天 ${events.length} 件事，最急的是 ${when} ${pick.title}`;
+function buildSummary(events: EventDTO[], now: number, overdue: EventDTO[] = []): string {
+  const pending = events.filter((e) => e.status !== 'done' && e.status !== 'cancelled');
+  const todoCount = Number((db.prepare(`SELECT COUNT(*) AS n FROM events e WHERE ${TODO_SQL}`).get() as { n: number }).n)
+    + Number((db.prepare('SELECT COUNT(*) AS n FROM todos WHERE done_at IS NULL').get() as { n: number }).n);
+  const tail = (overdue.length ? `；${overdue.length} 件作业已逾期` : '') + (todoCount ? `；另有 ${todoCount} 件待办` : '');
+  const todayPending = pending.filter(e => !overdue.some(old => old.id === e.id));
+  if (!todayPending.length) return `今天暂无未完成的日程${tail}`;
+  const next = todayPending.filter((e) => (sortTime(e, now) ?? -1) >= now)
+    .sort((a, b) => sortTime(a, now)! - sortTime(b, now)! || a.id - b.id)[0];
+  const head = `今天 ${todayPending.length} 件未完成安排`;
+  return next ? `${head}，接下来 ${shanghaiHHmm(sortTime(next, now)!)} ${next.title}${tail}` : `${head}，请核对处理状态${tail}`;
 }
 
 // ===== 校验
 
 const EVENT_STATUSES = ['active', 'cancelled', 'done', 'pending_confirm'] as const;
-const timestamp = z.number().int().nonnegative().safe().nullable();
+// 日历导出采用四位年份，拒绝 Date 无法表示或超出该格式的时间。
+const MAX_EVENT_TIMESTAMP = Date.parse('9999-12-31T23:59:59.999+08:00');
+const timestamp = z.number().int().nonnegative().max(MAX_EVENT_TIMESTAMP).nullable();
 const patchEventSchema = z
   .object({
     status: z.enum(EVENT_STATUSES).optional(),
@@ -268,7 +276,7 @@ const patchEventSchema = z
     unlock_fields: z.array(z.enum(EDITABLE_EVENT_FIELDS)).max(EDITABLE_EVENT_FIELDS.length).optional(),
     /** 乐观并发检查；旧客户端可省略，新详情页始终带上。 */
     expected_version: z.number().int().positive().optional(),
-    /** version 保留“群通知版本”语义；updated_at 是每次详情变更都会前进的并发令牌。 */
+    /** version 跟踪内容变更；updated_at 也覆盖锁定设置等详情变更。 */
     expected_updated_at: z.number().int().nonnegative().safe().optional(),
   })
   .refine((o) =>
@@ -320,6 +328,7 @@ interface GroupRow {
   name: string;
   enabled: number;
   course_name: string | null;
+  adapter: string;
   message_count: number;
   event_count: number;
 }
@@ -328,9 +337,10 @@ interface GroupRow {
 function selectGroups(): GroupDTO[] {
   const rows = db
     .prepare(
-      `SELECT g.group_id, g.name, g.enabled, g.course_name,
+      `SELECT g.group_id, g.name, g.enabled, g.course_name, g.adapter,
               (SELECT COUNT(*) FROM messages m WHERE m.group_id = g.group_id) AS message_count,
-              (SELECT COUNT(*) FROM events e WHERE e.group_id = g.group_id)   AS event_count
+              (SELECT COUNT(*) FROM events e WHERE e.group_id = g.group_id OR EXISTS
+                (SELECT 1 FROM event_sources s WHERE s.event_id=e.id AND s.group_id=g.group_id)) AS event_count
          FROM groups g
         ORDER BY g.created_at, g.group_id`,
     )
@@ -341,9 +351,10 @@ function selectGroups(): GroupDTO[] {
 function getGroupById(group_id: string): GroupDTO | null {
   const row = db
     .prepare(
-      `SELECT g.group_id, g.name, g.enabled, g.course_name,
+      `SELECT g.group_id, g.name, g.enabled, g.course_name, g.adapter,
               (SELECT COUNT(*) FROM messages m WHERE m.group_id = g.group_id) AS message_count,
-              (SELECT COUNT(*) FROM events e WHERE e.group_id = g.group_id)   AS event_count
+              (SELECT COUNT(*) FROM events e WHERE e.group_id = g.group_id OR EXISTS
+                (SELECT 1 FROM event_sources s WHERE s.event_id=e.id AND s.group_id=g.group_id)) AS event_count
          FROM groups g
         WHERE g.group_id = ?`,
     )
@@ -352,13 +363,17 @@ function getGroupById(group_id: string): GroupDTO | null {
 }
 
 function toGroupDTO(row: GroupRow): GroupDTO {
+  const failure = getGroupFailure(row.group_id);
   return {
     group_id: row.group_id,
     name: row.name,
     enabled: row.enabled !== 0,
+    platform: row.adapter === 'wechat' ? 'wechat' : ['onebot', 'history', 'forward'].includes(row.adapter) ? 'qq'
+      : row.adapter === 'demo' ? 'demo' : row.adapter === 'import' ? 'import' : 'unknown',
     message_count: row.message_count,
     event_count: row.event_count,
     course_name: row.course_name,
+    ...(failure ? { processing_failure: failure } : {}),
   };
 }
 
@@ -370,18 +385,22 @@ const ICS_HEADERS = {
 
 /** 事件 → .ics 响应（区间里没有事件时是合法的空日历，照样 200 下载） */
 function icsResponse(c: Context, events: EventDTO[]): Response {
-  return c.body(buildIcs(events, Date.now(), currentAccount() ?? 'local'), 200, ICS_HEADERS);
+  return c.body(buildIcs(events, Date.now(), currentDataSpace() ?? 'local'), 200, ICS_HEADERS);
 }
 
 // ===== 路由
 
-export function registerBusinessRoutes(app: Hono): void {
+export function registerBusinessRoutes(app: Hono, options: {
+  setWechatGroupEnabled?(id: string, enabled: boolean): Promise<void>;
+  wechatCollectingGroupIds?(): readonly string[];
+} = {}): void {
   // 今天（上海时间）：start_at 或 deadline_at 落在今天，状态不是 cancelled，按时间升序
   app.get('/api/today', (c) => {
     const now = Date.now();
     const date = shanghaiDate(now);
     const events = selectEventsInRange(shanghaiDayStart(date), shanghaiDayEnd(date));
-    const body: TodayDTO = { date, summary: buildSummary(events, now), events };
+    const overdue = selectEvents("WHERE e.type = 'assignment' AND e.status IN ('active', 'pending_confirm') AND e.deadline_at < ?", [now]);
+    const body: TodayDTO = { date, summary: buildSummary(events, now, overdue), events, overdue };
     return c.json(body);
   });
 
@@ -543,16 +562,16 @@ export function registerBusinessRoutes(app: Hono): void {
         );
       }
 
-      // 单独改状态，或仅用人工 level 消解最后一个提案时，不改动“群通知版本”语义。
+      // 单独改状态，或仅用人工 level 消解最后一个提案时，也记录内容版本。
       const standaloneStatus = editedFields.length === 0
         ? ((changes.status?.to as EventStatus | undefined) ?? data.status)
         : undefined;
       if (standaloneStatus !== undefined && standaloneStatus !== row.status) {
-        db.prepare('UPDATE events SET status = ?, updated_at = MAX(updated_at + 1, ?) WHERE id = ?').run(standaloneStatus, now, id);
+        db.prepare('UPDATE events SET status = ?, version = version + 1, updated_at = MAX(updated_at + 1, ?) WHERE id = ?').run(standaloneStatus, now, id);
         db.prepare(
           `INSERT INTO event_history (event_id, version, changed_fields, source_message_id, changed_at)
            VALUES (?, ?, ?, NULL, ?)`,
-        ).run(id, row.version, JSON.stringify({ status: { from: row.status, to: standaloneStatus } }), now);
+        ).run(id, row.version + 1, JSON.stringify({ status: { from: row.status, to: standaloneStatus } }), now);
       }
       if (data.level !== undefined) {
         const latest = db.prepare(`SELECT ${EVENT_COLUMNS} ${EVENT_FROM} WHERE e.id = ?`).get(id) as unknown as EventRow;
@@ -593,7 +612,22 @@ export function registerBusinessRoutes(app: Hono): void {
   });
 
   // 群列表（FR-10.1）
-  app.get('/api/groups', (c) => c.json(selectGroups()));
+  app.get('/api/groups', (c) => {
+    const collecting = new Set(options.wechatCollectingGroupIds?.() ?? []);
+    return c.json(selectGroups().map((group) => group.platform === 'wechat'
+      ? { ...group, collecting: group.enabled && collecting.has(group.group_id) } : group));
+  });
+
+  app.post('/api/groups/:id/retry', (c) => {
+    const groupId = c.req.param('id');
+    const group = getGroupById(groupId);
+    if (!group) return c.json({ error: '群不存在' }, 404);
+    if (!group.enabled) return c.json({ error: '请先开启这个群的监听再重试' }, 409);
+    if (desktopPipelinePaused() && group.platform !== 'wechat') return c.json({ error: '请先返回课代表模式再重试 QQ 整理' }, 409);
+    // 后台处理，避免多批积压或 AI 等待让页面请求超时。调度器仍逐批核对账号与暂停状态。
+    void runPipelineGroupNow(groupId).catch(() => console.warn('[pipeline] 手动重试启动失败'));
+    return c.json({ accepted: true }, 202);
+  });
 
   // 开 / 关某个群的监听
   app.patch('/api/groups/:id', async (c) => {
@@ -610,11 +644,16 @@ export function registerBusinessRoutes(app: Hono): void {
     }
     const data = parsed.data;
 
-    const exists = db.prepare('SELECT 1 AS ok FROM groups WHERE group_id = ?').get(group_id);
+    const exists = db.prepare('SELECT adapter FROM groups WHERE group_id = ?').get(group_id);
     if (exists === undefined) return c.json({ error: '群不存在' }, 404);
 
     if (data.enabled !== undefined) {
-      db.prepare('UPDATE groups SET enabled = ? WHERE group_id = ?').run(
+      if (exists.adapter === 'wechat') {
+        try {
+          if (!options.setWechatGroupEnabled) throw new Error();
+          await options.setWechatGroupEnabled(group_id, data.enabled);
+        } catch { return c.json({ error: '请先在连接页连接微信并读取群列表，再修改选群；原有消息保留' }, 409); }
+      } else db.prepare('UPDATE groups SET enabled = ? WHERE group_id = ?').run(
         data.enabled ? 1 : 0,
         group_id,
       );
@@ -634,7 +673,7 @@ export function registerBusinessRoutes(app: Hono): void {
 
   // 删除该群的全部数据（群本身保留）：history → sources → events → messages。
   // B3：删 messages 前先把 id 写进 message_seen——否则下次历史补齐会把刚删掉的消息再拉回来；
-  // 同时清掉这个群的 level_feedback 孤儿记录（群都没了，偏好记录留着没意义）
+  // 偏好反馈按真正被删除的事项移除，不能按群名误删同名群或仍有其他来源的事项。
   app.delete('/api/groups/:id/data', (c) => {
     const group_id = c.req.param('id');
     const exists = db.prepare('SELECT 1 AS ok FROM groups WHERE group_id = ?').get(group_id);
@@ -643,30 +682,14 @@ export function registerBusinessRoutes(app: Hono): void {
     const markSeen = db.prepare(
       'INSERT OR IGNORE INTO message_seen (group_id, message_id, sent_at) SELECT group_id, message_id, sent_at FROM messages WHERE group_id = ?',
     );
-    const delProposals = db.prepare(
-      'DELETE FROM event_proposals WHERE event_id IN (SELECT id FROM events WHERE group_id = ?)',
-    );
-    const delHistory = db.prepare(
-      'DELETE FROM event_history WHERE event_id IN (SELECT id FROM events WHERE group_id = ?)',
-    );
-    const delSources = db.prepare(
-      'DELETE FROM event_sources WHERE event_id IN (SELECT id FROM events WHERE group_id = ?)',
-    );
-    const delEvents = db.prepare('DELETE FROM events WHERE group_id = ?');
     const delMessages = db.prepare('DELETE FROM messages WHERE group_id = ?');
-    const delFeedback = db.prepare(
-      'DELETE FROM level_feedback WHERE group_name = (SELECT name FROM groups WHERE group_id = ?)',
-    );
 
     beginTx();
     try {
       markSeen.run(group_id);
-      delProposals.run(group_id);
-      delHistory.run(group_id);
-      delSources.run(group_id);
-      delEvents.run(group_id);
+      clearGroupEventData(group_id, true);
       delMessages.run(group_id);
-      delFeedback.run(group_id);
+      clearGroupFailure(group_id);
       commitTx();
     } catch (err) {
       rollbackTx();
@@ -754,27 +777,15 @@ export function registerBusinessRoutes(app: Hono): void {
 
 /** 在一个事务里删掉若干群及其消息、事件、来源、变更记录（演示用：不写 message_seen，重放要能再入库） */
 function deleteGroupsData(groupIds: string[]): void {
-  const delProposals = db.prepare(
-    'DELETE FROM event_proposals WHERE event_id IN (SELECT id FROM events WHERE group_id = ?)',
-  );
-  const delHistory = db.prepare(
-    'DELETE FROM event_history WHERE event_id IN (SELECT id FROM events WHERE group_id = ?)',
-  );
-  const delSources = db.prepare(
-    'DELETE FROM event_sources WHERE event_id IN (SELECT id FROM events WHERE group_id = ?)',
-  );
-  const delEvents = db.prepare('DELETE FROM events WHERE group_id = ?');
   const delMessages = db.prepare('DELETE FROM messages WHERE group_id = ?');
   const delGroup = db.prepare('DELETE FROM groups WHERE group_id = ?');
 
   beginTx();
   try {
     for (const id of groupIds) {
-      delProposals.run(id);
-      delHistory.run(id);
-      delSources.run(id);
-      delEvents.run(id);
+      clearGroupEventData(id, false);
       delMessages.run(id);
+      clearGroupFailure(id);
       delGroup.run(id);
     }
     commitTx();

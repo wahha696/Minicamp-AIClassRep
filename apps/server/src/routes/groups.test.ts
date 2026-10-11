@@ -144,6 +144,7 @@ describe('GET /api/groups', () => {
       'group_id',
       'message_count',
       'name',
+      'platform',
     ]);
   });
 });

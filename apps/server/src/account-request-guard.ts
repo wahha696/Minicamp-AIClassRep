@@ -14,6 +14,8 @@ const ACCOUNT_DATA_PREFIXES = [
   '/api/settings/memory',
   '/api/settings/data',
   '/api/settings/diagnostics',
+  '/api/settings/reminders',
+
   '/api/trash',
   '/api/pet/chat',
 ] as const;
@@ -41,6 +43,7 @@ export function accountMutationGuard(): MiddlewareHandler {
     if (state === 'error') {
       return c.json({ error: '账号数据库挂载失败，请重新连接或重启后重试' }, 503);
     }
+    if (state === 'locked') return c.json({ error: '请先登录并选择课代表空间' }, 409);
     const isRead = c.req.method === 'GET' || c.req.method === 'HEAD';
     const headerEpoch = c.req.header('X-ClassRep-Account-Epoch')?.trim();
     const queryEpoch = isRead && c.req.path.endsWith('/export.ics')

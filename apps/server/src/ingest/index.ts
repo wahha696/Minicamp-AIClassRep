@@ -15,7 +15,7 @@ interface GroupRow {
 
 /** 新发现的群默认是否开启（D6）：QQ 来源默认关闭，等用户在群管理里勾选；demo/import 默认开启 */
 function defaultEnabled(source: MessageSource): number {
-  return source === 'onebot' || source === 'history' || source === 'forward' ? 0 : 1;
+  return source === 'onebot' || source === 'history' || source === 'forward' || source === 'wechat' ? 0 : 1;
 }
 
 function loadGroups(): Map<string, GroupRow> {
@@ -29,6 +29,28 @@ function loadGroups(): Map<string, GroupRow> {
 
 /** 整批入库。返回真正新插入的条数（被去重、被丢弃的不算）。 */
 export function ingestMessages(msgs: Message[], source: MessageSource): { inserted: number } {
+  const nested = db.isTransaction;
+  if (nested) db.exec('SAVEPOINT ingest_messages');
+  else beginTx();
+  try {
+    const result = ingestMessagesInTransaction(msgs, source);
+    if (nested) db.exec('RELEASE ingest_messages');
+    else commitTx();
+    return result;
+  } catch (error) {
+    if (nested) {
+      try {
+        db.exec('ROLLBACK TO ingest_messages');
+        db.exec('RELEASE ingest_messages');
+      } catch { /* Preserve the original error; caller owns the outer transaction. */ }
+    } else rollbackTx();
+    throw error;
+  }
+}
+
+/** Caller must commit/rollback messages together with its durable delivery receipt. */
+export function ingestMessagesInTransaction(msgs: Message[], source: MessageSource): { inserted: number } {
+  if (!db.isTransaction) throw new Error('INGEST_TRANSACTION_REQUIRED');
   const now = Date.now();
   const insertGroup = db.prepare(
     'INSERT OR IGNORE INTO groups (group_id, name, enabled, adapter, created_at) VALUES (?, ?, ?, ?, ?)',
@@ -36,8 +58,9 @@ export function ingestMessages(msgs: Message[], source: MessageSource): { insert
   const renameGroup = db.prepare('UPDATE groups SET name = ? WHERE group_id = ?');
   const insertMessage = db.prepare(
     `INSERT OR IGNORE INTO messages
-       (message_id, group_id, sender_name, text, sent_at, source, processed, filtered_out, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)`,
+       (message_id, group_id, sender_name, text, sent_at, source, processed, filtered_out, created_at, keep_until_processed)
+     VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?,
+       CASE WHEN EXISTS (SELECT 1 FROM pipeline_failures WHERE group_id = ?) THEN 1 ELSE 0 END)`,
   );
   // 去重（schema v2 复合主键）：同群同 id 才算重复。
   // message_seen 里 group_id='' 的是 v1 老库迁来的记录（当时不记群），同样认；
@@ -46,13 +69,12 @@ export function ingestMessages(msgs: Message[], source: MessageSource): { insert
     `SELECT 1 AS ok FROM message_seen WHERE message_id = ? AND group_id IN (?, '')
      UNION ALL
      SELECT 1 FROM event_sources es JOIN events ev ON ev.id = es.event_id
-       WHERE es.message_id = ? AND ev.group_id = ?
+       WHERE es.message_id = ? AND (es.group_id = ? OR (es.group_id = '' AND ev.group_id = ?))
      LIMIT 1`,
   );
 
   let inserted = 0;
-  beginTx();
-  try {
+  {
     const groups = loadGroups();
     for (const msg of msgs) {
       const known = groups.get(msg.group_id);
@@ -71,7 +93,7 @@ export function ingestMessages(msgs: Message[], source: MessageSource): { insert
       }
 
       // 处理过的 id 跳过（清理已删掉原文但记得处理过 / 已经是某个事件的来源）
-      if (seenBefore.get(msg.message_id, msg.group_id, msg.message_id, msg.group_id) !== undefined) continue;
+      if (seenBefore.get(msg.message_id, msg.group_id, msg.message_id, msg.group_id, msg.group_id) !== undefined) continue;
 
       const res = insertMessage.run(
         msg.message_id,
@@ -81,13 +103,10 @@ export function ingestMessages(msgs: Message[], source: MessageSource): { insert
         msg.sent_at,
         source,
         now,
+        msg.group_id,
       );
       if (res.changes > 0) inserted++;
     }
-    commitTx();
-  } catch (err) {
-    rollbackTx();
-    throw err;
   }
 
   return { inserted };

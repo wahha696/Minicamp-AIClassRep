@@ -65,6 +65,42 @@ beforeEach(() => {
 });
 
 describe('update', () => {
+  it('无效新建时间回滚整批，避免保存结束早于开始的日程', () => {
+    const m = msg('时间错误');
+    expect(() => applyEvents(G, [ev(m), ev(m, { title: '错误事件', end_at: T0 - 1 })], [m])).toThrow('结束时间');
+    expect(events()).toEqual([]);
+    expect(db.prepare('SELECT COUNT(*) AS n FROM event_sources').get()).toMatchObject({ n: 0 });
+  });
+
+  it.each([false, true])('稀疏改期不能越过原结束时间，含人工锁定=%s', (locked) => {
+    const id = create({ end_at: T0 + 3600_000 });
+    if (locked) db.prepare('UPDATE events SET manual_locked_fields = ? WHERE id = ?').run('["end_at"]', id);
+    const m = msg('仅调整开始时间');
+    expect(() => applyEvents(G, [ev(m, { action: 'update', update_of: id, start_at: T0 + DAY, end_at: null })], [m])).toThrow('结束时间');
+    expect(events()[0]).toMatchObject({ start_at: T0, end_at: T0 + 3600_000, version: 1 });
+  });
+  it('source snapshots retain platform and group after raw-message cleanup', () => {
+    const message = { ...msg('人工微信通知'), message_id: 'wechat:synthetic-message', group_id: 'wechat:synthetic-group', group_name: '人工微信群' };
+    applyEvents(message.group_id, [ev(message)], [message]);
+    const id = Number(events()[0]!.id);
+    expect(sources(id)[0]).toMatchObject({ platform: 'wechat', group_id: message.group_id, group_name: '人工微信群', text: '人工微信通知' });
+    db.exec('DELETE FROM messages');
+    expect(sources(id)[0]).toMatchObject({ platform: 'wechat', group_name: '人工微信群', text: '人工微信通知' });
+  });
+  it.each([DAY, 7 * DAY])('new same-title notice %i ms later remains a separate occurrence', (offset) => {
+    const first = create({ title: '班级例会', type: 'activity' });
+    const next = msg('另一次班级例会');
+    applyEvents(G, [ev(next, { title: '班级例会', type: 'activity', start_at: T0 + offset })], [next]);
+    expect(events()).toHaveLength(2);
+    expect(events()[0]).toMatchObject({ id: first, start_at: T0, version: 1 });
+    expect(events()[1]).toMatchObject({ start_at: T0 + offset, version: 1 });
+  });
+  it('a shared start cannot hide different report deadlines when creating occurrences', () => {
+    create({ title: '实验报告', type: 'assignment', deadline_at: T0 + DAY });
+    const next = msg('另一次实验报告');
+    applyEvents(G, [ev(next, { title: '实验报告', type: 'assignment', deadline_at: T0 + 8 * DAY })], [next]);
+    expect(events()).toHaveLength(2);
+  });
   it('改期：库里 1 条、version=2、history 1 条、sources 2 条', () => {
     const id = create();
     const m = msg('小测改到周五下午两点，教室改 A203');
@@ -752,11 +788,27 @@ describe('create', () => {
     const b = msg('改周五');
     applyEvents(
       G,
-      [ev(a), ev(b, { action: 'create', title: '高数小测', start_at: T0 + 3 * DAY })],
+      [ev(a), ev(b, { action: 'update', title: '高数小测', start_at: T0 + 3 * DAY })],
       [a, b],
     );
     expect(events()).toHaveLength(1);
     expect(events()[0]).toMatchObject({ start_at: T0 + 3 * DAY, version: 2 });
+  });
+});
+
+describe('new occurrences versus replayed creates', () => {
+  it('two dates extracted from one source stay separate and replay idempotently', () => {
+    const m = msg('周二和下周二各有一次例会');
+    const batch = [ev(m), ev(m, { start_at: T0 + 7 * DAY })];
+    applyEvents(G, batch, [m]); applyEvents(G, batch, [m]);
+    expect(events()).toHaveLength(2);
+  });
+  it('replaying the original create after rescheduling does not restore or duplicate the old date', () => {
+    const original = msg('周二小测'); applyEvents(G, [ev(original)], [original]);
+    const id = Number(events()[0]!.id), moved = msg('改到周五');
+    applyEvents(G, [ev(moved, { action: 'update', update_of: id, start_at: T0 + 3 * DAY })], [moved]);
+    applyEvents(G, [ev(original)], [original]);
+    expect(events()).toHaveLength(1); expect(events()[0]).toMatchObject({ start_at: T0 + 3 * DAY, version: 2 });
   });
 });
 

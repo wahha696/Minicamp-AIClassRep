@@ -57,16 +57,20 @@ export function hostnameOf(hostHeader: string): string {
 /** 局域网访问里永远不开放的接口：扫码登录、AI Key、账号清单等本机管理信息。 */
 export function isSensitivePath(path: string): boolean {
   return (
+    path.startsWith('/api/runtime/') ||
     path.startsWith('/api/connect/qrcode') ||
     path.startsWith('/api/settings/llm') ||
     path.startsWith('/api/settings/ai') ||
     path.startsWith('/api/settings/lan') ||
     path.startsWith('/api/settings/data') ||
     path.startsWith('/api/settings/diagnostics') ||
+    path.startsWith('/api/settings/reminders') ||
+
     path.startsWith('/api/timetable/csu') ||
     path.startsWith('/api/timetable/versions') ||
     path === '/api/accounts' ||
     path.startsWith('/api/accounts/')
+    || path === '/api/workspaces' || path.startsWith('/api/workspaces/')
   );
 }
 

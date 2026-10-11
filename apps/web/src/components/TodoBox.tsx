@@ -10,10 +10,15 @@ import { LEVEL_LABEL, levelStyle } from '../lib/eventMeta';
 import { SKIP_DONE_CONFIRM_KEY, readFlag, writeFlag } from '../lib/status';
 import ConfirmDialog from './ConfirmDialog';
 import { useToast } from './Toast';
+import ReadStatus from './ReadStatus';
+import { useAccess } from './ConnectStatus';
 
 interface Props {
   data: TodosDTO | undefined;
   loading: boolean;
+  error?: Error;
+  lastSuccessAt?: number;
+  onRetry?: () => void;
   /** 勾选 / 新增 / 编辑后让外层重新拉数据 */
   onChanged: () => void;
   /** 点群待办标题 → 打开事件详情抽屉 */
@@ -67,8 +72,9 @@ function toRows(data: TodosDTO): Row[] {
   return rows.sort((a, b) => b.level - a.level || a.created_at - b.created_at);
 }
 
-export default function TodoBox({ data, loading, onChanged, onOpenEvent }: Props) {
+export default function TodoBox({ data, loading, error, lastSuccessAt, onRetry, onChanged, onOpenEvent }: Props) {
   const toast = useToast();
+  const { readonly } = useAccess();
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState('');
   const [addingBusy, setAddingBusy] = useState(false); // B17：连按回车不重复创建
@@ -200,7 +206,7 @@ export default function TodoBox({ data, loading, onChanged, onOpenEvent }: Props
         <h2 className="text-sm font-semibold text-slate-700">
           待办{rows.length > 0 && <span className="ml-1 font-normal text-slate-400">{rows.length}</span>}
         </h2>
-        <button
+        {!readonly && <button
           type="button"
           onClick={() => setAdding((v) => !v)}
           aria-expanded={adding}
@@ -208,7 +214,7 @@ export default function TodoBox({ data, loading, onChanged, onOpenEvent }: Props
           className="rounded-md px-2 py-0.5 text-lg leading-none text-slate-400 hover:bg-slate-100 hover:text-slate-700"
         >
           +
-        </button>
+        </button>}
       </header>
 
       {adding && (
@@ -229,12 +235,13 @@ export default function TodoBox({ data, loading, onChanged, onOpenEvent }: Props
         </div>
       )}
 
+      <ReadStatus error={error} cached={data !== undefined} lastSuccessAt={lastSuccessAt} onRetry={onRetry ?? onChanged} />
       {loading && rows.length === 0 ? (
         <div className="space-y-2 p-4" aria-busy>
           <div className="h-8 animate-pulse rounded bg-slate-100" />
           <div className="h-8 animate-pulse rounded bg-slate-100" />
         </div>
-      ) : rows.length === 0 ? (
+      ) : !data ? null : rows.length === 0 ? (
         <p className="px-4 py-6 text-center text-sm text-slate-400">没有待办</p>
       ) : (
         <ul className="divide-y divide-slate-50">
@@ -247,7 +254,7 @@ export default function TodoBox({ data, loading, onChanged, onOpenEvent }: Props
                 <input
                   type="checkbox"
                   checked={confirming !== null && `${confirming.kind}-${confirming.id}` === key}
-                  disabled={busyId === key}
+                  disabled={readonly || busyId === key}
                   onChange={() => onCheck(row)}
                   aria-label={
                     row.kind === 'event' && row.status === 'pending_confirm'
@@ -273,13 +280,13 @@ export default function TodoBox({ data, loading, onChanged, onOpenEvent }: Props
                     type="button"
                     onClick={() => {
                       if (row.kind === 'event') onOpenEvent(row.id);
-                      else {
+                      else if (!readonly) {
                         setEditingId(row.id);
                         setEditDraft(row.title);
                       }
                     }}
                     className="min-w-0 flex-1 truncate text-left text-sm text-slate-800 hover:text-slate-900"
-                    title={row.kind === 'manual' ? '点一下就地改名' : row.title}
+                    title={row.kind === 'manual' && !readonly ? '点一下就地改名' : row.title}
                   >
                     {row.title}
                   </button>

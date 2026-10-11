@@ -132,27 +132,33 @@ function buildDescription(event: EventDTO): string | null {
   return parts.length === 0 ? null : parts.join('\n');
 }
 
-function writeEvent(event: EventDTO, now: number, uidNs: string): string[] {
+function writeEvent(event: EventDTO, now: number, uidNs: string, deadlineNode = false): string[] {
   const lines: string[] = [];
   const typeCn = TYPE_CN[event.type] ?? TYPE_CN.other;
 
   lines.push('BEGIN:VEVENT');
   // R02：UID 带账号命名空间——同一事件在换账号导出的日历里是不同的 UID，
   // 避免两个账号的 .ics 混进同一日历时互相覆盖；SEQUENCE 跟着 version 走，改期能被日历客户端识别为更新。
-  lines.push(`UID:classrep-${uidNs}-${event.id}@classrep`);
+  lines.push(`UID:classrep-${uidNs}-${event.id}${deadlineNode ? '-deadline' : ''}@classrep`);
+  if (deadlineNode) lines.push(`RELATED-TO:classrep-${uidNs}-${event.id}@classrep`);
   lines.push(`SEQUENCE:${Math.max(0, event.version - 1)}`);
+  if (event.status === 'cancelled') lines.push('STATUS:CANCELLED');
   lines.push(`DTSTAMP:${formatUtc(now)}`);
+  lines.push(`LAST-MODIFIED:${formatUtc(event.updated_at)}`);
 
   if (event.start_at !== null) {
     lines.push(`DTSTART;TZID=${TZID}:${formatLocal(event.start_at)}`);
-    const end = event.end_at ?? event.start_at + 3600_000;
-    lines.push(`DTEND;TZID=${TZID}:${formatLocal(end)}`);
-    lines.push(`SUMMARY:${escapeIcsText(`[${typeCn}]${event.title}`)}`);
+    const end = event.end_at !== null && event.end_at > event.start_at ? event.end_at : event.start_at + 3600_000;
+    // 四位年份的最晚日期不能通过默认时长溢出到五位年份。
+    if (end <= Date.parse('9999-12-31T23:59:59.999+08:00')) {
+      lines.push(`DTEND;TZID=${TZID}:${formatLocal(end)}`);
+    }
+    lines.push(`SUMMARY:${escapeIcsText(`${event.deadline_at === event.start_at ? '【同时截止】' : ''}[${typeCn}]${event.title}`)}`);
   } else if (event.deadline_at !== null) {
     // 只有截止时刻：DTSTART = DTEND = 截止时刻，标题前加【截止】
     const at = formatLocal(event.deadline_at);
     lines.push(`DTSTART;TZID=${TZID}:${at}`);
-    lines.push(`DTEND;TZID=${TZID}:${at}`);
+    // RFC 5545: omit DTEND for a point in time; an equal DTEND is invalid.
     lines.push(`SUMMARY:${escapeIcsText(`【截止】[${typeCn}]${event.title}`)}`);
   } else {
     return []; // 两个时间都没有的事件不导出
@@ -185,6 +191,9 @@ export function buildIcs(events: EventDTO[], now: number = Date.now(), uidNs = '
   const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', `PRODID:${PRODID}`, ...vtimezoneLines()];
   for (const event of exportable) {
     lines.push(...writeEvent(event, now, uidNs));
+    if (event.start_at !== null && event.deadline_at !== null && event.start_at !== event.deadline_at) {
+      lines.push(...writeEvent({ ...event, start_at: null, end_at: null }, now, uidNs, true));
+    }
   }
   lines.push('END:VCALENDAR');
 

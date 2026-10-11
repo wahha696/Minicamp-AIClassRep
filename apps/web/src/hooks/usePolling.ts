@@ -4,6 +4,7 @@ export interface Polling<T> {
   data: T | undefined;      // 最近一次成功的结果；失败时保留上一次的数据，页面不白屏
   error: Error | undefined; // 最近一次失败；成功后清空
   loading: boolean;         // 还没拿到过任何结果
+  lastSuccessAt: number | undefined;
   refresh: () => Promise<void>; // 立即再拉一次（如操作后刷新）；返回的 promise 在拿到新数据后才 resolve
 }
 
@@ -16,12 +17,14 @@ export function usePolling<T>(fn: () => Promise<T>, intervalMs: number, resetKey
   const [data, setData] = useState<T>();
   const [error, setError] = useState<Error>();
   const [loading, setLoading] = useState(true);
+  const [lastSuccessAt, setLastSuccessAt] = useState<number>();
 
   const fnRef = useRef(fn);
   fnRef.current = fn;
   const run = useRef<Promise<void> | null>(null); // 在途请求
   const again = useRef(false);
   const alive = useRef(true);
+  const generation = useRef(0);
 
   const refresh = useCallback((): Promise<void> => {
     // 正在请求时再被调用（比如刚点完按钮）：标记补拉，并返回同一个在途 promise——
@@ -30,23 +33,30 @@ export function usePolling<T>(fn: () => Promise<T>, intervalMs: number, resetKey
       again.current = true;
       return run.current;
     }
-    const p = (async () => {
+    const expectedGeneration = generation.current;
+    let p!: Promise<void>;
+    p = (async () => {
       try {
         do {
           again.current = false;
           try {
-            const result = await fnRef.current();
-            if (!alive.current) return;
-            setData(result);
+            const request = fnRef.current;
+            const result = await Promise.resolve().then(() => {
+              if (!alive.current || generation.current !== expectedGeneration) return undefined;
+              return request();
+            });
+            if (!alive.current || generation.current !== expectedGeneration) return;
+            setData(result as T);
+            setLastSuccessAt(Date.now());
             setError(undefined);
           } catch (e) {
-            if (!alive.current) return;
+            if (!alive.current || generation.current !== expectedGeneration) return;
             setError(e instanceof Error ? e : new Error(String(e)));
           }
           setLoading(false);
         } while (again.current);
       } finally {
-        run.current = null;
+        if (run.current === p) run.current = null;
       }
     })();
     run.current = p;
@@ -59,6 +69,7 @@ export function usePolling<T>(fn: () => Promise<T>, intervalMs: number, resetKey
     setData(undefined);
     setError(undefined);
     setLoading(true);
+    setLastSuccessAt(undefined);
     void refresh();
     const timer = setInterval(() => {
       // 定时轮询遇到上一次没返回就跳过，不叠请求；标签页隐藏时暂停（P3）
@@ -70,11 +81,14 @@ export function usePolling<T>(fn: () => Promise<T>, intervalMs: number, resetKey
     window.addEventListener('classrep:resumed', refresh);
     return () => {
       alive.current = false;
+      generation.current++;
+      run.current = null;
+      again.current = false;
       clearInterval(timer);
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('classrep:resumed', refresh);
     };
   }, [refresh, intervalMs, resetKey]);
 
-  return { data, error, loading, refresh };
+  return { data, error, loading, lastSuccessAt, refresh };
 }

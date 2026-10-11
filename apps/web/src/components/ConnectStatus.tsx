@@ -4,7 +4,7 @@ import { createContext, useContext, type ReactNode } from 'react';
 import { getConnectStatus } from '../api/client';
 import type { ConnectStatusDTO } from '../api/types';
 import { usePolling, type Polling } from '../hooks/usePolling';
-import { setCurrentUin } from '../lib/account';
+import { setCurrentSpace, setCurrentUin } from '../lib/account';
 
 const ConnectStatusContext = createContext<Polling<ConnectStatusDTO> | null>(null);
 
@@ -12,6 +12,7 @@ export function ConnectStatusProvider({ children }: { children: ReactNode }) {
   const polling = usePolling(getConnectStatus, 2000);
   // 渲染期写入（幂等）：uin 一变，AccountLayout 的 key 立刻让整棵子树用新账号键重挂载
   setCurrentUin(polling.data?.uin);
+  setCurrentSpace(polling.data?.workspace ? polling.data.workspace.current?.space_id ?? null : undefined);
   return <ConnectStatusContext.Provider value={polling}>{children}</ConnectStatusContext.Provider>;
 }
 
@@ -19,4 +20,11 @@ export function useConnectStatus(): Polling<ConnectStatusDTO> {
   const ctx = useContext(ConnectStatusContext);
   if (!ctx) throw new Error('useConnectStatus 必须在 ConnectStatusProvider 里使用');
   return ctx;
+}
+
+/** Server capabilities are authoritative. Until known, a remote address is read-only. */
+export function useAccess() {
+  const ctx = useContext(ConnectStatusContext);
+  const local = ['localhost', '127.0.0.1', '[::1]', '0.0.0.0'].includes(window.location.hostname);
+  return { readonly: ctx?.data?.access?.readonly ?? !local, demoAvailable: ctx?.data?.demo_available === true };
 }

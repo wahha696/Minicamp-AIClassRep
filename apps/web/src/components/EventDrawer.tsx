@@ -16,6 +16,7 @@ import { toastError } from '../lib/errors';
 import { LEVEL_LABEL, levelStyle, STATUS_TEXT, typeMeta } from '../lib/eventMeta';
 import { formatWhen } from '../lib/time';
 import { useToast } from './Toast';
+import { useAccess } from './ConnectStatus';
 
 interface Props {
   id: number | null; // null = 关闭
@@ -30,6 +31,7 @@ export default function EventDrawer({ id, onClose, onChanged }: Props) {
 }
 
 function Drawer({ id, onClose, onChanged }: { id: number } & Omit<Props, 'id'>) {
+  const { readonly } = useAccess();
   const toast = useToast();
   const [detail, setDetail] = useState<EventDetailDTO>();
   const [error, setError] = useState<string>();
@@ -202,10 +204,10 @@ function Drawer({ id, onClose, onChanged }: { id: number } & Omit<Props, 'id'>) 
               detail={detail}
               showSources={showSources}
               onToggleSources={() => setShowSources((v) => !v)}
-              busy={busy}
+              busy={busy || readonly}
               onSetLevel={(l) => void setLevel(l)}
               editing={editing}
-              onStartEdit={() => setEditing(true)}
+              onStartEdit={() => { if (!readonly) setEditing(true); }}
               onCancelEdit={() => setEditing(false)}
               onSaveEdit={(patch) => void saveManualEdit(patch)}
               onResolveProposal={(proposalId, decision) => void resolveProposal(proposalId, decision)}
@@ -217,7 +219,7 @@ function Drawer({ id, onClose, onChanged }: { id: number } & Omit<Props, 'id'>) 
 
         {detail && (
           <footer className="flex flex-wrap gap-2 border-t border-slate-200 px-5 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-            {detail.status === 'pending_confirm' ? (
+            {readonly ? <span className="py-2 text-sm text-slate-500">只读详情，修改请在电脑上操作</span> : detail.status === 'pending_confirm' ? (
               <span className="py-2 text-sm font-medium text-amber-800">请先处理待确认修改，再标记完成或取消</span>
             ) : detail.status === 'done' || detail.status === 'cancelled' ? (
               <Btn onClick={() => setStatus('active', '已恢复')} disabled={busy} primary>
@@ -698,9 +700,13 @@ function Body({
             {detail.sources.map((s) => (
               <li key={s.message_id} className="rounded-lg border border-slate-200 px-3 py-2">
                 <div className="flex justify-between gap-2 text-xs text-slate-400">
-                  <span className="truncate font-medium text-slate-600">{s.sender_name}</span>
+                  <span className="truncate font-medium text-slate-600">{s.sender_name || '发信人未记录'}</span>
                   <span className="shrink-0">{formatWhen(s.sent_at)}</span>
                 </div>
+                <p className="mt-1 text-xs text-slate-500">
+                  {{ qq: 'QQ', wechat: '微信', demo: '演示', import: '导入', unknown: '平台未记录' }[s.platform ?? 'unknown']}
+                  {s.group_name ? ` · ${s.group_name}` : ' · 群名未记录'}
+                </p>
                 <p className="mt-1 whitespace-pre-wrap break-words text-sm text-slate-800">
                   {highlightSegments(s.text).map((seg, i) =>
                     seg.hit ? (

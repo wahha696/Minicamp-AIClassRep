@@ -2,7 +2,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import {
   getAiSettings,
   getJevConfig,
@@ -10,6 +10,7 @@ import {
   maskKey,
   saveAiSettings,
   setLlmSettingsDir,
+  testAiConnection,
 } from './ai-settings.js';
 
 const dirs: string[] = [];
@@ -23,6 +24,20 @@ afterAll(() => {
 });
 
 describe('ai-settings（修复计划 3.2）', () => {
+  it('候选 Key 检查不保存、不替换原 Key、不改变流水线配置版本', async () => {
+    setLlmSettingsDir(tempDir());
+    const before = getLlmConfig();
+    const request = vi.fn().mockResolvedValueOnce(new Response('', { status: 403 })).mockResolvedValueOnce(new Response('{}'));
+    vi.stubGlobal('fetch', request);
+    try {
+      expect(await testAiConnection('deepseek', 'sk-syntheticcandidate')).toEqual({ deepseek: { ok: false, error: 'Key 无效或被拒绝（HTTP 403）' } });
+      expect(getLlmConfig()).toEqual(before);
+      expect(request.mock.calls[0]?.[1]?.headers).toEqual({ Authorization: 'Bearer sk-syntheticcandidate' });
+      expect(await testAiConnection('deepseek', 'sk-syntheticcandidate')).toEqual({ deepseek: { ok: true } });
+      expect(getLlmConfig()).toEqual(before);
+      expect(getAiSettings().deepseek.source).not.toBe('web');
+    } finally { vi.unstubAllGlobals(); }
+  });
   it('没文件：两个 key 都不是网页来源（本机 .env 兜底另算）', () => {
     setLlmSettingsDir(tempDir());
     const s = getAiSettings();
@@ -115,6 +130,41 @@ describe('ai-settings（修复计划 3.2）', () => {
     // 没存过网页 key：env 来源不参与本机落盘保护态
     setLlmSettingsDir(tempDir());
     expect(getAiSettings().deepseek.protection).toBe('none');
+  });
+
+  it('自定义 OpenAI 兼容服务：保存 base_url/model，切回 DeepSeek 后清掉', () => {
+    setLlmSettingsDir(tempDir());
+    saveAiSettings({ llm: { provider: 'custom', api_key: 'custom-key-123456', base_url: 'https://llm.example.test/v1/', model: 'qwen-plus' } });
+    expect(getLlmConfig()).toMatchObject({ baseURL: 'https://llm.example.test/v1', apiKey: 'custom-key-123456', model: 'qwen-plus' });
+    expect(getAiSettings().deepseek).toMatchObject({ provider: 'custom', base_url: 'https://llm.example.test/v1', model: 'qwen-plus', source: 'web' });
+    // 同服务商只改模型可以沿用已保存的 key
+    saveAiSettings({ llm: { provider: 'custom', base_url: 'https://llm.example.test/v1', model: 'qwen-max' } });
+    expect(getLlmConfig()).toMatchObject({ apiKey: 'custom-key-123456', model: 'qwen-max' });
+    // 换服务商必须重新给 key；自定义必须有模型
+    expect(() => saveAiSettings({ llm: { provider: 'deepseek' } })).toThrow('API Key');
+    expect(() => saveAiSettings({ llm: { provider: 'custom', base_url: 'https://x.test/v1', api_key: 'k-1' } })).toThrow('模型');
+    saveAiSettings({ deepseek_key: 'sk-abcdef1234567890' });
+    expect(getLlmConfig()).toMatchObject({ baseURL: 'https://api.deepseek.com/v1', model: 'deepseek-chat' });
+    expect(getAiSettings().deepseek).toMatchObject({ provider: 'deepseek', base_url: 'https://api.deepseek.com/v1' });
+  });
+
+  it('自定义服务检查：模型留空时取 /models 第一个；没有 /models 时用一次对话验证', async () => {
+    setLlmSettingsDir(tempDir());
+    const request = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }] })))
+      .mockResolvedValueOnce(new Response('', { status: 404 }))
+      .mockResolvedValueOnce(new Response('{}'))
+      .mockResolvedValueOnce(new Response('', { status: 404 }));
+    vi.stubGlobal('fetch', request);
+    try {
+      const base = { provider: 'custom' as const, api_key: 'custom-key', base_url: 'https://llm.example.test/v1' };
+      expect(await testAiConnection('deepseek', base)).toEqual({ deepseek: { ok: true, model: 'model-a' } });
+      expect(request.mock.calls[0]?.[0]).toBe('https://llm.example.test/v1/models');
+      expect(await testAiConnection('deepseek', { ...base, model: 'm' })).toEqual({ deepseek: { ok: true } });
+      expect(request.mock.calls[2]?.[0]).toBe('https://llm.example.test/v1/chat/completions');
+      expect(await testAiConnection('deepseek', base)).toEqual({ deepseek: { ok: false, error: '该服务不提供模型列表，请手动填写模型名' } });
+      expect(getAiSettings().deepseek.source).not.toBe('web'); // 只检查不保存
+    } finally { vi.unstubAllGlobals(); }
   });
 
   it('maskKey：长 key 露前三后四，短 key 全码，空 key 空串', () => {

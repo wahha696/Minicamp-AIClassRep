@@ -38,7 +38,7 @@ async function download(url, dest) {
 }
 
 function pythonUsable(py) {
-  const r = spawnSync(py, ['-c', 'import sklearn,jieba,joblib,numpy;print("ok")'], {
+  const r = spawnSync(py, ['-c', 'import sklearn,jieba,joblib,numpy,zstandard;assert zstandard.__version__=="0.25.0";print("ok")'], {
     encoding: 'utf8', timeout: 60_000, cwd: ROOT,
   });
   return r.status === 0 && String(r.stdout).includes('ok');
@@ -73,7 +73,7 @@ async function provisionWindows() {
   }
   // jieba 只有 sdist：embed 环境先装构建后端，再关 build isolation 装依赖
   run(pyExe, ['-m', 'pip', 'install', 'setuptools', 'wheel'], 'pip install setuptools');
-  log('安装 requirements.txt（sklearn/jieba/joblib/numpy，约 200MB）…');
+  log('安装 requirements.txt（本地快判及微信文字解码依赖）…');
   run(pyExe, ['-m', 'pip', 'install', '-r', REQ, '--no-warn-script-location', '--no-build-isolation'], 'pip install');
   return pyExe;
 }
@@ -85,6 +85,11 @@ function provisionPosix() {
   return pyExe;
 }
 
+const existingPy = process.platform === 'win32' ? join(ROOT, 'py', 'python.exe') : join(ROOT, '.venv', 'bin', 'python');
+if (existsSync(existingPy) && pythonUsable(existingPy)) {
+  log('共享 Python 运行时及依赖已就绪');
+  process.exit(0);
+}
 const pyExe = process.platform === 'win32' ? await provisionWindows() : provisionPosix();
 if (!pythonUsable(pyExe)) fail(`装完但 import 校验不过：${pyExe}`);
 log(`就绪：${pyExe}`);

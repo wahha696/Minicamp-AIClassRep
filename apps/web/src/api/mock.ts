@@ -1,10 +1,12 @@
 let mockDesktopQQ: import('./types').DesktopQQStatusDTO = { supported: true, state: 'idle' };
+let mockReminderRules = defaultReminderRules();
 // VITE_MOCK=1 时 client.ts 用这里的假数据代替后端，用于后端没好时开发页面。
 // 数据存在内存里：PATCH/删除/回放都会改变后续返回，刷新页面恢复初始状态。
 // 连接状态可在浏览器控制台切换，方便调 D1 黄条 / D5 连接页：
 //   localStorage.mockConnectState = 'waiting_qr'   // 任一 ConnectState，默认 online
 //   localStorage.mockFirstRun = '1'                // 模拟首次使用（守卫拦到 /connect）
 import type { Api } from './client';
+import { defaultReminderRules } from '../../../../shared/reminders';
 import { normalizeCourses, reconcileCourses, type TimetableVersion } from '../../../../shared/timetable';
 import { ApiError } from './error';
 import { isTodo } from '../lib/todo';
@@ -403,22 +405,50 @@ export const mockApi: Api = {
   downloadDiagnosticReport() {
     return delay({ blob: new Blob(['{}'], { type: 'application/json' }), filename: 'ClassRep-diagnostic.json' });
   },
+  getReminderSettings: async () => ({ ...mockReminderRules, before_minutes: [...mockReminderRules.before_minutes], delivery_ready: false }),
+  saveReminderTimes: async (before_minutes, daily_limit) => {
+    mockReminderRules = { ...mockReminderRules, before_minutes: [...before_minutes], daily_limit }; return { ...mockReminderRules, delivery_ready: false };
+  },
+  getWechatStatus: async () => ({ state: 'idle', connection_id: null, error: null, collecting: false }),
+  getWechatIntake: async () => ({ state: 'idle', error: null, collecting: false, intake_id: null, last_received_at: null, scope: null, groups: [] }),
+  startWechatIntake: () => fail('演示模式不会读取真实微信消息', 409),
+  stopWechatIntake: () => fail('演示模式没有真实微信采集', 409),
+  refreshWechatHistory: () => fail('演示模式不会读取真实微信历史', 409),
+  getWechatIssues: () => fail('演示模式没有真实微信消息收件箱', 409),
+  retryWechatIssues: () => fail('演示模式不会读取真实微信消息', 409),
+  connectWechat: () => fail('演示模式不会读取电脑微信', 409),
+  disconnectWechat: () => fail('演示模式没有真实微信连接', 409),
+  getWechatGroups: async () => ({ state: 'idle', scope: null, catalog: null, error: null, collecting: false, selected_group_ids: [] }),
+  refreshWechatGroups: () => fail('演示模式不会读取微信群列表', 409),
+  selectWechatGroups: () => fail('演示模式不会授权真实群采集', 409),
+  chooseWorkspace: () => fail('演示模式没有真实平台登录，无需绑定空间', 409),
+  renameWorkspace: () => fail('演示模式没有真实空间', 409),
+  resetWorkspaceData: () => fail('演示模式没有真实空间', 409),
+
   getToday() {
     const from = at(0, 0);
     const to = at(1, 0);
     const list = events
       .filter((e) => e.status !== 'cancelled' && !isTodo(e))
-      .filter((e) => inRange(e.start_at, from, to) || inRange(e.deadline_at, from, to))
+      .filter((e) => inRange(e.start_at, from, to) || inRange(e.deadline_at, from, to)
+        || (e.start_at !== null && e.end_at !== null && e.end_at > e.start_at && e.start_at < to && e.end_at > from))
       .map(toDTO)
       .sort((a, b) => timeOf(a) - timeOf(b));
 
-    const todo = list.filter((e) => e.status !== 'done');
-    const urgent = todo.find((e) => timeOf(e) >= Date.now()) ?? todo[0];
-    const summary = urgent
-      ? `今天 ${list.length} 件事，最急的是 ${hhmm(timeOf(urgent))} ${urgent.title}`
-      : '今天没有待办，轻松一天';
-
-    const today: TodayDTO = { date: shanghaiDate(Date.now()), summary, events: list };
+    const now = Date.now();
+    const overdue = events.filter(e => e.type === 'assignment' && (e.status === 'active' || e.status === 'pending_confirm')
+      && e.deadline_at !== null && e.deadline_at < now).map(toDTO);
+    const pending = list.filter(e => e.status !== 'done' && !overdue.some(old => old.id === e.id));
+    const todoCount = events.filter(isTodo).length + todos.filter(todo => todo.done_at === null).length;
+    const tail = (overdue.length ? `；${overdue.length} 件作业已逾期` : '') + (todoCount ? `；另有 ${todoCount} 件待办` : '');
+    const nextTime = (e: EventDTO) => {
+      const future = [e.start_at, e.deadline_at].filter((time): time is number => time !== null && time >= now);
+      return future.length ? Math.min(...future) : e.deadline_at ?? e.start_at ?? -1;
+    };
+    const next = pending.filter(e => nextTime(e) >= now).sort((a, b) => nextTime(a) - nextTime(b))[0];
+    const summary = !pending.length ? `今天暂无未完成的日程${tail}`
+      : `今天 ${pending.length} 件未完成安排` + (next ? `，接下来 ${hhmm(nextTime(next))} ${next.title}` : '，请核对处理状态') + tail;
+    const today: TodayDTO = { date: shanghaiDate(now), summary, events: list, overdue };
     return delay(today);
   },
 
@@ -428,7 +458,8 @@ export const mockApi: Api = {
     if (from !== undefined || to !== undefined) {
       const f = from ?? -Infinity;
       const t = to ?? Infinity;
-      list = list.filter((e) => inRange(e.start_at, f, t) || inRange(e.deadline_at, f, t));
+      list = list.filter((e) => inRange(e.start_at, f, t) || inRange(e.deadline_at, f, t)
+        || (e.start_at !== null && e.end_at !== null && e.end_at > e.start_at && e.start_at < t && e.end_at > f));
     }
     return delay(list.map(toDTO).sort((a, b) => timeOf(a) - timeOf(b)));
   },
@@ -524,7 +555,8 @@ export const mockApi: Api = {
     }
 
     if (!edited && patch.status !== undefined && patch.status !== e.status) {
-      // 与后端一致：手动改状态也写一条 history（不升 version），回收站靠它认出「你取消的」
+      // 与后端一致：内容变更递增版本并记录手动 history。
+      e.version++;
       e.history = [
         ...e.history,
         {
@@ -545,16 +577,18 @@ export const mockApi: Api = {
         e.level = patch.level;
         e.level_locked = true;
         memory.feedback_count++; // 与后端一致：每次手动设级记一条调级记录
-        // 与后端一致：手动调级不升 version，只追加一条 history
-        e.history = [
-          ...e.history,
-          {
-            version: e.version,
-            changed_fields: { level: { from, to: patch.level } },
-            source_message_id: null,
-            changed_at: Date.now(),
-          },
-        ];
+        if (from !== patch.level) {
+          e.version++;
+          e.history = [
+            ...e.history,
+            {
+              version: e.version,
+              changed_fields: { level: { from, to: patch.level } },
+              source_message_id: null,
+              changed_at: Date.now(),
+            },
+          ];
+        }
       }
     }
     e.updated_at = Math.max(Date.now(), e.updated_at + 1);
@@ -639,6 +673,14 @@ export const mockApi: Api = {
     return delay({ ...g, event_count: events.filter((e) => e.group_id === id).length });
   },
 
+  retryGroup(id) {
+    const group = groups.find((g) => g.group_id === id);
+    if (!group) return fail('群不存在', 404);
+    if (!group.enabled) return fail('请先开启这个群的监听再重试', 409);
+    delete group.processing_failure;
+    return delay({ accepted: true as const });
+  },
+
   deleteGroupData(id) {
     const g = groups.find((x) => x.group_id === id);
     if (!g) return fail('群不存在', 404);
@@ -684,6 +726,7 @@ export const mockApi: Api = {
   getConnectStatus() {
     const state = connectState();
     const status: ConnectStatusDTO = {
+      demo_available: true,
       state,
       account_epoch: '10001:1',
       desktop_qq: mockDesktopQQ,
@@ -748,6 +791,7 @@ export const mockApi: Api = {
     // 天数越大补回的消息越多（mock 按比例给个数）
     return delay({ groups: groups.filter((g) => g.enabled).length, messages: 4 * days });
   },
+  getSyncStatus: () => delay([]),
 
   getHealth() {
     const qq = connectState();
@@ -789,6 +833,13 @@ export const mockApi: Api = {
       if (!key) return fail('DeepSeek API Key 不能为空', 400);
       if (!/^sk-[A-Za-z0-9_-]{8,}$/.test(key)) return fail('API Key 格式不对，应以 sk- 开头', 400);
       mockLlm = { provider: 'deepseek', configured: true, key_hint: keyHint(key), source: 'web' };
+    }
+    if (patch.llm !== undefined) {
+      const key = patch.llm.api_key?.trim();
+      if (!key && mockLlm.provider !== patch.llm.provider) return fail('请填写 API Key', 400);
+      if (patch.llm.provider === 'custom' && !patch.llm.model?.trim()) return fail('请填写模型名', 400);
+      mockLlm = { provider: patch.llm.provider, configured: true, key_hint: key ? keyHint(key) : mockLlm.key_hint, source: 'web',
+        base_url: patch.llm.base_url, model: patch.llm.model };
     }
     if (patch.jev_key !== undefined) {
       const key = patch.jev_key.trim();
@@ -943,15 +994,22 @@ export const mockApi: Api = {
     if (item.kind === 'cancelled') {
       const prev = item.changes['status']?.from;
       const to: EventStatus = prev === 'pending_confirm' || prev === 'done' ? prev : 'active';
+      e.version++;
       e.history = [...e.history, { version: e.version, changed_fields: { status: { from: 'cancelled', to } }, source_message_id: null, changed_at: now }];
       e.status = to;
     } else {
       const changed: HistoryDTO['changed_fields'] = {};
       const rec = e as unknown as Record<string, unknown>;
+      const start = item.changes.start_at ? item.changes.start_at.from : e.start_at;
+      const end = item.changes.end_at ? item.changes.end_at.from : e.end_at;
+      if (typeof start === 'number' && typeof end === 'number' && end <= start) {
+        return fail('恢复后的结束时间必须晚于开始时间，请在事件详情中修正时间', 409);
+      }
       for (const [f, c] of Object.entries(item.changes)) {
         changed[f] = { from: rec[f], to: c.from };
         rec[f] = c.from;
       }
+      e.version++;
       e.history = [...e.history, { version: e.version, changed_fields: changed, source_message_id: null, changed_at: now }];
     }
     e.updated_at = now;
@@ -1010,7 +1068,7 @@ function trashItems(): TrashItemDTO[] {
   return out.sort((a, b) => b.at - a.at);
 }
 
-let mockLlm: LlmSettingsDTO = { provider: 'deepseek', configured: false, key_hint: '', source: 'none', protection: 'none' };
+let mockLlm: LlmSettingsDTO & { base_url?: string; model?: string } = { provider: 'deepseek', configured: false, key_hint: '', source: 'none', protection: 'none' };
 let mockJev: { configured: boolean; key_hint: string; source: 'web' | 'env' | 'none' } = {
   configured: false,
   key_hint: '',
@@ -1031,6 +1089,8 @@ function aiDto(): AiSettingsDTO {
       key_hint: mockLlm.key_hint,
       source: mockLlm.source,
       protection: mockLlm.configured ? (mockLlm.protection ?? 'dpapi') : 'none',
+      base_url: mockLlm.provider === 'custom' ? mockLlm.base_url : 'https://api.deepseek.com/v1',
+      model: mockLlm.provider === 'custom' ? mockLlm.model : 'deepseek-chat',
     },
     jev: { ...mockJev, enabled: true, mode: 'jev', local_configured: false },
   };

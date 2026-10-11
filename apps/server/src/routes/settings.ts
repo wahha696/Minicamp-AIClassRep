@@ -1,6 +1,7 @@
 // /api/settings/*：AI Key（DeepSeek 必填 + Jev 可选）与局域网只读开关。
 // 本机才能写（局域网写操作已被 lan-guard 统一 403）；GET 只返回打码后的 key。
 import type { Hono } from 'hono';
+import { z } from 'zod';
 import {
   getAiSettings,
   getLlmSettings,
@@ -8,6 +9,7 @@ import {
   saveAiSettings,
   saveLlmSettings,
   testAiConnection,
+  type LlmInput,
   type LlmProvider,
 } from '../ai-settings.js';
 import { llmStats } from '../pipeline/stats.js';
@@ -50,6 +52,22 @@ function registerLanRoutes(app: Hono, listeningLan: boolean, port: () => number)
 
 const DEEPSEEK_KEY_RE = /^sk-[A-Za-z0-9_-]{8,}$/;
 
+/** 大模型接入：deepseek 只要 key；custom 要 base_url（http/https），模型可留空（测试时自动选） */
+const llmInputSchema = z.object({
+  provider: z.enum(['deepseek', 'custom']),
+  api_key: z.string().trim().min(1).max(4096).regex(/^\S+$/).optional(),
+  base_url: z.string().trim().max(2048).optional()
+    .refine((v) => v === undefined || /^https?:\/\/[^\s/]+/i.test(v), '接口地址应以 http:// 或 https:// 开头'),
+  model: z.string().trim().max(200).optional(),
+}).strict().refine((v) => v.provider !== 'deepseek' || v.api_key === undefined || DEEPSEEK_KEY_RE.test(v.api_key),
+  'DeepSeek API Key 格式不对，应以 sk- 开头')
+  .refine((v) => v.provider !== 'custom' || !!v.base_url, '请填写接口地址（base_url）');
+
+function parseLlmInput(raw: unknown): LlmInput | string {
+  const r = llmInputSchema.safeParse(raw);
+  return r.success ? r.data : (r.error.issues[0]?.message ?? 'AI 接入配置格式不对');
+}
+
 export function registerSettingsRoutes(app: Hono, lan?: { listening: boolean; port: () => number }): void {
   if (lan) registerLanRoutes(app, lan.listening, lan.port);
 
@@ -65,11 +83,16 @@ export function registerSettingsRoutes(app: Hono, lan?: { listening: boolean; po
     } catch {
       return c.json({ error: '请求格式不对' }, 400);
     }
-    const b = (body ?? {}) as { deepseek_key?: unknown; jev_key?: unknown };
-    if (b.deepseek_key === undefined && b.jev_key === undefined) {
+    const b = (body ?? {}) as { deepseek_key?: unknown; jev_key?: unknown; llm?: unknown };
+    if (b.deepseek_key === undefined && b.jev_key === undefined && b.llm === undefined) {
       return c.json({ error: '没有要保存的内容' }, 400);
     }
-    const input: { deepseek_key?: string; jev_key?: string } = {};
+    const input: { deepseek_key?: string; jev_key?: string; llm?: LlmInput } = {};
+    if (b.llm !== undefined) {
+      const llm = parseLlmInput(b.llm);
+      if (typeof llm === 'string') return c.json({ error: llm }, 400);
+      input.llm = llm;
+    }
     if (b.deepseek_key !== undefined) {
       if (typeof b.deepseek_key !== 'string') return c.json({ error: 'deepseek_key 格式不对' }, 400);
       const key = b.deepseek_key.trim();
@@ -81,16 +104,32 @@ export function registerSettingsRoutes(app: Hono, lan?: { listening: boolean; po
       if (typeof b.jev_key !== 'string') return c.json({ error: 'jev_key 格式不对' }, 400);
       input.jev_key = b.jev_key.trim();
     }
-    saveAiSettings(input);
+    try {
+      saveAiSettings(input);
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : '保存失败' }, 400);
+    }
     llmStats.llm = 'ok'; // 换了 key，清掉上一次的失败状态，下次调用再如实更新
     return c.json(getAiSettings());
   });
 
-  // POST /api/settings/ai/test { target?: 'deepseek'|'jev' }：真实调一次（B9：无效 key 不亮绿灯）
+  // POST /api/settings/ai/test { target?: 'deepseek'|'jev', candidate_key? | candidate? }：真实调一次（B9：无效 key 不亮绿灯）
   app.post('/api/settings/ai/test', async (c) => {
-    const b = (await c.req.json().catch(() => ({}))) as { target?: unknown } | null;
+    const b = (await c.req.json().catch(() => ({}))) as { target?: unknown; candidate_key?: unknown; candidate?: unknown } | null;
     const target = b?.target === 'deepseek' || b?.target === 'jev' ? b.target : undefined;
-    return c.json(await testAiConnection(target));
+    if (b?.candidate !== undefined) {
+      if (target !== 'deepseek') return c.json({ error: '候选配置只能用于大模型检查' }, 400);
+      const llm = parseLlmInput(b.candidate);
+      if (typeof llm === 'string') return c.json({ error: llm }, 400);
+      return c.json(await testAiConnection(target, llm));
+    }
+    let candidate: string | undefined;
+    if (b?.candidate_key !== undefined) {
+      if (target !== 'deepseek' || typeof b.candidate_key !== 'string' || b.candidate_key.length > 4096
+        || !DEEPSEEK_KEY_RE.test(b.candidate_key.trim())) return c.json({ error: '候选 API Key 格式不正确' }, 400);
+      candidate = b.candidate_key.trim();
+    }
+    return c.json(await testAiConnection(target, candidate));
   });
 
   // ===== 兼容旧接口：/api/settings/llm 只剩 DeepSeek（设置页/连接页还在用就继续可用） =====

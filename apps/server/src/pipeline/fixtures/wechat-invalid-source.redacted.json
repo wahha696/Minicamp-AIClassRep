@@ -1,0 +1,17 @@
+{
+  "events": [{
+    "action": "create",
+    "update_of": null,
+    "type": "exam",
+    "title": "人工脱敏文本",
+    "description": "人工脱敏文本",
+    "start_at": "2026-09-27T16:00+08:00",
+    "end_at": null,
+    "deadline_at": null,
+    "location": "人工脱敏文本",
+    "action_required": "人工脱敏文本",
+    "confidence": 0.95,
+    "level": 4,
+    "source_message_ids": ["dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"]
+  }]
+}

@@ -8,7 +8,7 @@ import { accountKey } from './account';
 export type LightColor = 'green' | 'red' | 'gray';
 
 export interface Light {
-  key: 'qq' | 'db' | 'llm' | 'jev';
+  key: 'qq' | 'wechat' | 'db' | 'llm' | 'jev';
   label: string;
   color: LightColor;
   tip: string; // 悬停说明
@@ -26,7 +26,7 @@ export const QQ_STATE_TEXT: Record<ConnectState, string> = {
 
 const LLM_TEXT: Record<HealthDTO['llm'], string> = {
   ok: '正常',
-  error: '最近一次连不上 AI 服务（检查网络或 API Key），消息会保留，1 分钟后自动重试',
+  error: '最近一次 AI 整理失败；可能是网络、额度或返回格式问题。消息会保留，请到群管理查看失败原因与重试状态',
   unconfigured: '未配置',
 };
 
@@ -77,6 +77,9 @@ export function lightsFromHealth(health: HealthDTO | undefined): Light[] {
       color: health.qq === 'online' ? 'green' : 'red',
       tip: `QQ 连接：${QQ_STATE_TEXT[health.qq] ?? health.qq}`,
     },
+    ...(health.wechat === undefined ? [] : [{ key: 'wechat' as const, label: '微信',
+      color: (health.wechat === 'collecting' ? 'green' : health.wechat === 'error' ? 'red' : 'gray') as LightColor,
+      tip: `微信采集：${{ collecting: '正在接收所选群消息', opening: '正在准备采集', idle: '未开启采集', error: '采集已停止，请在群管理查看原因' }[health.wechat]}` }]),
     {
       key: 'db',
       label: '数据库',
@@ -107,13 +110,16 @@ export type Banner =
 /** 返回 null 表示不显示黄条 */
 export function bannerFor(status: ConnectStatusDTO | undefined, pathname: string): Banner | null {
   if (!status) return null;
+  if (status.workspace?.pending.length) {
+    return pathname === '/connect' ? null : { kind: 'not_connected', text: '账号连接尚未完成', linkTo: '/connect', linkText: '查看连接' };
+  }
   switch (status.state) {
     case 'reconnecting':
       return { kind: 'reconnecting', text: '连接中断，重连中' };
     case 'kicked':
       return {
         kind: 'kicked',
-        text: '你的 QQ 在另一台电脑登录了，采集已暂停',
+        text: '你的 QQ 在另一台电脑登录了，QQ 采集已暂停',
         action: 'restart',
         actionText: '重新连接',
       };
@@ -127,6 +133,7 @@ export function bannerFor(status: ConnectStatusDTO | undefined, pathname: string
     case 'qq_conflict':
     case 'waiting_qr':
     case 'starting':
+      if (status.wechat === 'collecting') return null;
       if (pathname === '/connect') return null;
       return { kind: 'not_connected', text: 'QQ 未连接', linkTo: '/connect', linkText: '去连接' };
     case 'online':

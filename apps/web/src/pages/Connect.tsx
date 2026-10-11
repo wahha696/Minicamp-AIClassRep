@@ -1,7 +1,7 @@
 // 连接页 /connect（D5，架构.md §4、§7）：按连接状态显示扫码 / 接管 QQ / 异常 / 加载。
 // 状态来自全局 ConnectStatusProvider（每 2s 轮询），这里不再单独轮询。
 import { useEffect, useState, type ReactNode } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   deleteAccountData,
   getFetchNapcatProgress,
@@ -12,9 +12,9 @@ import {
   startFetchNapcat,
 } from '../api/client';
 import type { AccountsDTO, ConnectStatusDTO, SetupProgressDTO } from '../api/types';
-import AiSettingsCard from '../components/AiSettingsCard';
-import { qqAvatarUrl } from '../components/Avatar';
 import ConfirmDialog from '../components/ConfirmDialog';
+import WorkspacePanel from '../components/WorkspacePanel';
+import WechatPanel from '../components/WechatPanel';
 import { useConnectStatus } from '../components/ConnectStatus';
 import { useToast } from '../components/Toast';
 import { toastError } from '../lib/errors';
@@ -99,7 +99,7 @@ export default function Connect() {
           <Panel title={data.message || ERROR_FALLBACK} tone="error">
             {data.reason === 'no_napcat' && <NapcatDownload onInstalled={refresh} />}
             <div className="flex flex-wrap justify-center gap-3">
-              <BigButton onClick={onRestart} busy={busy}>
+              <BigButton onClick={() => void onRestart()} busy={busy}>
                 重启采集端
               </BigButton>
               {data.reason !== 'no_napcat' && (
@@ -119,61 +119,60 @@ export default function Connect() {
       case 'kicked':
         body = (
           <Panel title="你的 QQ 在另一台电脑登录了，采集已暂停">
-            <BigButton onClick={onRestart} busy={busy}>
+            <BigButton onClick={() => void onRestart()} busy={busy}>
               重新连接
             </BigButton>
           </Panel>
         );
         break;
       case 'reconnecting':
-        body = <Spinner text="连接中断，重连中" />;
+        body = (
+          <Panel title={data.message || 'QQ 连接中断'}>
+            <BigButton onClick={() => void onRestart()} busy={busy}>
+              重新连接 QQ
+            </BigButton>
+          </Panel>
+        );
         break;
       case 'online':
         body = (
-          <Panel title={`✅ QQ 已连接${data.uin ? `（${data.uin}）` : ''}，正在接收群消息`}>
-            <button
-              type="button"
-              onClick={() => navigate('/')}
-              className="rounded-xl bg-slate-900 px-6 py-3 text-base font-medium text-white hover:bg-slate-700"
-            >
-              查看今日日程 →
-            </button>
-          </Panel>
+          <Panel title="QQ 已连接" />
         );
         break;
     }
   }
 
-  const showAccount = !!data?.uin && state !== 'waiting_qr';
+  const showAccount = !!data?.uin && state !== 'waiting_qr' && state !== 'qq_conflict';
+  const qqConnection = <section aria-label="QQ 连接" className="space-y-3 border-t border-slate-200 pt-5">
+    <h3 className="text-left font-semibold text-slate-900">QQ 连接</h3>
+    {showAccount && data && <QqAccountControls status={data} onLoggedOut={refresh} />}
+    <div aria-live="polite">{body}</div>
+    {state === 'online' && <Link to="/groups?platform=qq" className="inline-block text-sm text-blue-600 underline">管理 QQ 群</Link>}
+    {state !== 'online' && <button type="button" onClick={goDemo}
+      className="text-sm text-slate-500 underline-offset-4 hover:underline">没有 QQ？先用演示模式看看 →</button>}
+  </section>;
 
   return (
-    <div className={`mx-auto py-6 ${showAccount ? 'max-w-3xl md:flex md:items-start md:gap-8' : 'max-w-md'}`}>
-    {showAccount && data && <AccountCard status={data} onLoggedOut={refresh} />}
-    <section className="mx-auto w-full max-w-md space-y-8 text-center md:order-first">
-      <div aria-live="polite">
-        <h2 className="mb-3 text-left text-sm font-semibold text-slate-500">QQ 连接</h2>
-        {body}
-        {state !== 'online' && (
-          <button
-            type="button"
-            onClick={goDemo}
-            className="mt-6 text-sm text-slate-400 underline-offset-4 hover:text-slate-600 hover:underline"
-          >
-            没有 QQ？先用演示模式看看 →
-          </button>
-        )}
-      </div>
+    <div className="mx-auto w-full max-w-2xl py-6">
+    <div className="space-y-8">
+      {data?.workspace ? <WorkspacePanel status={data.workspace} epoch={data.account_epoch} onChanged={refresh}>
+        {qqConnection}
+        <WechatPanel available={data.workspace.wechat_available}
+        unavailableReason={data.workspace.wechat_unavailable_reason}
+        local={['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname)}
+        epoch={data.account_epoch} onChanged={refresh} />
+      </WorkspacePanel> : qqConnection}
 
-      <div>
-        <h2 className="mb-3 text-left text-sm font-semibold text-slate-500">AI 接入</h2>
-        <AiSettingsCard />
-      </div>
+      <section aria-label="AI 接入" className="border-t border-slate-200 pt-6">
+        <h2 className="mb-3 text-left font-semibold text-slate-900">AI 接入</h2>
+        <Link to="/settings" className="text-sm text-blue-600 underline">管理 AI 配置</Link>
+      </section>
 
       {data?.legacy_data && readFlag(LEGACY_DATA_KEY) !== '1' && (
         <LegacyDataNotice onDismiss={() => writeFlag(LEGACY_DATA_KEY, '1')} />
       )}
 
-      <AccountsCard />
+      {!data?.workspace && <AccountsCard />}
 
       {notice && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" role="dialog" aria-modal="true">
@@ -193,17 +192,14 @@ export default function Connect() {
           </div>
         </div>
       )}
-    </section>
+    </div>
     </div>
   );
 }
 
-/** 右侧账号卡片：大头像 + QQ 名称 + 退出登录（退出后回到扫码，另一个人可以登录自己的号） */
-function AccountCard({ status, onLoggedOut }: { status: ConnectStatusDTO; onLoggedOut: () => Promise<unknown> | void }) {
+function QqAccountControls({ status, onLoggedOut }: { status: ConnectStatusDTO; onLoggedOut: () => Promise<unknown> | void }) {
   const toast = useToast();
   const uin = status.uin!;
-  const online = status.state === 'online';
-  const [imgFailed, setImgFailed] = useState(false);
   const [confirmContext, setConfirmContext] = useState<{ accountEpoch: string; uin: string } | null>(null);
   const [erase, setErase] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -212,11 +208,11 @@ function AccountCard({ status, onLoggedOut }: { status: ConnectStatusDTO; onLogg
     if (confirmContext === null) return;
     setBusy(true);
     try {
-      await logoutConnect(confirmContext, erase);
+      await logoutConnect(confirmContext, status.workspace ? false : erase);
       await onLoggedOut();
       setConfirmContext(null);
       setErase(false);
-      toast(erase ? '已退出并删除本号数据' : '已退出登录，请用要登录的 QQ 扫码');
+      toast(status.workspace ? 'QQ 已退出，空间数据保留' : erase ? '已退出并删除本号数据' : '已退出登录，请用要登录的 QQ 扫码');
     } catch (e) {
       toastError(toast, e);
     } finally {
@@ -225,49 +221,20 @@ function AccountCard({ status, onLoggedOut }: { status: ConnectStatusDTO; onLogg
   }
 
   return (
-    <aside className="mb-8 rounded-2xl border border-slate-200 bg-white px-6 py-7 text-center shadow-sm md:mb-0 md:mt-8 md:w-64 md:shrink-0">
-      <div className="relative mx-auto h-24 w-24">
-        {imgFailed ? (
-          <span className="flex h-full w-full items-center justify-center rounded-full border border-slate-200 bg-slate-100 text-slate-400">
-            <svg viewBox="0 0 24 24" className="h-12 w-12" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" aria-hidden>
-              <circle cx="12" cy="8" r="4" />
-              <path d="M4 21a8 8 0 0 1 16 0" />
-            </svg>
-          </span>
-        ) : (
-          <img
-            src={qqAvatarUrl(uin).replace('s=100', 's=640')}
-            alt=""
-            referrerPolicy="no-referrer"
-            onError={() => setImgFailed(true)}
-            className="h-full w-full rounded-full border border-slate-200 bg-slate-100 object-cover"
-          />
-        )}
-        <span
-          className={`absolute bottom-1 right-1 h-4 w-4 rounded-full border-2 border-white ${online ? 'bg-emerald-500' : 'bg-slate-300'}`}
-          aria-hidden
-        />
-      </div>
-      <div className="mt-4 truncate text-lg font-semibold text-slate-900" title={status.nickname ?? uin}>
-        {status.nickname ?? `QQ ${uin}`}
-      </div>
-      <div className="mt-0.5 text-sm text-slate-400">
-        {status.nickname ? `${uin} · ` : ''}
-        {online ? '已连接' : '未连接'}
-      </div>
-      <p className="mt-1 text-xs text-slate-300">头像由 QQ 服务器提供，加载时会带上你的 QQ 号</p>
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <p className="min-w-0 break-all text-sm text-slate-600">{status.nickname ? `${status.nickname} · ` : ''}QQ {uin}</p>
       <button
         type="button"
         onClick={() => setConfirmContext({ accountEpoch: status.account_epoch, uin })}
-        className="mt-6 w-full rounded-xl border border-rose-200 py-2.5 text-sm font-medium text-rose-600 hover:bg-rose-50"
+        className="shrink-0 text-sm text-rose-600 underline-offset-4 hover:underline"
       >
-        退出登录
+        退出 QQ
       </button>
 
       <ConfirmDialog
         open={confirmContext !== null}
         title="退出当前 QQ？"
-        confirmText={erase ? '退出并删除数据' : '退出登录'}
+        confirmText={!status.workspace && erase ? '退出并删除数据' : '退出 QQ'}
         danger
         busy={busy}
         onConfirm={() => void onLogout()}
@@ -277,9 +244,9 @@ function AccountCard({ status, onLoggedOut }: { status: ConnectStatusDTO; onLogg
         }}
       >
         <p>
-          将退出 QQ {confirmContext?.uin ?? uin}。退出后回到扫码页，可以换另一个 QQ 号登录；已整理的群和日程会保留。
+          {status.workspace ? `将停止 QQ ${confirmContext?.uin ?? uin} 的采集，空间数据保留。另一平台仍登录时可继续使用；两端都退出后隐藏空间数据，重新登录后恢复。` : `将退出 QQ ${confirmContext?.uin ?? uin}。退出后回到扫码页，可以换另一个 QQ 号登录；已整理的群和日程会保留。`}
         </p>
-        <label className="mt-3 flex items-start gap-2 text-left text-sm text-rose-600">
+        {!status.workspace && <label className="mt-3 flex items-start gap-2 text-left text-sm text-rose-600">
           <input
             type="checkbox"
             checked={erase}
@@ -287,9 +254,9 @@ function AccountCard({ status, onLoggedOut }: { status: ConnectStatusDTO; onLogg
             className="mt-0.5"
           />
           同时删除这个号在本机的全部数据（群、日程、待办，不可恢复）
-        </label>
+        </label>}
       </ConfirmDialog>
-    </aside>
+    </div>
   );
 }
 
@@ -372,14 +339,13 @@ function NapcatDownload({ onInstalled }: { onInstalled: () => Promise<unknown> |
   );
 }
 
-/** 旧版单库数据迁移提示（升级后出现一次，用户可手动把 legacy 目录改成对应 QQ 号） */
+/** An unassigned legacy library remains separate from the migrated workspace. */
 function LegacyDataNotice({ onDismiss }: { onDismiss: () => void }) {
   return (
     <div className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-4 text-left text-sm text-amber-800">
       <p className="font-medium">检测到旧版本数据</p>
       <p className="mt-1 leading-relaxed">
-        旧版的单一数据库已迁移到 <code className="rounded bg-amber-100 px-1">data/accounts/legacy/</code>。
-        因为无法确认它属于哪个 QQ 号，新账号会从空数据开始；如需找回，把该文件夹改名为对应 QQ 号即可。
+        另有一份尚未导入的旧版数据，原文件已保留。当前空间的数据不受影响。
       </p>
       <button type="button" onClick={onDismiss} className="mt-2 font-medium text-amber-700 underline-offset-2 hover:underline">
         知道了
@@ -505,9 +471,9 @@ function Spinner({ text }: { text: string }) {
 
 function Panel({ title, tone, children }: { title: string; tone?: 'error'; children?: ReactNode }) {
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white px-6 py-8 shadow-sm">
-      <p className={`text-lg font-medium leading-relaxed ${tone === 'error' ? 'text-rose-700' : 'text-slate-800'}`}>{title}</p>
-      {children && <div className="mt-6">{children}</div>}
+    <div className="py-1">
+      <p className={`text-sm leading-relaxed ${tone === 'error' ? 'text-rose-700' : 'text-slate-600'}`}>{title}</p>
+      {children && <div className="mt-3">{children}</div>}
     </div>
   );
 }

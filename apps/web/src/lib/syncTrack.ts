@@ -1,6 +1,5 @@
-// 顶栏「刷新」补拉后的「整理中 N」进度判定（纯函数，便于单测）。
-// health.pending 是全部启用群的待整理数，群里一直有人说话时不会归零——
-// 所以补拉前先记一个基线，只看「比补拉前多出来的那部分」，且不超过本次补回的条数。
+// 顶栏补拉后的「全局待整理 N」状态判定。health.pending 是全部启用群的待整理数，
+// 新消息进入时可能增加，不能用它计算本次补拉还剩多少条。
 import type { HealthDTO } from '../api/types';
 
 export const TRACK_MAX_MS = 10 * 60_000; // 最多盯 10 分钟，之后交给后台慢慢整理
@@ -18,9 +17,9 @@ export type TrackStep =
   | { kind: 'done' }
   | { kind: 'stop'; message: string };
 
-/** 本次补回的消息还剩多少没整理 */
-export function syncLeft(t: SyncTrack, pending: number): number {
-  return Math.min(Math.max(pending - t.base, 0), t.total);
+/** 所有启用群当前的待整理数 */
+export function syncLeft(_t: SyncTrack, pending: number): number {
+  return Math.max(pending, 0);
 }
 
 /** health 为 null 表示这次没读到；调用方据此自增 fails 后再传进来 */

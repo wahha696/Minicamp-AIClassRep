@@ -1,4 +1,4 @@
-// AI 配置（修复计划 3.2）：DeepSeek（必填）+ Jev/TypeSafe（可选）。
+// AI 配置（修复计划 3.2）：大模型（必填，默认 DeepSeek，可自定义 OpenAI 兼容服务）+ Jev/TypeSafe（可选）。
 // 两个 key 都存在 data/llm.json（data/ 不进 git），优先级高于 .env；保存后立即生效（version++），不用重启。
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -7,21 +7,27 @@ import { DATA_DIR } from './paths.js';
 import { dpapiAvailable, protectString, unprotectString } from './secure-store.js';
 import { localJevAvailable } from './pipeline/jev-local.js';
 
-/** 目前只支持 DeepSeek；以后加别家在这里加一行 */
+/** deepseek = 默认；custom = 任意 OpenAI 兼容服务（用户提供 base_url / api_key，模型可留空自动选） */
 export const LLM_PROVIDERS = {
   deepseek: { name: 'DeepSeek', baseURL: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
+  custom: { name: '自定义（OpenAI 兼容）', baseURL: '', model: '' },
 } as const;
 export type LlmProvider = keyof typeof LLM_PROVIDERS;
 
 interface Saved {
   provider?: LlmProvider;
   api_key?: string;
+  /** 仅 custom：不是密钥，明文存放 */
+  base_url?: string;
+  model?: string;
   typesafe_api_key?: string;
 }
 
 /** 磁盘上的 llm.json：Windows 下密钥以 *_dpapi（DPAPI CurrentUser）存放；明文字段仅作旧版/降级兼容 */
 interface SavedFile {
   provider?: LlmProvider;
+  base_url?: string;
+  model?: string;
   api_key?: string;
   typesafe_api_key?: string;
   api_key_dpapi?: string;
@@ -67,6 +73,10 @@ function readSaved(): Saved | null {
       if (apiKey) {
         out.provider = raw.provider && raw.provider in LLM_PROVIDERS ? raw.provider : 'deepseek';
         out.api_key = apiKey;
+        if (out.provider === 'custom') {
+          if (typeof raw.base_url === 'string') out.base_url = raw.base_url;
+          if (typeof raw.model === 'string') out.model = raw.model;
+        }
       }
       const jevKey = readKey(raw, 'typesafe_api_key_dpapi', 'typesafe_api_key');
       if (jevKey) out.typesafe_api_key = jevKey;
@@ -85,6 +95,7 @@ function readSaved(): Saved | null {
 /** 写盘：DPAPI 可用就只写密文字段（明文绝不落盘），不可用退回明文（README 已声明） */
 function persist(s: Saved): void {
   const out: SavedFile = { provider: s.provider };
+  if (s.provider === 'custom') { out.base_url = s.base_url; out.model = s.model; }
   if (dpapiAvailable()) {
     if (s.api_key) {
       const enc = protectString(s.api_key);
@@ -111,11 +122,12 @@ export interface LlmConfig {
   version: number;
 }
 
-/** 当前生效的 DeepSeek 配置：网页保存的优先，其次 .env */
+/** 当前生效的大模型配置：网页保存的优先，其次 .env */
 export function getLlmConfig(): LlmConfig {
   const s = readSaved();
   if (s?.api_key) {
-    const p = LLM_PROVIDERS[s.provider ?? 'deepseek'];
+    if (s.provider === 'custom') return { baseURL: s.base_url ?? '', apiKey: s.api_key, model: s.model ?? '', version };
+    const p = LLM_PROVIDERS.deepseek;
     return { baseURL: p.baseURL, apiKey: s.api_key, model: p.model, version };
   }
   return { baseURL: env.LLM_BASE_URL, apiKey: env.LLM_API_KEY, model: env.LLM_MODEL || 'deepseek-chat', version };
@@ -176,6 +188,10 @@ export function getLlmSettings(): LlmSettingsDTO {
   if (s?.api_key) {
     return { provider: s.provider ?? 'deepseek', configured: true, key_hint: maskKey(s.api_key), source: 'web', protection };
   }
+  // .env 里改了 LLM_BASE_URL 也按自定义展示
+  if (env.LLM_API_KEY && env.LLM_BASE_URL && env.LLM_BASE_URL !== LLM_PROVIDERS.deepseek.baseURL) {
+    return { provider: 'custom', configured: true, key_hint: maskKey(env.LLM_API_KEY), source: 'env', protection: 'none' };
+  }
   if (env.LLM_API_KEY) return { provider: 'deepseek', configured: true, key_hint: maskKey(env.LLM_API_KEY), source: 'env', protection: 'none' };
   return { provider: 'deepseek', configured: false, key_hint: '', source: 'none', protection: 'none' };
 }
@@ -187,7 +203,8 @@ export interface AiKeyStatus {
 }
 
 export interface AiSettingsDTO {
-  deepseek: AiKeyStatus & { provider: LlmProvider; protection: LlmSettingsDTO['protection'] };
+  /** 字段名沿用 deepseek（兼容旧前端）；实际是当前大模型配置，provider=custom 时带 base_url/model */
+  deepseek: AiKeyStatus & { provider: LlmProvider; protection: LlmSettingsDTO['protection']; base_url: string; model: string };
   // enabled = ENABLE_JEV 总开关；mode/local_configured 供前端区分远端/本地/双路展示
   jev: AiKeyStatus & { enabled: boolean; mode: 'jev' | 'local' | 'dual'; local_configured: boolean };
 }
@@ -203,22 +220,58 @@ export function getAiSettings(): AiSettingsDTO {
     : env.TYPESAFE_API_KEY
       ? { configured: true, key_hint: maskKey(env.TYPESAFE_API_KEY), source: 'env', enabled: env.ENABLE_JEV, mode, local_configured }
       : { configured: false, key_hint: '', source: 'none', enabled: env.ENABLE_JEV, mode, local_configured };
+  const cfg = getLlmConfig();
   return {
-    deepseek: { provider: llm.provider, configured: llm.configured, key_hint: llm.key_hint, source: llm.source, protection: llm.protection },
+    deepseek: { provider: llm.provider, configured: llm.configured, key_hint: llm.key_hint, source: llm.source, protection: llm.protection,
+      base_url: llm.configured ? cfg.baseURL || LLM_PROVIDERS.deepseek.baseURL : '', model: llm.configured ? cfg.model : '' },
     jev,
   };
 }
 
+export interface LlmInput {
+  provider: LlmProvider;
+  /** 省略 = 沿用已保存的 key（仅当服务商不变时） */
+  api_key?: string;
+  base_url?: string;
+  model?: string;
+}
+
+/** 去掉末尾的 /，便于拼接 /models、/chat/completions */
+export function normalizeBaseUrl(url: string): string {
+  return url.trim().replace(/\/+$/, '');
+}
+
+/** 把候选配置补全成完整配置；缺 key 且不能沿用时返回错误文案 */
+function resolveLlmInput(input: LlmInput): { baseURL: string; apiKey: string; model: string } | string {
+  const cur = readSaved();
+  const apiKey = input.api_key ?? (cur?.provider === input.provider || (!cur?.provider && input.provider === 'deepseek') ? getLlmConfig().apiKey : '');
+  if (!apiKey) return '请填写 API Key';
+  if (input.provider === 'deepseek') return { baseURL: LLM_PROVIDERS.deepseek.baseURL, apiKey, model: LLM_PROVIDERS.deepseek.model };
+  const baseURL = normalizeBaseUrl(input.base_url ?? '');
+  if (!baseURL) return '请填写接口地址（base_url）';
+  return { baseURL, apiKey, model: (input.model ?? '').trim() };
+}
+
 /**
  * 保存 key。deepseek_key 传了就必须非空（必填）；jev_key 传空串 = 清除（可选）。
- * 没传的字段保持原值。
+ * llm 用于切换服务商 / 自定义接入；没传的字段保持原值。
  */
-export function saveAiSettings(input: { deepseek_key?: string; jev_key?: string }): void {
+export function saveAiSettings(input: { deepseek_key?: string; jev_key?: string; llm?: LlmInput }): void {
   const cur = readSaved() ?? {};
   const next: Saved = { ...cur };
   if (input.deepseek_key !== undefined) {
     next.provider = 'deepseek';
     next.api_key = input.deepseek_key;
+    delete next.base_url; delete next.model;
+  }
+  if (input.llm !== undefined) {
+    const r = resolveLlmInput(input.llm);
+    if (typeof r === 'string') throw new Error(r);
+    if (input.llm.provider === 'custom' && !r.model) throw new Error('请填写模型名');
+    next.provider = input.llm.provider;
+    next.api_key = r.apiKey;
+    if (input.llm.provider === 'custom') { next.base_url = r.baseURL; next.model = r.model; }
+    else { delete next.base_url; delete next.model; }
   }
   if (input.jev_key !== undefined) {
     if (input.jev_key === '') delete next.typesafe_api_key;
@@ -242,19 +295,51 @@ export function saveLlmSettings(provider: LlmProvider, apiKey: string): void {
 
 const TEST_TIMEOUT_MS = 10_000;
 
-async function testDeepseek(): Promise<{ ok: boolean; error?: string }> {
+export interface LlmTestResult { ok: boolean; error?: string; /** custom 且没填模型时，自动选中的模型 */ model?: string }
+
+async function testDeepseek(candidateKey?: string): Promise<LlmTestResult> {
   const cfg = getLlmConfig();
+  if (candidateKey !== undefined) return testLlm({ provider: 'deepseek', api_key: candidateKey });
   if (!cfg.apiKey) return { ok: false, error: '还没填 DeepSeek API Key' };
+  return probeLlm(cfg.baseURL || LLM_PROVIDERS.deepseek.baseURL, cfg.apiKey, cfg.model, cfg.baseURL !== '' && cfg.baseURL !== LLM_PROVIDERS.deepseek.baseURL);
+}
+
+/** 测一份候选配置（不保存、不改当前配置） */
+export async function testLlm(input: LlmInput): Promise<LlmTestResult> {
+  const r = resolveLlmInput(input);
+  if (typeof r === 'string') return { ok: false, error: r };
+  return probeLlm(r.baseURL, r.apiKey, r.model, input.provider === 'custom');
+}
+
+/**
+ * 先 GET /models 验 key；自定义服务没填模型时取列表第一个。
+ * 有的兼容服务不提供 /models（404/405），填了模型时改用一次 1 token 的对话验证。
+ */
+async function probeLlm(baseURL: string, apiKey: string, model: string, custom: boolean): Promise<LlmTestResult> {
+  const label = custom ? '该服务' : 'DeepSeek';
+  const headers = { Authorization: `Bearer ${apiKey}` };
+  const denied = (status: number) => ({ ok: false, error: `Key 无效或被拒绝（HTTP ${status}）` });
   try {
-    const res = await fetch(`${cfg.baseURL || LLM_PROVIDERS.deepseek.baseURL}/models`, {
-      headers: { Authorization: `Bearer ${cfg.apiKey}` },
+    const res = await fetch(`${baseURL}/models`, { headers, signal: AbortSignal.timeout(TEST_TIMEOUT_MS) });
+    if (res.status === 401 || res.status === 403) return denied(res.status);
+    if (res.ok) {
+      if (!custom || model) return { ok: true };
+      const body = (await res.json().catch(() => null)) as { data?: { id?: unknown }[] } | null;
+      const first = body?.data?.find((m) => typeof m.id === 'string')?.id as string | undefined;
+      return first ? { ok: true, model: first } : { ok: false, error: '服务没有返回可用模型，请手动填写模型名' };
+    }
+    if (!custom || (res.status !== 404 && res.status !== 405)) return { ok: false, error: `服务返回 HTTP ${res.status}` };
+    if (!model) return { ok: false, error: '该服务不提供模型列表，请手动填写模型名' };
+    const chat = await fetch(`${baseURL}/chat/completions`, {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1 }),
       signal: AbortSignal.timeout(TEST_TIMEOUT_MS),
     });
-    if (res.ok) return { ok: true };
-    if (res.status === 401 || res.status === 403) return { ok: false, error: 'Key 无效或被拒绝（HTTP 401）' };
-    return { ok: false, error: `服务返回 HTTP ${res.status}` };
+    if (chat.status === 401 || chat.status === 403) return denied(chat.status);
+    return chat.ok ? { ok: true } : { ok: false, error: `服务返回 HTTP ${chat.status}` };
   } catch (e) {
-    return { ok: false, error: `连不上 DeepSeek：${e instanceof Error ? e.message : String(e)}` };
+    return { ok: false, error: `连不上${label}：${e instanceof Error ? e.message : String(e)}` };
   }
 }
 
@@ -296,9 +381,12 @@ async function testJev(): Promise<{ ok: boolean; error?: string }> {
 /** POST /api/settings/ai/test：真实调一次对应服务；target 省略则两个都测 */
 export async function testAiConnection(
   target?: 'deepseek' | 'jev',
-): Promise<{ deepseek?: { ok: boolean; error?: string }; jev?: { ok: boolean; error?: string } }> {
-  const out: { deepseek?: { ok: boolean; error?: string }; jev?: { ok: boolean; error?: string } } = {};
-  if (target === undefined || target === 'deepseek') out.deepseek = await testDeepseek();
+  candidate?: string | LlmInput,
+): Promise<{ deepseek?: LlmTestResult; jev?: { ok: boolean; error?: string } }> {
+  const out: { deepseek?: LlmTestResult; jev?: { ok: boolean; error?: string } } = {};
+  if (target === undefined || target === 'deepseek') {
+    out.deepseek = typeof candidate === 'object' ? await testLlm(candidate) : await testDeepseek(candidate);
+  }
   if (target === undefined || target === 'jev') out.jev = await testJev();
   return out;
 }

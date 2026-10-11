@@ -1,7 +1,7 @@
 // 修复计划第一节 §4：换号后 localStorage 按 uin 分键——
 // 新号读不到旧号的「跳过引导 / 接管提示 / 群预设」，换回旧号原样回来。
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { accountKey, currentUin, setCurrentUin } from './account';
+import { accountKey, currentUin, setCurrentSpace, setCurrentUin } from './account';
 import { loadPresets, savePresets } from './groups';
 import { readAccountFlag, writeAccountFlag } from './status';
 
@@ -21,6 +21,16 @@ afterEach(() => {
 });
 
 describe('账号限定的存储键（修复计划第一节 §4）', () => {
+  it('微信单独登录也按空间隔离预设，QQ 退出不改变同空间预设', () => {
+    stubStorage();
+    setCurrentUin('10001'); setCurrentSpace('synthetic-A');
+    savePresets([{ name: '人工', ids: ['g1'] }]);
+    setCurrentUin(null); setCurrentSpace('synthetic-A');
+    expect(loadPresets()).toEqual([{ name: '人工', ids: ['g1'] }]);
+    setCurrentSpace('synthetic-B'); expect(loadPresets()).toEqual([]);
+    setCurrentSpace(null); expect(loadPresets()).toEqual([]);
+    setCurrentSpace('synthetic-A'); expect(loadPresets()).toHaveLength(1);
+  });
   it('未登录键保持原样；登录后带 @uin；退出后回到原样', () => {
     setCurrentUin(undefined);
     expect(accountKey('classrep.x')).toBe('classrep.x');

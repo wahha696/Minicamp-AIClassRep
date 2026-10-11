@@ -17,6 +17,10 @@ const { logoutMock, restartMock, isOnlineMock, syncHistoryMock, getConnectStatus
 vi.mock('../napcat/index.js', () => ({ restartNapcat: restartMock, logoutNapcat: logoutMock }));
 vi.mock('../napcat/onebot.js', () => ({ isOnline: isOnlineMock }));
 vi.mock('../ingest/history.js', () => ({ syncHistory: syncHistoryMock }));
+vi.mock('../env.js', async (original) => {
+  const actual = await original<typeof import('../env.js')>();
+  return { ...actual, env: { ...actual.env, DEMO_MODE: true } };
+});
 vi.mock('../napcat/state.js', () => ({ getConnectStatus: getConnectStatusMock }));
 vi.mock('../napcat/desktop-qq.js', () => ({ desktopSession: { isActive: desktopActive, start: desktopStart, returnToClassRep: desktopReturn } }));
 // 二维码路径指向仓库外的固定临时文件（仓库外是因为测试目录可能被并发清理），beforeEach 里确保目录存在
@@ -62,16 +66,14 @@ describe('desktop QQ controls', () => {
     desktopStart.mockImplementationOnce(() => { throw new DesktopSessionError('切换状态已过期'); });
     expect((await app().request('/api/connect/desktop-qq', json(body))).status).toBe(409);
   });
-  it('blocks other-tab writes while allowing the return control, reads and presence', async () => {
+  it('blocks other-tab writes while allowing the return control and reads', async () => {
     const a = new Hono();
     a.use('*', desktopModeGuard());
     registerConnectRoutes(a);
     a.post('/api/events', c => c.json({ ok: true }));
-    a.post('/api/presence/bye', c => c.json({ ok: true }));
     desktopActive.mockReturnValue(true);
     expect((await a.request('/api/events', json({}))).status).toBe(409);
     expect((await a.request('/api/connect/logout', json(body))).status).toBe(409);
-    expect((await a.request('/api/presence/bye', json({}))).status).toBe(200);
     desktopReturn.mockReturnValue({ supported: true, state: 'resuming' });
     expect((await a.request('/api/connect/desktop-qq/return', json({ ...body, session_id: sessionId }))).status).toBe(200);
   });
@@ -93,11 +95,24 @@ afterEach(() => {
 });
 
 describe('GET /api/connect/status', () => {
+  it('手机状态隐藏待绑定账号和绑定清单，不影响本机后续读取', async () => {
+    const state = { state: 'online', since: 1, first_run: false, account_epoch: 'synthetic-epoch',
+      workspace: { enabled: true, wechat_available: false,
+        current: { space_id: 'synthetic-A', name: '人工 A', bindings: [{ platform: 'qq', account_id: '10001' }] },
+        pending: [{ platform: 'wechat', account_id: 'wxid_synthetic', kind: 'choose', request_id: 'synthetic' }] } };
+    getConnectStatusMock.mockReturnValue(state);
+    const a = app();
+    const mobile = await a.request('/api/connect/status', {}, { incoming: { socket: { remoteAddress: '192.168.1.3' } } });
+    expect(await mobile.json()).toMatchObject({ workspace: { pending: [], current: { bindings: [], space_id: 'synthetic-A' } } });
+    const local = await a.request('/api/connect/status', {}, { incoming: { socket: { remoteAddress: '127.0.0.1' } } });
+    expect(await local.json()).toEqual({ ...state, access: { readonly: false }, demo_available: true });
+    expect(state.workspace.pending).toHaveLength(1);
+  });
   it('返回 ConnectStatusDTO', async () => {
     getConnectStatusMock.mockReturnValue({ state: 'online', uin: '10001', since: 1, first_run: false });
     const res = await app().request('/api/connect/status');
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ state: 'online', uin: '10001', since: 1, first_run: false });
+    expect(await res.json()).toEqual({ state: 'online', uin: '10001', since: 1, first_run: false, access: { readonly: true }, demo_available: true });
   });
 });
 

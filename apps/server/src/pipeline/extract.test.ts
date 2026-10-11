@@ -14,6 +14,7 @@ import {
   parseTime,
 } from './extract.js';
 import { llmStats } from './stats.js';
+import invalidWechatSource from './fixtures/wechat-invalid-source.redacted.json';
 
 // 2026-09-26 13:30 星期六（Asia/Shanghai）
 const NOW = Date.parse('2026-09-26T13:30+08:00');
@@ -73,12 +74,17 @@ describe('时间', () => {
     ['2026-09-27 14:00:00', '2026-09-27T06:00:00.000Z'],
     ['2026-09-27T06:00Z', '2026-09-27T06:00:00.000Z'],
     ['2026-10-02', '2026-10-02T15:59:00.000Z'], // 只有日期 → 23:59
+    ['2024-02-29T14:00:42.125+08:00', '2024-02-29T06:00:42.125Z'],
   ])('parseTime(%s)', (s, iso) => {
     expect(new Date(parseTime(s)).toISOString()).toBe(iso);
   });
 
   it('parseTime 不认识的返回 NaN', () => {
     expect(parseTime('明天下午两点')).toBeNaN();
+  });
+
+  it.each(['2026-02-29', '2026-02-30', '2026-04-31', '2026-09-27T24:00', '2026-09-27T14:00:60'])('拒绝无效日期或时刻 %s', (s) => {
+    expect(parseTime(s)).toBeNaN();
   });
 
   it('system prompt 带当前时间', () => {
@@ -114,8 +120,12 @@ describe('parseExtraction', () => {
     expect(r.ok && r.events[0]).toMatchObject({ update_of: 3, title: '', location: null, start_at: null });
   });
 
+  it('不支持 JSON 模式的服务包了 ```json 代码块也能解析', () => {
+    expect(parseExtraction('```json\n{"events": []}\n```', ids)).toEqual({ ok: true, events: [] });
+  });
+
   it.each([
-    ['非 JSON', '```json {"events": []}```'],
+    ['非 JSON', '今天没有需要提取的事项'],
     ['缺 events', '{}'],
     ['create 没标题', JSON.stringify({ events: [ev({ title: null })] })],
     ['时间写中文', JSON.stringify({ events: [ev({ start_at: '明天下午两点' })] })],
@@ -149,6 +159,83 @@ describe('extractEvents', () => {
     vi.restoreAllMocks();
   });
 
+  it('脱敏真实响应仅来源无效时仍拒绝，不吞掉来源错误当作零事项成功', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const originalId = `wechat:${'a'.repeat(64)}`;
+    const raw = JSON.stringify(invalidWechatSource);
+    expect(parseExtraction(raw, new Set([originalId]))).toEqual({ ok: false,
+      error: '每个事件必须至少引用一条本批次的有效 source_message_ids' });
+    const { client, create } = fakeClient(raw, raw);
+    const status = { llmFailed: false };
+    expect(await extractEvents(input([msg(originalId, '人工测试通知')]), client, status)).toEqual([]);
+    expect(status).toMatchObject({ llmFailed: true, failureReason: 'invalid_output' });
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+
+  it('用短编号传递微信来源，恢复完整原始ID；不更改输入或把上下文当候选', async () => {
+    const originalId = `wechat:${'a'.repeat(64)}`;
+    const contextId = `wechat:${'b'.repeat(64)}`;
+    const source = { ...input([msg(originalId, '人工测试通知')]), context: [msg(contextId, '人工上下文')] };
+    const response = { events: invalidWechatSource.events.map(event => ({ ...event, source_message_ids: ['m1'] })) };
+    const { client, create } = fakeClient(JSON.stringify(response));
+    const result = await extractEvents(source, client);
+    expect(result).toHaveLength(1);
+    expect(result[0]?.source_message_ids).toEqual([originalId]);
+    const request = (create.mock.calls[0] as unknown as [{ messages: { content: string }[] }])[0];
+    expect(request.messages[1]!.content).toContain('[m1]');
+    expect(request.messages[1]!.content).toContain('[c1]');
+    expect(JSON.stringify(request)).not.toContain(originalId);
+    expect(JSON.stringify(request)).not.toContain(contextId);
+    expect(source.candidates[0]?.message_id).toBe(originalId);
+    expect(source.context[0]?.message_id).toBe(contextId);
+  });
+
+  it.each(['c1', 'm99', 'a'.repeat(64)])('拒绝上下文、未知编号或模型自行缩短的平台ID：%s', async (badId) => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const raw = JSON.stringify({ events: [ev({ source_message_ids: [badId] })] });
+    const { client, create } = fakeClient(raw, raw);
+    const status = { llmFailed: false };
+    await extractEvents({ ...input([msg(`wechat:${'a'.repeat(64)}`, '人工通知')]), context: [msg('m1', '人工上下文')] }, client, status);
+    expect(status).toMatchObject({ llmFailed: true, failureReason: 'invalid_output' });
+    expect(create).toHaveBeenCalledTimes(2);
+    const correction = (create.mock.calls[1] as unknown as [{ messages: { content: string }[] }])[0].messages.at(-1)!.content;
+    expect(correction).toContain('本次可用的 source_message_ids 仅有：m1');
+  });
+
+  it('截断拆批沿用原编号，恢复每一半的准确平台ID', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const originals = [`wechat:${'a'.repeat(64)}`, `wechat:${'b'.repeat(64)}`];
+    const create = vi.fn().mockResolvedValueOnce({ choices: [{ message: { content: '' }, finish_reason: 'length' }] })
+      .mockResolvedValueOnce({ choices: [{ message: { content: JSON.stringify({ events: [ev({ source_message_ids: ['m1'] })] }) }, finish_reason: 'stop' }] })
+      .mockResolvedValueOnce({ choices: [{ message: { content: JSON.stringify({ events: [ev({ source_message_ids: ['m2'] })] }) }, finish_reason: 'stop' }] });
+    const result = await extractEvents(input(originals.map(id => msg(id, '人工测试通知'))), { chat: { completions: { create } } } as LlmClient);
+    expect(result.map(event => event.source_message_ids)).toEqual(originals.map(id => [id]));
+    const tailRequest = create.mock.calls[2]![0];
+    expect(tailRequest.messages[1].content).toContain('[m2]');
+  });
+
+  it('不同群同时复用m1时映射仅属于各自请求，兼容QQ原始编号', async () => {
+    const originals = ['987654321', `wechat:${'b'.repeat(64)}`];
+    const results = await Promise.all(originals.map(async (id, index) => {
+      const { client } = fakeClient(JSON.stringify({ events: [ev()] }));
+      return extractEvents({ ...input([msg(id, '人工通知')]), groupId: `synthetic-group-${index}` }, client);
+    }));
+    expect(results.map(events => events[0]?.source_message_ids)).toEqual(originals.map(id => [id]));
+  });
+
+  it('拆批后半不得引用已移入上下文的前半编号，整批结果保留失败', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const raw = JSON.stringify({ events: [ev()] }); // m1 only belongs to the first half.
+    const create = vi.fn().mockResolvedValueOnce({ choices: [{ message: { content: '' }, finish_reason: 'length' }] })
+      .mockResolvedValue({ choices: [{ message: { content: raw }, finish_reason: 'stop' }] });
+    const status = { llmFailed: false };
+    const result = await extractEvents(input([msg('original-a', '人工通知甲'), msg('original-b', '人工通知乙')]),
+      { chat: { completions: { create } } } as LlmClient, status);
+    expect(result).toEqual([]);
+    expect(status).toMatchObject({ llmFailed: true, failureReason: 'invalid_output' });
+    expect(create).toHaveBeenCalledTimes(4);
+  });
+
   it('正常返回', async () => {
     const { client, create } = fakeClient(JSON.stringify({ events: [ev()] }));
     const out = await extractEvents(input([msg('m1', '明天下午两点 A301 小测')]), client);
@@ -169,11 +256,50 @@ describe('extractEvents', () => {
     expect(retry[0].messages.at(-1)?.content).toContain('不合法');
   });
 
-  it('两次都不合法 → []，不抛', async () => {
+  it('两次都不合法 → 标记失败，不能当作成功提取到零个事项', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { client, create } = fakeClient('', '{"events": 1}');
-    await expect(extractEvents(input([msg('m1', '小测')]), client)).resolves.toEqual([]);
+    const status = { llmFailed: false };
+    const failedBefore = llmStats.failed;
+    await expect(extractEvents(input([msg('m1', '小测')]), client, status)).resolves.toEqual([]);
     expect(create).toHaveBeenCalledTimes(2);
+    expect(status.llmFailed).toBe(true);
+    expect(llmStats.llm).toBe('error');
+    expect(llmStats.failed).toBe(failedBefore + 1);
+  });
+
+  it('完整有效的空事项列表是成功，不需要重试', async () => {
+    const { client, create } = fakeClient('{"events": []}');
+    const status = { llmFailed: false };
+    await expect(extractEvents(input([msg('m1', '小测')]), client, status)).resolves.toEqual([]);
+    expect(status.llmFailed).toBe(false);
+    expect(llmStats.llm).toBe('ok');
+    expect(create).toHaveBeenCalledOnce();
+  });
+
+  it('单条消息的截断即使恰好有合法 JSON 也不能视为完整结果', async () => {
+    const create = vi.fn().mockResolvedValue({
+      choices: [{ message: { content: '{"events": []}' }, finish_reason: 'length' }],
+    });
+    const client = { chat: { completions: { create } } } as unknown as LlmClient;
+    const status = { llmFailed: false };
+    await expect(extractEvents(input([msg('m1', '小测')]), client, status)).resolves.toEqual([]);
+    expect(status.llmFailed).toBe(true);
+    expect(llmStats.llm).toBe('error');
+    expect(create).toHaveBeenCalledOnce();
+  });
+
+  it('拆批后半连续格式错误：丢弃前半结果，整批标记失败', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const create = vi.fn()
+      .mockResolvedValueOnce({ choices: [{ message: { content: '{"events": []}' }, finish_reason: 'length' }] })
+      .mockResolvedValueOnce({ choices: [{ message: { content: JSON.stringify({ events: [ev()] }) }, finish_reason: 'stop' }] })
+      .mockResolvedValue({ choices: [{ message: { content: 'not json' }, finish_reason: 'stop' }] });
+    const client = { chat: { completions: { create } } } as unknown as LlmClient;
+    const status = { llmFailed: false };
+    await expect(extractEvents(input([msg('m1', '小测'), msg('m2', '作业')]), client, status)).resolves.toEqual([]);
+    expect(status.llmFailed).toBe(true);
+    expect(create).toHaveBeenCalledTimes(4);
   });
 
   it('网络错误 → []，llm=error', async () => {
@@ -183,7 +309,18 @@ describe('extractEvents', () => {
     await expect(extractEvents(input([msg('m1', '小测')]), client, status)).resolves.toEqual([]);
     expect(llmStats.llm).toBe('error');
     expect(status.llmFailed).toBe(true);
+    expect(status).toMatchObject({ failureReason: 'network' });
   });
+
+  it.each([[401, 'authentication'], [403, 'authentication'], [429, 'rate_limit']])(
+    '服务错误 %s 能区分凭据与额度问题', async (code, reason) => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const { client } = fakeClient(Object.assign(new Error('test'), { status: code }));
+      const status = { llmFailed: false };
+      await extractEvents(input([msg('m1', '小测')]), client, status);
+      expect(status).toMatchObject({ llmFailed: true, failureReason: reason });
+    },
+  );
 
   it('截断拆批后半连不上 → 整批 [] 并标记 llmFailed（留着整批重试，前半结果不落库）', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -229,6 +366,26 @@ describe('extractEvents', () => {
     expect(call[0].messages[1]!.content).toContain('补拉回来的历史消息');
   });
 
+  it('前一天发的消息带上按发送日算好的「今天/明天/后天」，当天消息不带', () => {
+    // NOW = 09-26 13:30；昨天 16:56 发的「明天」应是 09-26，不是 09-27
+    const p = buildUserPrompt(input([msg('m1', '明天要上 9.22 的课', 20 * 60 + 34), msg('m2', '收到')]));
+    expect(p).toContain('[m1] 2026-09-25 16:56 星期五（1 天前发送；对这条消息而言：今天=09-25，明天=09-26，后天=09-27） 班长：明天要上 9.22 的课');
+    expect(p).toContain('[m2] 2026-09-26 13:20 星期六 班长：收到');
+    expect(buildSystemPrompt(NOW)).toContain('不能作为相对时间的基准');
+  });
+
+  it('服务不支持 JSON 模式（400）时去掉 response_format 重试一次', async () => {
+    const create = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error('unsupported response_format'), { status: 400 }))
+      .mockResolvedValueOnce({ choices: [{ message: { content: '```json\n{"events": []}\n```' } }] });
+    const status = { llmFailed: false };
+    await expect(extractEvents(input([msg('m1', '小测')]), { chat: { completions: { create } } } as unknown as LlmClient, status))
+      .resolves.toEqual([]);
+    expect(status.llmFailed).toBe(false);
+    expect(create.mock.calls[0]?.[0]).toHaveProperty('response_format');
+    expect(create.mock.calls[1]?.[0]).not.toHaveProperty('response_format');
+  });
+
   it('没有候选消息不调用', async () => {
     const { client, create } = fakeClient();
     await expect(extractEvents(input([]), client)).resolves.toEqual([]);
@@ -237,8 +394,10 @@ describe('extractEvents', () => {
 
   it('没配 key → []，llm=unconfigured', async () => {
     env.LLM_API_KEY = '';
-    await expect(extractEvents(input([msg('m1', '小测')]))).resolves.toEqual([]);
+    const status = { llmFailed: false };
+    await expect(extractEvents(input([msg('m1', '小测')]), undefined, status)).resolves.toEqual([]);
     expect(llmStats.llm).toBe('unconfigured');
+    expect(status.llmFailed).toBe(true);
   });
 });
 

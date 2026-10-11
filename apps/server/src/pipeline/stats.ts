@@ -6,7 +6,7 @@ import type { PipelineStats } from '../types.js';
 export const llmStats: { llm: PipelineStats['llm']; called: number; failed: number; lastMs: number } = {
   llm: 'ok',
   called: 0,
-  failed: 0, // 累计连不上 AI 的次数；调度器靠它判断这批要不要留着重试
+  failed: 0, // 累计 AI 调用或完整输出失败次数；批次重试判断使用各次调用独立的 ExtractStatus
   lastMs: 0, // 最近一次成功调用耗时
 };
 

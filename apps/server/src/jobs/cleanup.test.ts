@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db, openDb } from '../db/index.js';
 import { env } from '../env.js';
 import { cleanupOnce, startCleanupJob } from './cleanup.js';
+import { clearGroupFailure, llmConfigFingerprint, recordGroupFailure } from '../pipeline/failures.js';
+import { ingestMessages } from '../ingest/index.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
@@ -49,6 +51,56 @@ afterEach(() => {
 });
 
 describe('cleanupOnce', () => {
+  it('失败记录写库失败时，清理仍保护当前进程的失败积压', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    addMessage('write-blocked', NOW - 60 * DAY_MS, 'g1', 0);
+    db.exec("CREATE TRIGGER fail_record BEFORE INSERT ON pipeline_failures BEGIN SELECT RAISE(ABORT, 'test failure'); END");
+    recordGroupFailure('g1', 'storage', llmConfigFingerprint());
+    expect(cleanupOnce(NOW)).toBe(0);
+    expect(ids()).toEqual(['write-blocked']);
+  });
+  it('失败积压和暂停期间新入库的消息不按 45 天强删；部分恢复后仍保护余下消息', () => {
+    addMessage('failed-head', NOW - 60 * DAY_MS, 'g1', 0);
+    addMessage('failed-tail', NOW - 59 * DAY_MS, 'g1', 0);
+    recordGroupFailure('g1', 'invalid_output', llmConfigFingerprint());
+    ingestMessages([{ message_id: 'later-backfill', group_id: 'g1', group_name: '测试群', sender_name: '测试',
+      text: '实验报告截止安排', sent_at: NOW - 58 * DAY_MS }], 'demo');
+    expect(cleanupOnce(NOW)).toBe(0);
+    expect(ids()).toEqual(['failed-head', 'failed-tail', 'later-backfill']);
+    expect(count('message_seen')).toBe(0);
+
+    // 首批成功，群的失败提示已清除；余下积压尚未整理，不能恢复强删。
+    db.prepare("UPDATE messages SET processed = 1 WHERE message_id = 'failed-head'").run();
+    clearGroupFailure('g1');
+    expect(cleanupOnce(NOW)).toBe(1);
+    expect(ids()).toEqual(['failed-tail', 'later-backfill']);
+    db.prepare('UPDATE messages SET processed = 1').run();
+    expect(cleanupOnce(NOW)).toBe(2);
+    expect(count('messages')).toBe(0);
+  });
+
+  it('失败状态原先仅在内存时，部分成功清除状态也会持久保护剩余积压', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    addMessage('fallback-head', NOW - 60 * DAY_MS, 'g1', 0);
+    addMessage('fallback-tail', NOW - 59 * DAY_MS, 'g1', 0);
+    db.exec("CREATE TRIGGER fail_record BEFORE INSERT ON pipeline_failures BEGIN SELECT RAISE(ABORT, 'test failure'); END");
+    recordGroupFailure('g1', 'storage', llmConfigFingerprint());
+    db.exec('DROP TRIGGER fail_record');
+    db.prepare("UPDATE messages SET processed = 1 WHERE message_id = 'fallback-head'").run();
+    clearGroupFailure('g1');
+    expect(cleanupOnce(NOW)).toBe(1);
+    expect(ids()).toEqual(['fallback-tail']);
+    expect(count('messages', 'processed = 0 AND keep_until_processed = 1')).toBe(1);
+  });
+
+  it('失败保护只作用于对应群，不改变其他未处理消息的已有保留规则', () => {
+    addMessage('protected', NOW - 60 * DAY_MS, 'g1', 0);
+    addMessage('other-unprocessed', NOW - 60 * DAY_MS, 'g2', 0);
+    recordGroupFailure('g1', 'network', llmConfigFingerprint());
+    expect(cleanupOnce(NOW)).toBe(1);
+    expect(ids()).toEqual(['protected']);
+  });
+
   it('删掉超过 TTL 的过期消息，未过期的保留', () => {
     addMessage('old-1', NOW - (TTL_DAYS + 1) * DAY_MS);
     addMessage('old-2', NOW - 30 * DAY_MS);
