@@ -271,6 +271,8 @@ class AccountTests(unittest.TestCase):
 
     def test_cli_outputs_only_matching_boolean_and_never_authenticates(self):
         research = Path(__file__).resolve().parents[2] / ".review-research"
+        # This test must also run first in a fresh checkout, before other fixtures.
+        research.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="synthetic-account-observation-", dir=research) as folder:
             self.assertTrue(Path(folder).resolve().is_relative_to(research.resolve()))
             metadata = Path(folder) / "metadata.json"
