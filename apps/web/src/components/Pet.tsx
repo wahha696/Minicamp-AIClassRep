@@ -10,7 +10,7 @@
 // - PET-5 层级 z-30：盖过普通内容，低于详情抽屉(z-40)与弹窗/Toast(z-50)，不挡正事。
 // - PET-6 性能与体贴：位移动画只用 transform；系统开「减少动态效果」时自动停掉
 //   呼吸/摇摆/Zzz 等循环动画（见 pet.css）。
-// - PET-7 双击对话框：对话直接走 DeepSeek（后端 /api/pet/chat 持 key，前端不带 key）；
+// - PET-7 双击对话框：受控应用助手使用用户配置的 LLM，密钥只由后端持有；
 //   连接状态复用 ConnectStatusProvider，零额外轮询。
 // - PET-8 系统联动：新事件播报（轮询 diff）→ 临期提醒（10/5/1 分钟各一次）→
 //   连接状态变化感知（中断/被踢/恢复）。对话框开着时，这些播报改走对话框，不打架。
@@ -18,13 +18,8 @@
 // - PET-10 全页自由移动：不再只左右走，x/y 都可动、可拖到页面任意位置；
 //   气泡/菜单/对话框贴屏幕上沿时自动改到桌宠下方弹出。
 // - PET-11 高频自主活动：6~12s 一次概率触发散步或跳一下（原来 16~38s），睡觉/收起时不闹腾。
-// - PET-15 对话直连大模型：删除关键词规则引擎（原 lib/petChat.ts），每一句话都发给后端
-//   /api/pet/chat 由 DeepSeek 回答；现场数据（今日摘要/事件/连接状态）随消息带上，让 LLM
-//   有据可答。没配 Key / mock 模式 / LLM 失败时如实告知用户（不再假装命中规则）。
-//   聊天里的「同步/走两步/跳页面」动作随规则引擎一起移除——这些操作走右键菜单。
-// - PET-12 对话全走 DeepSeek（PET-15 取消规则引擎）：不再有关键词规则匹配，
-//   每句话都发 /api/pet/chat 由后端持 key 调 DeepSeek；现场数据（今日摘要/事件/连接状态）
-//   随消息带给 LLM；没配 Key / LLM 失败时如实告知用户，不假装答上。
+// - PET-15 受控应用助手：服务器提供类型化操作计划，前端核对并显式确认后执行。
+//   长期偏好按空间隔离、可查看修改删除；第三方消息不是授权。
 // - PET-13 自定义形象与说话风格：右键「换形象」打开设置面板；图片压成 256px dataURL 存
 //   localStorage（classrep.pet.img），说话风格（classrep.pet.style）随对话发给后端改 LLM 人设；
 //   两者的初始/默认项都是奶龙，可一键恢复。
@@ -35,13 +30,14 @@
 //   走动，绝不从日历/待办等内容上面横穿过去；已经被压在内容上时按「逃脱」处理，直线去最近的空白处。
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { getToday } from '../api/client';
 import type { ConnectState } from '../api/types';
 import { useConnectStatus } from './ConnectStatus';
 import { usePolling } from '../hooks/usePolling';
 import { clamp, petGreeting, petLine } from '../lib/pet';
-import { askPetLlm, llmAvailable } from '../lib/petLlm';
+import AssistantPanel from './AssistantPanel';
 import nailongUrl from '../assets/nailong.jpg';
 import './pet.css';
 
@@ -67,17 +63,6 @@ interface ChatMsg {
 
 /** 上海时间的「时」（P3：睡觉/问候统一走上海时间，不跟浏览器时区跑） */
 const shHour = (ts: number) => new Date(ts + 8 * 3_600_000).getUTCHours();
-
-/** 聊天面板的快捷问题（PET-15：全部交给大模型回答，不再有规则动作项） */
-const QUICK_QUESTIONS: readonly string[] = ['今天有什么事', '接下来做什么', '最近截止', '你是谁呀'];
-
-/** PET-15：LLM 不可用/失败时的固定提示——如实告知，不用规则话术假装答上 */
-function llmFallbackText(err: unknown): string {
-  const msg = err instanceof Error ? err.message : '';
-  if (/key|503/i.test(msg)) return '我还没配好大脑——去「设置」页填上 AI Key，马上就能聊~';
-  if (/超时|timeout|abort/i.test(msg)) return '想得太久啦…网络或 AI 服务有点慢，再问我一次？';
-  return '呜…我的大脑（AI 服务）暂时没响应，稍后再问我一次？';
-}
 
 function readStore(key: string): string | null {
   try { return localStorage.getItem(key); } catch { return null; }
@@ -195,6 +180,20 @@ export default function Pet() {
   const [petImg, setPetImg] = useState<string>(() => readStore(STORE_IMG) || nailongUrl);
   const [petStyle, setPetStyle] = useState<string>(() => readStore(STORE_STYLE) ?? '');
   const [settingsOpen, setSettingsOpen] = useState(false);
+  useEffect(() => {
+    const reload = () => {
+      setHidden(readStore(STORE_HIDDEN) === '1');
+      setPetStyle(readStore(STORE_STYLE) ?? '');
+      setPetImg(readStore(STORE_IMG) || nailongUrl);
+      const [xlo, xhi] = xRange(); const [ylo, yhi] = yRange();
+      setX(clamp(Number(readStore(STORE_X)) || xlo, xlo, xhi));
+      setY(clamp(Number(readStore(STORE_Y)) || 0, ylo, yhi));
+    };
+    window.addEventListener('classrep:pet-settings', reload);
+    const openImage = () => { setHidden(false); writeStore(STORE_HIDDEN, '0'); stopMoving(); setChatOpen(false); setSettingsOpen(true); };
+    window.addEventListener('classrep:pet-open-settings', openImage);
+    return () => { window.removeEventListener('classrep:pet-settings', reload); window.removeEventListener('classrep:pet-open-settings', openImage); };
+  }, []);
 
   const { data } = usePolling(getToday, 60_000);            // PET-4：只读低频轮询，失败静默
   const { data: conn } = useConnectStatus();                // PET-7：复用全局连接状态，零额外请求
@@ -210,7 +209,6 @@ export default function Pet() {
   const hiddenRef = useRef(hidden); hiddenRef.current = hidden;
   const msgsRef = useRef(msgs); msgsRef.current = msgs;
   const todayRef = useRef(data); todayRef.current = data;
-  const connRef = useRef(conn); connRef.current = conn;
   const drag = useRef<{ id: number; px: number; py: number; bx: number; by: number; moved: boolean } | null>(null);
   const speechTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const animSeq = useRef(0);
@@ -249,10 +247,6 @@ export default function Pet() {
     setMsgs((ms) => [...ms, { id, role, text, toLlm }]); // updater 保持纯净，StrictMode 下也安全
     return id;
   }
-  /** 把占位的「…」替换成真正的回答；回退话术（toLlm=false）不进下次的上下文 */
-  function replaceMsg(id: number, text: string, toLlm = true) {
-    setMsgs((ms) => ms.map((m) => (m.id === id ? { ...m, text, toLlm } : m)));
-  }
   /** 立即站定：走到一半的散步直接停在目标点（PET-14：对话/面板打开时不许再动） */
   function stopMoving() {
     if (phaseRef.current !== 'walk') return;
@@ -271,28 +265,6 @@ export default function Pet() {
       const t = todayRef.current;
       pushMsg('bot', `${petGreeting(shHour(Date.now()))}！我是课代表小助手${t ? `，${t.summary}` : ''}。点下面的问题，或直接打字问我~`);
     }
-  }
-  function send(raw: string) {
-    const text = raw.trim();
-    if (text.length === 0) return;
-    pushMsg('user', text);
-    const t = todayRef.current;
-    const ctx = {
-      now: Date.now(),
-      summary: t?.summary,
-      events: t?.events ?? [],
-      connect: connRef.current?.state,
-    };
-    if (!llmAvailable()) {
-      // PET-15：演示/mock 模式没有后端 LLM，规则引擎已删——如实说明，不假装会答
-      pushMsg('bot', '（演示模式连不上我的大脑：启动后端并在「设置」页配好 AI Key，我就能真正聊起来~）', false);
-      return;
-    }
-    // PET-15：每句话直接问 DeepSeek（后端代理）；现场数据随消息带上，LLM 据此回答
-    const id = pushMsg('bot', '…', false); // 占位与报错话术不进上下文
-    void askPetLlm(text, msgsRef.current.filter((m) => m.toLlm !== false), ctx, petStyle)
-      .then((reply) => replaceMsg(id, reply))
-      .catch((err: unknown) => replaceMsg(id, llmFallbackText(err), false));
   }
   const sayRefStable = useRef(saySomething); sayRefStable.current = saySomething;
 
@@ -553,8 +525,7 @@ export default function Pet() {
   }
 
   // ===== 收起状态：右下角一个半透明小按钮召回 =====
-  if (hidden) {
-    return (
+  const recall = hidden ? createPortal(
       <button
         type="button"
         title="召唤课代表"
@@ -568,9 +539,8 @@ export default function Pet() {
           <path d="M11.1 11h1.8" />
           <path d="M10 15.4q2 1.5 4 0" />
         </svg>
-      </button>
-    );
-  }
+      </button>, document.body,
+    ) : null;
 
   // 气泡/菜单/对话框贴边时别伸出屏幕外（PET-10：含上下——桌宠靠上时改到本体下方弹出）
   const align = x < 150 ? 'left-0' : x > window.innerWidth - 210 ? 'right-0' : 'left-1/2 -translate-x-1/2';
@@ -584,10 +554,12 @@ export default function Pet() {
       className="fixed bottom-0 left-0 z-30 hidden md:block"
       style={{
         width: SIZE,
+        visibility: hidden ? 'hidden' : undefined,
         transform: `translate3d(${x}px, ${-y}px, 0)`,
         transition: phase === 'walk' ? `transform ${walkDur}s ease-in-out` : 'none',
       }}
     >
+      {recall}
       {/* 脚下影子：跟着本体走（全页坐标后影子和本体一起动） */}
       <div
         className="absolute bottom-[2px] left-1/2 h-2.5 rounded-[50%] bg-slate-900/15"
@@ -642,7 +614,7 @@ export default function Pet() {
           <div className={`absolute ${nearTop ? 'top-full mt-9' : 'bottom-full mb-9'} ${align}`} onPointerDown={(e) => e.stopPropagation()}>
             <div className="pet-pop overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-xl">
               {[
-                { label: '找我问话', act: () => { setMenuOpen(false); openChat(); } },
+                { label: '小助手 / 长期记忆', act: () => { setMenuOpen(false); openChat(); } },
                 { label: '说句话', act: () => { setMenuOpen(false); sayRefStable.current(); } },
                 { label: '走两步', act: () => { setMenuOpen(false); stroll(); } },
                 { divider: true },
@@ -670,11 +642,11 @@ export default function Pet() {
           </div>
         )}
 
-        {/* PET-7 双击对话框（贴屏幕上沿时改到本体下方弹出） */}
-        {chatOpen && (
-          <div className={`absolute ${nearTop ? 'top-full mt-3' : 'bottom-full mb-3'} w-80 ${chatAlign}`}>
-            <PetChatPanel msgs={msgs} onSend={send} onClose={() => setChatOpen(false)} />
-          </div>
+        {/* 助手固定在视口内，避免桌宠拖到半屏时长操作预览超出屏幕。 */}
+        {chatOpen && createPortal(
+          <div className="fixed bottom-6 right-6 z-40 hidden w-[min(420px,calc(100vw-48px))] md:block">
+            <AssistantPanel key={conn?.account_epoch} epoch={conn?.account_epoch ?? ''} style={petStyle} notices={msgs.filter(m => m.role === 'bot')} onClose={() => setChatOpen(false)} />
+          </div>, document.body,
         )}
 
         {/* PET-13 换形象/说话风格面板 */}
@@ -695,80 +667,6 @@ export default function Pet() {
           </div>
         )}
       </div>
-    </div>
-  );
-}
-
-/** 对话面板（PET-7/PET-15）：纯展示，回复全部由后端 DeepSeek 生成（lib/petLlm.ts） */
-function PetChatPanel({ msgs, onSend, onClose }: {
-  msgs: ChatMsg[];
-  onSend: (text: string) => void;
-  onClose: () => void;
-}) {
-  const [draft, setDraft] = useState('');
-  const listRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
-  }, [msgs.length]);
-
-  return (
-    <div
-      className="pet-pop overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl"
-      onPointerDown={(e) => e.stopPropagation()}   // 面板里点按不触发拖拽/关菜单
-      onContextMenu={(e) => e.stopPropagation()}   // 输入框里保留浏览器右键菜单
-    >
-      <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/60 px-3.5 py-2">
-        <span className="text-sm font-medium text-slate-800">课代表小助手</span>
-        <button
-          type="button"
-          onClick={onClose}
-          title="关闭（Esc / 再双击桌宠）"
-          className="rounded px-1.5 text-xs text-slate-400 hover:bg-slate-100 hover:text-slate-600"
-        >
-          ✕
-        </button>
-      </div>
-      <div ref={listRef} className="max-h-64 space-y-2 overflow-y-auto px-3 py-2.5">
-        {msgs.map((m) => (
-          <div key={m.id} className={m.role === 'bot' ? 'flex justify-start' : 'flex justify-end'}>
-            <div
-              className={`max-w-[85%] whitespace-pre-wrap rounded-2xl px-3 py-1.5 text-sm leading-relaxed ${
-                m.role === 'bot' ? 'rounded-bl-sm border border-slate-200 bg-slate-50 text-slate-700' : 'rounded-br-sm bg-slate-900 text-white'
-              }`}
-            >
-              {m.text}
-            </div>
-          </div>
-        ))}
-      </div>
-      <div className="flex flex-wrap gap-1.5 px-3 pb-1.5 pt-1">
-        {QUICK_QUESTIONS.map((q) => (
-          <button
-            key={q}
-            type="button"
-            onClick={() => onSend(q)}
-            className="rounded-full border border-slate-200 px-2.5 py-1 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-800"
-          >
-            {q}
-          </button>
-        ))}
-      </div>
-      <form
-        className="flex gap-2 border-t border-slate-100 p-2"
-        onSubmit={(e) => { e.preventDefault(); const t = draft.trim(); if (t.length === 0) return; onSend(t); setDraft(''); }}
-      >
-        <input
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Escape') onClose(); }}
-          placeholder="问日程、截止、群…"
-          autoFocus
-          className="min-w-0 flex-1 rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm text-slate-800 placeholder:text-slate-300 focus:border-indigo-300 focus:outline-none"
-        />
-        <button type="submit" className="shrink-0 rounded-lg bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700">
-          发送
-        </button>
-      </form>
     </div>
   );
 }

@@ -26,8 +26,11 @@ export function wechatPythonEnv(source: NodeJS.ProcessEnv = process.env): NodeJS
 }
 
 /** Locate shipped files only. No install, process discovery or implicit read consent. */
-export function wechatIdentityRuntime(root: string): { executable: string; entry: string } {
+export function wechatIdentityRuntime(root: string, environment: NodeJS.ProcessEnv = process.env): { executable: string; entry: string } {
   if (!isAbsolute(root)) throw new Error('WECHAT_RUNTIME_PATH_INVALID');
+  // Bootstrap may deliberately keep QQ/manual features available after a failed
+  // install. A leftover python.exe is not evidence that this runtime is usable.
+  if (environment.CLASSREP_PYTHON_SETUP_FAILED === '1') throw new Error('WECHAT_RUNTIME_FAILED');
   const executable = join(root, 'classrep-fastjudge', 'py', 'python.exe');
   const entry = join(root, 'tools', 'wechat4-read-probe', 'identity_worker.py');
   try {
@@ -37,10 +40,10 @@ export function wechatIdentityRuntime(root: string): { executable: string; entry
 }
 
 /** File metadata only. Enabling demo controls does not disable real connections. */
-export function wechatCapability(root: string, platform: NodeJS.Platform = process.platform): WechatCapability {
+export function wechatCapability(root: string, platform: NodeJS.Platform = process.platform, environment: NodeJS.ProcessEnv = process.env): WechatCapability {
   if (platform !== 'win32') return { available: false, reason: 'platform_unsupported' };
   try {
-    wechatIdentityRuntime(root);
+    wechatIdentityRuntime(root, environment);
     if (!statSync(join(root, 'tools', 'wechat4-read-probe', 'message_worker.py')).isFile()) throw new Error();
     return { available: true };
   } catch { return { available: false, reason: 'runtime_missing' }; }

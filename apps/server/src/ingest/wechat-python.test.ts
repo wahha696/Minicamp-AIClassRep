@@ -43,6 +43,10 @@ describe('owned WeChat Python startup (no WeChat access)', () => {
     mkdirSync(py, { recursive: true }); mkdirSync(tool, { recursive: true });
     writeFileSync(join(py, 'python.exe'), 'not executed'); writeFileSync(join(tool, 'identity_worker.py'), 'not executed');
     expect(wechatIdentityRuntime(root)).toEqual({ executable: join(py, 'python.exe'), entry: join(tool, 'identity_worker.py') });
+    const failedInstall = { CLASSREP_PYTHON_SETUP_FAILED: '1' };
+    expect(() => wechatIdentityRuntime(root, failedInstall)).toThrow('WECHAT_RUNTIME_FAILED');
+    writeFileSync(join(tool, 'message_worker.py'), 'not executed');
+    expect(wechatCapability(root, 'win32', failedInstall)).toEqual({ available: false, reason: 'runtime_missing' });
   });
 
   it.skipIf(!process.env.WECHAT4_TEST_PYTHON)('isolated real Python imports a sibling in Chinese/spaced paths, preserves literal arguments and writes no cache', () => {

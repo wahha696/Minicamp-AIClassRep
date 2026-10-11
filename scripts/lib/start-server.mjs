@@ -4,6 +4,7 @@ import { execSync, spawn } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
+import { runtimeEnv } from './node-runtime.mjs';
 
 /** 后端监听的端口区间（index.ts 从 8000 起顺延到 8010） */
 export const PORTS = Array.from({ length: 11 }, (_, i) => 8000 + i);
@@ -46,6 +47,7 @@ export function killOldBackends({ log = console.log } = {}) {
 }
 
 export function openBrowser(url) {
+  if (process.env.CLASSREP_OPEN_BROWSER === '0') return;
   if (!isWindows()) return;
   spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
 }
@@ -56,14 +58,16 @@ export function openBrowser(url) {
  *  - watch=true（开发）：走 pnpm --filter server dev = tsx watch；
  *  - 默认：node tsx src/index.ts 直跑（无 watch，普通启动）。
  */
-export function startServerChild({ root, watch = false }) {
+export function startServerChild({ root, watch = false, pnpm }) {
   const serverDir = join(root, 'apps', 'server');
   const tsxCli = join(serverDir, 'node_modules', 'tsx', 'dist', 'cli.mjs');
   const launchId = randomUUID();
-  const childEnv = { ...process.env, CLASSREP_LAUNCH_ID: launchId };
+  const childEnv = { ...runtimeEnv(), CLASSREP_LAUNCH_ID: launchId };
 
   if (watch) {
-    return { child: spawn('pnpm', ['--filter', 'server', 'dev'], { cwd: root, stdio: 'inherit', shell: true, env: childEnv }), launchId };
+    if (!pnpm) throw new Error('开发模式需要已解析的 pnpm');
+    return { child: spawn(pnpm.cmd, [...pnpm.args, '--filter', 'server', 'dev'], { cwd: root, stdio: 'inherit', shell: pnpm.shell,
+      env: { ...pnpm.env, CLASSREP_LAUNCH_ID: launchId }, windowsHide: true }), launchId };
   }
 
   const child = spawn(process.execPath, [tsxCli, 'src/index.ts'], { cwd: serverDir, stdio: 'inherit', env: childEnv });

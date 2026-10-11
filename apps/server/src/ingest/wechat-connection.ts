@@ -111,7 +111,8 @@ export class WechatConnection {
         this.profile = null;
         const code = error instanceof Error ? error.message : '';
         this.error ??= ['WECHAT_NOT_RUNNING', 'WECHAT_VERSION_UNSUPPORTED', 'WECHAT_MULTIPLE_CLIENTS',
-          'WECHAT_RUNTIME_MISSING'].includes(code) ? code : 'WECHAT_CONNECTION_FAILED';
+          'WECHAT_RUNTIME_MISSING', 'WECHAT_MODULE_UNSUPPORTED', 'WECHAT_PROCESS_UNAVAILABLE',
+          'WECHAT_RUNTIME_FAILED'].includes(code) ? code : 'WECHAT_CONNECTION_FAILED';
       }
       // Never expose native errors, account values or paths to HTTP/logs.
       throw new Error(this.error ?? 'WECHAT_CONNECTION_FAILED');
@@ -148,5 +149,8 @@ function safeReason(reason: WechatIdentityFailure): string {
   if (reason === 'unsupported_version') return 'WECHAT_VERSION_UNSUPPORTED';
   if (reason === 'wechat_not_running') return 'WECHAT_NOT_RUNNING';
   if (reason === 'multiple_clients') return 'WECHAT_MULTIPLE_CLIENTS';
+  if (reason === 'module_unsupported') return 'WECHAT_MODULE_UNSUPPORTED';
+  if (reason === 'process_unavailable') return 'WECHAT_PROCESS_UNAVAILABLE';
+  if (reason === 'runtime_failed') return 'WECHAT_RUNTIME_FAILED';
   return 'WECHAT_IDENTITY_LOST';
 }

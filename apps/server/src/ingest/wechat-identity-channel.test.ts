@@ -34,6 +34,21 @@ afterEach(async () => {
 });
 
 describe('private WeChat identity channel (synthetic child only)', () => {
+  it.each([
+    ['module_unsupported', 'WECHAT_MODULE_UNSUPPORTED'], ['runtime_failed', 'WECHAT_RUNTIME_FAILED'],
+    ['process_unavailable', 'WECHAT_PROCESS_UNAVAILABLE'], ['main_process_unavailable', 'WECHAT_PROCESS_UNAVAILABLE'],
+    ['unsupported', 'WECHAT_VERSION_UNSUPPORTED'],
+  ])('preserves safe startup classification %s', async (reason, code) => {
+    const f = fixture(); f.respond({ kind: 'unavailable', seq: 0, reason });
+    await expect(f.channel.sample()).rejects.toThrow(code);
+    expect(f.channel.current()).toBeNull();
+  });
+  it('reports a current memory-read access failure without classifying it as a version error', async () => {
+    const f = fixture(); f.ready(); const pending = f.channel.sample(); await Promise.resolve();
+    f.respond({ kind: 'unavailable', seq: 1, reason: 'process_unavailable' });
+    await expect(pending).rejects.toThrow('WECHAT_PROCESS_UNAVAILABLE');
+    expect(f.channel.current()).toBeNull();
+  });
   it('requires private initialization then accepts only the requested sample', async () => {
     const f = fixture();
     expect(f.requests[0]).toMatchObject({ v: 1, seq: 0, command: 'initialize' });

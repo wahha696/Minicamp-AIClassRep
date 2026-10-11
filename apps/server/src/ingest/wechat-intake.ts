@@ -6,6 +6,7 @@ import { WechatMessageChannel, type WechatMessageStatus, type WechatMessagePlan 
 import { WechatSelectionStore } from './wechat-selection-store.js';
 import { wechatIdentityRuntime } from './wechat-python.js';
 import { bindWechatDestination } from './wechat.js';
+import { recordHistoryJobMessages } from './history-job-counts.js';
 import type { WechatReadContext, WechatSelectedScope } from './wechat-group-selection.js';
 import type { WechatIntakeDTO } from '../../../../shared/wechat.js';
 
@@ -28,6 +29,7 @@ interface Job {
   counts: WechatMessageStatus; timer?: ReturnType<typeof setTimeout>;
   phase: 'opening' | 'collecting';
   history?: { group: string; days: 1 | 7 | 30 };
+  historyJob?: { id: string; group: string };
   lastReceivedAt?: number;
 }
 const known = new Set(['WECHAT_MESSAGE_NOT_CURRENT', 'WECHAT_MESSAGE_TIMEOUT', 'WECHAT_MESSAGE_WORKER_CLOSED',
@@ -49,6 +51,13 @@ export class WechatIntake {
   constructor(private readonly options: Options) {}
   /** An already approved live session may follow a same-space epoch change. */
   wasCollecting(): boolean { return this.job?.phase === 'collecting'; }
+  /** Local backend scope for durable jobs; never grants new message consent. */
+  historyContext(): { account: string; epoch: string; intakeId: string; groups: string[] } | null {
+    const job = this.job;
+    if (!job || job.phase !== 'collecting' || !this.owns(job)) return null;
+    return { account: job.context.account, epoch: job.context.epoch, intakeId: job.id,
+      groups: job.plans.map((plan) => plan.group_id) };
+  }
   private same(a: WechatReadContext | null, b: WechatReadContext): boolean {
     return !!a && a.account === b.account && a.connectionId === b.connectionId && a.epoch === b.epoch;
   }
@@ -110,9 +119,14 @@ export class WechatIntake {
       proof: () => this.proof(job), activated: (group, activation) => {
         if (!this.owns(job)) throw new Error('WECHAT_MESSAGE_NOT_CURRENT');
         store.activated(context, group, activation);
-      }, receive: (batch) => {
+      }, receive: (batch, command) => {
         if (!this.owns(job)) throw new Error('WECHAT_MESSAGE_NOT_CURRENT');
-        const acknowledgement = receive(batch);
+        const historyTask = job.historyJob;
+        const acknowledgement = receive(batch, historyTask && (command === 'history_start' || command === 'history_next')
+          ? (inserted, delivered) => {
+            if (delivered.messages.some((message) => message.group_id !== historyTask.group)) throw new Error('HISTORY_SCOPE_CHANGED');
+            recordHistoryJobMessages(historyTask.id, historyTask.group, inserted);
+          } : undefined);
         if (acknowledgement.inserted > 0) job.lastReceivedAt = Date.now();
         return acknowledgement;
       } });
@@ -176,15 +190,17 @@ export class WechatIntake {
   /** A failed group read closes the worker (receipts stay fail-closed). The
    * collector is then reopened from saved progress so batch refresh can skip
    * that group; if reopening fails the failure is global and is reported. */
-  async history(expectedEpoch: string, intakeId: string, group: string, days: 1 | 7 | 30, approved: boolean, continueExisting = false)
+  async history(expectedEpoch: string, intakeId: string, group: string, days: 1 | 7 | 30, approved: boolean, continueExisting = false, nowSeconds?: number, taskId?: string)
     : Promise<{ inserted: number; has_more: boolean; skipped?: string; intake_id?: string }> {
     const job = this.active(expectedEpoch, intakeId);
     if (approved !== true || ![1, 7, 30].includes(days) || !job.plans.some((plan) => plan.group_id === group)
         || this.historyRunning || (continueExisting && (job.history?.group !== group || job.history.days !== days))) throw new Error('WECHAT_HISTORY_REQUEST_INVALID');
     this.historyRunning = true;
+    job.historyJob = taskId ? { id: taskId, group } : undefined;
     let skipped: string;
     try {
-      const page = continueExisting ? await job.channel.historyNext() : await job.channel.history(group, days, true);
+      const page = continueExisting ? await job.channel.historyNext()
+        : await job.channel.history(group, days, true, nowSeconds);
       if (!this.owns(job)) throw new Error('WECHAT_MESSAGE_NOT_CURRENT');
       job.history = page.has_more ? { group, days } : undefined;
       return page;
@@ -196,7 +212,7 @@ export class WechatIntake {
         throw new Error('WECHAT_HISTORY_FAILED');
       }
       this.failed(job, error); skipped = this.error ?? 'WECHAT_MESSAGE_FAILED';
-    } finally { if (this.job === job) this.historyRunning = false; }
+    } finally { job.historyJob = undefined; if (this.job === job) this.historyRunning = false; }
     if (skipped === 'WECHAT_MESSAGE_NOT_CURRENT') throw new Error('WECHAT_HISTORY_FAILED');
     try { await this.start(expectedEpoch, true, true, true); }
     catch { throw new Error('WECHAT_HISTORY_FAILED'); }

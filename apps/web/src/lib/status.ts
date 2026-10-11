@@ -78,7 +78,7 @@ export function lightsFromHealth(health: HealthDTO | undefined): Light[] {
       tip: `QQ 连接：${QQ_STATE_TEXT[health.qq] ?? health.qq}`,
     },
     ...(health.wechat === undefined ? [] : [{ key: 'wechat' as const, label: '微信',
-      color: (health.wechat === 'collecting' ? 'green' : health.wechat === 'error' ? 'red' : 'gray') as LightColor,
+      color: (health.wechat === 'collecting' ? 'green' : 'red') as LightColor,
       tip: `微信采集：${{ collecting: '正在接收所选群消息', opening: '正在准备采集', idle: '未开启采集', error: '采集已停止，请在群管理查看原因' }[health.wechat]}` }]),
     {
       key: 'db',

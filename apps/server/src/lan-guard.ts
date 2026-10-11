@@ -58,6 +58,8 @@ export function hostnameOf(hostHeader: string): string {
 export function isSensitivePath(path: string): boolean {
   return (
     path.startsWith('/api/runtime/') ||
+    path === '/api/assistant' || path.startsWith('/api/assistant/') ||
+    path === '/api/history-jobs' || path.startsWith('/api/history-jobs/') ||
     path.startsWith('/api/connect/qrcode') ||
     path.startsWith('/api/settings/llm') ||
     path.startsWith('/api/settings/ai') ||

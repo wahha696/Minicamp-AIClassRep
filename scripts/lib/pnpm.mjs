@@ -3,12 +3,26 @@
 //   Node 自带 corepack 装到 <root>/.corepack/bin（免管理员）→
 //   最后兜底：下载官方 pnpm dist tarball 到 <root>/.pnpm-dist/，用 node 直接跑 pnpm.cjs。
 // 返回 { cmd, args, shell, label } 或 null；调用方 spawn 时用 cmd+args+shell。
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
+import { runtimeEnv } from './node-runtime.mjs';
 
-export function corepackEnv() {
-  return { COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' };
+export function corepackEnv(extraBinDirs = [], source = process.env) {
+  return { ...runtimeEnv(source, extraBinDirs), COREPACK_ENABLE_DOWNLOAD_PROMPT: '0', npm_node_execpath: process.execPath };
+}
+
+/** A downloaded pnpm CLI also needs a shell entry for scripts such as `pnpm typecheck`. */
+export function pnpmDistCommand(cjs, source = process.env) {
+  const bin = dirname(cjs);
+  if (process.platform === 'win32') {
+    writeFileSync(join(bin, 'pnpm.cmd'), '@echo off\r\n"%npm_node_execpath%" "%~dp0pnpm.cjs" %*\r\n');
+  } else {
+    const shim = join(bin, 'pnpm');
+    writeFileSync(shim, '#!/bin/sh\nexec "$npm_node_execpath" "$(dirname "$0")/pnpm.cjs" "$@"\n');
+    chmodSync(shim, 0o755);
+  }
+  return { cmd: process.execPath, args: [cjs], shell: false, label: '内置下载的 pnpm（.pnpm-dist）', env: corepackEnv([bin], source) };
 }
 
 const isWin = () => process.platform === 'win32';
@@ -21,7 +35,7 @@ export async function resolvePnpm(root, log) {
         shell,
         windowsHide: true,
         timeout: 30_000,
-        env: { ...process.env, ...corepackEnv() },
+        env: corepackEnv(),
       });
       return r.status === 0;
     } catch {
@@ -29,7 +43,7 @@ export async function resolvePnpm(root, log) {
     }
   };
   if (probe('pnpm', [], true)) {
-    return { cmd: 'pnpm', args: [], shell: true, label: 'PATH 里的 pnpm' };
+    return { cmd: 'pnpm', args: [], shell: true, label: 'PATH 里的 pnpm', env: corepackEnv() };
   }
   // corepack：nodejs.org 发行版自带（<node>/node_modules/corepack）。装到仓库内目录，不动系统。
   const corepackJs = join(dirname(process.execPath), 'node_modules', 'corepack', 'dist', 'corepack.js');
@@ -40,19 +54,19 @@ export async function resolvePnpm(root, log) {
     spawnSync(process.execPath, [corepackJs, 'enable', '--install-directory', bin], {
       stdio: 'inherit',
       windowsHide: true,
-      env: { ...process.env, COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' },
+      env: corepackEnv(),
     });
     const shim = isWin() ? join(bin, 'pnpm.cmd') : join(bin, 'pnpm');
     // 仓库路径可能带空格（如 Desktop\Class Rep），shell 模式下必须整体加引号
     const quoted = `"${shim}"`;
     if (existsSync(shim) && probe(quoted, [], true)) {
-      return { cmd: quoted, args: [], shell: true, label: 'corepack 安装的 pnpm（.corepack/bin）' };
+      return { cmd: quoted, args: [], shell: true, label: 'corepack 安装的 pnpm（.corepack/bin）', env: corepackEnv([bin]) };
     }
   }
   // 兜底：裸 node.exe 没有 corepack——直接下 pnpm dist tarball（D02）
   const cjs = await ensurePnpmDist(root, log);
   if (cjs && probe(process.execPath, [cjs], false)) {
-    return { cmd: process.execPath, args: [cjs], shell: false, label: '内置下载的 pnpm（.pnpm-dist）' };
+    return pnpmDistCommand(cjs);
   }
   return null;
 }

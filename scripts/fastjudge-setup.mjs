@@ -5,11 +5,12 @@
 //   POSIX ：python3 -m venv <root>/.venv → pip install -r requirements.txt
 // 已被 jev-local.getFastjudgePython 探测：py/python.exe > .venv > 系统 python。
 // 用法：node scripts/fastjudge-setup.mjs [--root <fastjudge目录>]
-import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 import { spawnSync } from 'node:child_process';
+import { ensureWindowsEmbeddedPython, pythonCommandUsable } from './lib/fastjudge-runtime.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO = dirname(SCRIPT_DIR);
@@ -26,7 +27,7 @@ if (!existsSync(join(ROOT, 'src', 'infer.py'))) fail(`找不到 ${ROOT}/src/infe
 if (!existsSync(REQ)) fail(`找不到 ${REQ}`);
 
 function run(cmd, args, label) {
-  const r = spawnSync(cmd, args, { stdio: 'inherit', cwd: ROOT });
+  const r = spawnSync(cmd, args, { stdio: 'inherit', cwd: ROOT, windowsHide: true });
   if (r.status !== 0) throw new Error(`${label} 失败（exit ${r.status}）`);
 }
 
@@ -38,43 +39,25 @@ async function download(url, dest) {
 }
 
 function pythonUsable(py) {
-  const r = spawnSync(py, ['-c', 'import sklearn,jieba,joblib,numpy,zstandard;assert zstandard.__version__=="0.25.0";print("ok")'], {
-    encoding: 'utf8', timeout: 60_000, cwd: ROOT,
+  const r = spawnSync(py, ['-I', '-X', 'utf8', '-c', 'import sklearn,jieba,joblib,numpy,zstandard;assert zstandard.__version__=="0.25.0";print("ok")'], {
+    encoding: 'utf8', timeout: 60_000, cwd: ROOT, windowsHide: true,
   });
   return r.status === 0 && String(r.stdout).includes('ok');
 }
 
-async function provisionWindows() {
+async function provisionWindows(pyExe) {
   const pyDir = join(ROOT, 'py');
-  const pyExe = join(pyDir, 'python.exe');
-  if (!existsSync(pyExe)) {
-    const zip = join(pyDir, `python-${PY_VER}-embed-amd64.zip`);
-    log(`下载 python-${PY_VER}-embed-amd64…`);
-    await download(`${PY_MIRROR}/${PY_VER}/python-${PY_VER}-embed-amd64.zip`, zip);
-    log('解压…');
-    // GNU tar 会把 E:\ 当远程主机；优先用 Windows 自带 bsdtar，没有则 PowerShell
-    const winTar = 'C:\\Windows\\System32\\tar.exe';
-    if (existsSync(winTar)) {
-      run(winTar, ['-xf', zip, '-C', pyDir], '解压 embed 包');
-    } else {
-      run('powershell', ['-NoProfile', '-Command',
-        `Expand-Archive -LiteralPath '${zip.replace(/'/g, "''")}' -DestinationPath '${pyDir.replace(/'/g, "''")}' -Force`],
-      '解压 embed 包');
-    }
-    // embeddable 默认关闭 site：放开才能吃到 Lib/site-packages 里的依赖
-    const pth = join(pyDir, `python${PY_VER.split('.').slice(0, 2).join('')}._pth`);
-    const txt = readFileSync(pth, 'utf8').replace(/^#?\s*import site\s*$/m, 'import site');
-    writeFileSync(pth, txt.includes('Lib\\site-packages') ? txt : `Lib\\site-packages\n${txt}`);
-  }
-  if (!existsSync(join(pyDir, 'Scripts', 'pip.exe')) && !existsSync(join(pyDir, 'Lib', 'site-packages', 'pip'))) {
+  if (!pythonCommandUsable(pyExe, ['-I', '-m', 'pip', '--version'])) {
     const getPip = join(pyDir, 'get-pip.py');
     await download('https://bootstrap.pypa.io/get-pip.py', getPip);
-    run(pyExe, [getPip, '--no-warn-script-location'], 'get-pip');
+    run(pyExe, ['-I', getPip, '--no-warn-script-location'], 'get-pip');
   }
   // jieba 只有 sdist：embed 环境先装构建后端，再关 build isolation 装依赖
-  run(pyExe, ['-m', 'pip', 'install', 'setuptools', 'wheel'], 'pip install setuptools');
+  run(pyExe, ['-I', '-m', 'pip', 'install', '--force-reinstall', 'setuptools', 'wheel'], 'pip install setuptools');
   log('安装 requirements.txt（本地快判及微信文字解码依赖）…');
-  run(pyExe, ['-m', 'pip', 'install', '-r', REQ, '--no-warn-script-location', '--no-build-isolation'], 'pip install');
+  // This path is entered only after dependency validation failed. Reinstall also
+  // repairs interrupted package installs whose metadata incorrectly says ready.
+  run(pyExe, ['-I', '-m', 'pip', 'install', '--force-reinstall', '-r', REQ, '--no-warn-script-location', '--no-build-isolation'], 'pip install');
   return pyExe;
 }
 
@@ -85,11 +68,15 @@ function provisionPosix() {
   return pyExe;
 }
 
-const existingPy = process.platform === 'win32' ? join(ROOT, 'py', 'python.exe') : join(ROOT, '.venv', 'bin', 'python');
+// Check/repair the owned path file even when a broken configuration happens to
+// find packages from another local Python installation.
+const existingPy = process.platform === 'win32'
+  ? await ensureWindowsEmbeddedPython({ root: ROOT, version: PY_VER, mirror: PY_MIRROR, download, log })
+  : join(ROOT, '.venv', 'bin', 'python');
 if (existsSync(existingPy) && pythonUsable(existingPy)) {
   log('共享 Python 运行时及依赖已就绪');
   process.exit(0);
 }
-const pyExe = process.platform === 'win32' ? await provisionWindows() : provisionPosix();
+const pyExe = process.platform === 'win32' ? await provisionWindows(existingPy) : provisionPosix();
 if (!pythonUsable(pyExe)) fail(`装完但 import 校验不过：${pyExe}`);
 log(`就绪：${pyExe}`);

@@ -14,7 +14,7 @@ Set-Location Minicamp-AIClassRep
 .\启动.bat
 ~~~
 
-启动器准备 Node、pnpm 依赖、便携 Python 和前端，再打开本地网页。已有 Node.js 24 LTS（最低 22.15）及 pnpm 10.34.5 也可执行：
+启动器准备 Node、pnpm 依赖、便携 Python 和前端，再打开本地网页。已有 Node.js 24 LTS（最低 22.16）及 pnpm 10.34.5 也可执行：
 
 ~~~powershell
 pnpm install --frozen-lockfile

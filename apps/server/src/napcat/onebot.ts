@@ -167,24 +167,31 @@ function rejectAllPending(reason: string): void {
 // ===== action 调用（同一条 WS，echo 匹配；接口规格 §6） =====
 
 /** 未连接时 reject；回包 status ∈ {ok, async} 算成功，返回 data。 */
-export function callAction<T = unknown>(action: string, params: object, timeoutMs: number = CALL_TIMEOUT_MS): Promise<T> {
+export function callAction<T = unknown>(action: string, params: object, timeoutMs: number | null = CALL_TIMEOUT_MS,
+  signal?: AbortSignal, onLongWait?: () => void): Promise<T> {
   const socket = ws;
   if (socket === null || socket.readyState !== WebSocket.OPEN) {
     return Promise.reject(new Error('QQ 未连接'));
   }
+  if (signal?.aborted) return Promise.reject(new Error('ONEBOT_REQUEST_CANCELLED'));
   const echo = randomUUID();
   return new Promise<T>((resolve, reject) => {
+    const cleanup = () => { clearTimeout(timer); pending.delete(echo); signal?.removeEventListener('abort', abort); };
+    const rejectRequest = (error: Error) => { cleanup(); reject(error); };
+    const abort = () => rejectRequest(new Error('ONEBOT_REQUEST_CANCELLED'));
     const timer = setTimeout(() => {
-      pending.delete(echo);
-      reject(new Error(`action ${action} 超时（${timeoutMs}ms）`));
-    }, timeoutMs);
-    pending.set(echo, { resolve: resolve as (data: unknown) => void, reject, timer });
+      if (timeoutMs === null) {
+        // The caller explicitly owns a long read. A silent but open connection
+        // cannot prove failure: retain the echo and accept its eventual response.
+        try { onLongWait?.(); } catch (error) { rejectRequest(error instanceof Error ? error : new Error('ONEBOT_WAIT_STATE_FAILED')); }
+      } else rejectRequest(new Error(`action ${action} 超时（${timeoutMs}ms）`));
+    }, timeoutMs ?? 180_000);
+    pending.set(echo, { resolve: (data) => { cleanup(); resolve(data as T); }, reject: rejectRequest, timer });
+    signal?.addEventListener('abort', abort, { once: true });
     try {
       socket.send(JSON.stringify({ action, params, echo }));
     } catch (err) {
-      clearTimeout(timer);
-      pending.delete(echo);
-      reject(err instanceof Error ? err : new Error(String(err)));
+      rejectRequest(err instanceof Error ? err : new Error(String(err)));
     }
   });
 }
@@ -564,12 +571,14 @@ async function refreshAfterOnline(context: AccountTaskContext, desktopGapSince: 
     if (!accountTaskIsCurrent(context)) return;
     // 常规重连按天补读；从电脑版 QQ 返回只补离开区间，并留 1 分钟重叠去重。
     const DAY = 86_400_000;
+    const coverageStartedAt = Date.now();
     const days = desktopGapSince !== null
-      ? Math.min(30, Math.max(1 / DAY, (Date.now() - desktopGapSince + 60_000) / DAY))
-      : lastSyncAt === 0 ? 7 : Math.min(30, Math.max(1, Math.ceil((Date.now() - lastSyncAt) / DAY)));
-    await syncHistory(days);
+      ? Math.min(30, Math.max(1 / DAY, (coverageStartedAt - desktopGapSince + 60_000) / DAY))
+      : lastSyncAt === 0 ? 7 : Math.min(30, Math.max(1, Math.ceil((coverageStartedAt - lastSyncAt) / DAY)));
+    const result = await syncHistory(days);
     if (!accountTaskIsCurrent(context)) return;
-    lastSyncAt = Date.now();
+    // A failed partial refresh must not advance the next reconnect's window.
+    if (result.failures === 0) lastSyncAt = coverageStartedAt;
   } catch {
     // 历史补齐失败不致命（还有手动兜底 POST /api/sync）
   }

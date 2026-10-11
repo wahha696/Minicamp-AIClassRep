@@ -75,7 +75,7 @@ export function bindWechatDestination(destination: string, wechatAccount: string
   const epoch = accountEpoch();
   const selected = new Set(groups);
 
-  return (input: unknown): WechatAcknowledgement => {
+  return (input: unknown, committed?: (inserted: number, batch: WechatDelivery) => void): WechatAcknowledgement => {
     const parsed = batchSchema.safeParse(input);
     if (!parsed.success) throw new WechatDeliveryError('WECHAT_DELIVERY_INVALID');
     const batch = parsed.data;
@@ -125,6 +125,7 @@ export function bindWechatDestination(destination: string, wechatAccount: string
           (destination,wechat_account,batch_id,message_count,created_at) VALUES (?,?,?,?,?)`)
           .run(destination, wechatAccount, batch.batch_id, batch.messages.length, Date.now());
       }
+      committed?.(inserted, batch);
       commitTx();
     } catch (error) {
       rollbackTx();

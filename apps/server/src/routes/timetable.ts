@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { csuBeginImport, csuFetchCourses, CsuError } from '../csujwc.js';
 import { clearTimetable, getTimetable, saveTimetable, timetableVersions } from '../timetable.js';
 import { redactSensitive } from '../redact.js';
+import { CourseCompletionError, listCourseCompletions, listCourseOccurrences, setCourseCompletion } from '../course-completions.js';
 import {
   dateStamp,
   minutes,
@@ -103,6 +104,21 @@ const timetableSchema = z.object({
 });
 
 export function registerTimetableRoutes(app: Hono): void {
+  const completionSchema = z.object({ occurrence_id: z.string().min(1).max(500), date: z.string(),
+    expected_start: z.number().int().safe(), expected_end: z.number().int().safe(),
+    expected_revision: z.number().int().nonnegative(), done: z.boolean() }).strict();
+  for (const [path, read] of [['completions', listCourseCompletions], ['occurrences', listCourseOccurrences]] as const) {
+    app.get(`/api/timetable/${path}`, (c) => {
+      try { return c.json(read(c.req.query('from') ?? '', c.req.query('to') ?? '')); }
+      catch (error) { if (error instanceof CourseCompletionError) return c.json({ error: error.message }, error.status); throw error; }
+    });
+  }
+  app.put('/api/timetable/completions', async (c) => {
+    const parsed = completionSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: '请提供具体课次、日期、当前时间与课表版本' }, 400);
+    try { return c.json(setCourseCompletion(parsed.data)); }
+    catch (error) { if (error instanceof CourseCompletionError) return c.json({ error: error.message }, error.status); throw error; }
+  });
   // 未导入时 courses: []（semester_start 仍是默认/上次值）
   app.get('/api/timetable', (c) => c.json(getTimetable()));
 

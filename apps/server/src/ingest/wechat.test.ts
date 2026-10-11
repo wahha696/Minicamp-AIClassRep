@@ -7,6 +7,7 @@ import * as accounts from '../accounts.js';
 import { db, openDb, SCHEMA_VERSION } from '../db/index.js';
 import { ingestMessages, upsertGroup } from './index.js';
 import { bindWechatDestination, wechatBatchId, wechatGroupId, type WechatDelivery } from './wechat.js';
+import { recordHistoryJobMessages } from './history-job-counts.js';
 import { extractEvents } from '../pipeline/extract.js';
 import { runPipelineNow } from '../pipeline/scheduler.js';
 import { wechatPythonArgs, wechatPythonEnv } from './wechat-python.js';
@@ -87,6 +88,21 @@ describe('微信幂等业务接收', () => {
     expect(db.prepare('SELECT source,sent_at,text FROM messages').get()).toEqual({
       source: 'wechat', sent_at: 1700000000000, text: batch.messages[0]!.text,
     });
+  });
+  it('durable history count commits with business delivery and does not double count a lost ACK replay', () => {
+    enable();
+    const task = { id: 'synthetic-history', status: 'running', current_group_id: GROUP, messages: 0,
+      groups: [{ group_id: GROUP, messages: 0 }] };
+    db.prepare("INSERT INTO kv(key,value) VALUES ('history_job_v1:wechat',?)").run(JSON.stringify(task));
+    const receive = receiver(), commit = (inserted: number) => recordHistoryJobMessages(task.id, GROUP, inserted);
+    expect(receive(delivery(), commit).inserted).toBe(1);
+    expect(receive(delivery(), commit)).toMatchObject({ replayed: true, inserted: 0 });
+    expect(JSON.parse(String(db.prepare("SELECT value FROM kv WHERE key='history_job_v1:wechat'").get()?.value)).messages).toBe(1);
+    const other = delivery([{ ...delivery().messages[0]!, event_id: 'b'.repeat(64) }]);
+    db.exec(`CREATE TEMP TRIGGER reject_history_count BEFORE UPDATE ON kv WHEN NEW.key='history_job_v1:wechat'
+      BEGIN SELECT RAISE(ABORT,'synthetic count failure'); END`);
+    expect(() => receive(other, commit)).toThrow('NOT_COMMITTED');
+    expect(count('messages')).toBe(1); expect(count('wechat_delivery_batches')).toBe(1);
   });
   it('回执写入失败时业务消息也回滚，原批次可以重试', () => {
     enable();

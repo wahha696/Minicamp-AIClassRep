@@ -1,247 +1,169 @@
-// 顶栏「补拉历史」按钮（FR-16）：点开菜单选 1 / 7 / 30 天，同时补拉 QQ 与微信中已开启监听的群。
-// 补拉后轮询 health.pending：按钮旁显示所有启用群的待整理总数；
-// 超时 / 没配 AI / 连续读不到 health 时停止跟踪（判定见 lib/syncTrack.ts）。
-// QQ 不在线且微信未在采集时禁用；局域网只读访问（写接口 403）整颗按钮不渲染。
 import { useEffect, useRef, useState } from 'react';
+import type { HistoryJobDTO } from '../../../../shared/history-jobs';
 import { getHealth } from '../api/client';
-import { errorText, toastError } from '../lib/errors';
-import { syncAllHistory, type HistorySyncProgress } from '../lib/historySync';
-import { type SyncTrack, trackStep } from '../lib/syncTrack';
-import { useConnectStatus } from './ConnectStatus';
-import { useToast } from './Toast';
+import { cancelHistoryJob, getHistoryJobs, retryHistoryJob, startHistoryJob } from '../api/history-jobs';
+import { errorText } from '../lib/errors';
+import { historyError, historyPlatform, historyProgress, historyRunning, type HistoryDays } from '../lib/historySync';
+import { trackStep } from '../lib/syncTrack';
+import { useAccess, useConnectStatus } from './ConnectStatus';
 
-const OPTIONS: { days: 1 | 7 | 30; label: string; hint?: string }[] = [
-  { days: 1, label: '补回最近 1 天' },
-  { days: 7, label: '补回最近 7 天' },
-  { days: 30, label: '补回最近 30 天', hint: '消息多时会消耗较多 AI 额度' },
-];
-
-interface PullProgress {
-  qq: boolean;
-  qqDone: boolean;
-  wechat: boolean;
-  wechatTotal: number | null;
-  wechatDone: number;
-  wechatSkipped: number;
-  page: number;
-  group: string | null;
-  messages: number;
-}
-
-/** 从非本机地址打开页面时，后端会拒所有写接口（403 只读）——干脆不显示按钮 */
-const isLanReadonly = () => {
-  const h = window.location.hostname;
-  return h !== 'localhost' && h !== '127.0.0.1' && h !== '[::1]' && h !== '0.0.0.0';
-};
+const OPTIONS: HistoryDays[] = [1, 7, 30];
+const POLL_MS = 3_000;
 
 export default function SyncButton() {
   const { data: conn } = useConnectStatus();
-  const toast = useToast();
+  const { readonly } = useAccess();
+  const epoch = conn?.account_epoch;
+  const scope = useRef(epoch);
+  scope.current = epoch;
   const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [stopping, setStopping] = useState(false);
-  const stopRequested = useRef(false);
-  const [pull, setPull] = useState<PullProgress | null>(null);
-  const [outcome, setOutcome] = useState<string | null>(null);
-  const [pending, setPending] = useState(0); // 所有启用群的待整理总数，实时新消息可使其增加
-  const [track, setTrack] = useState<Omit<SyncTrack, 'fails'> | null>(null);
-  const tracking = track !== null;
-  const rootRef = useRef<HTMLDivElement>(null);
-
-  const qqOnline = conn?.state === 'online';
-  const wechatOnline = conn?.wechat === 'collecting';
-  const online = qqOnline || wechatOnline;
+  const [jobs, setJobs] = useState<HistoryJobDTO[]>([]);
+  const [ready, setReady] = useState(false);
+  const [working, setWorking] = useState(false);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [pending, setPending] = useState<number | null>(null);
+  const [processingNote, setProcessingNote] = useState<string | null>(null);
+  const [hidden, setHidden] = useState(false);
   const mounted = useRef(true);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const actionLock = useRef(false);
+  const controlSequence = useRef(0);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const running = jobs.some(historyRunning);
+  const online = conn?.state === 'online' || conn?.wechat === 'collecting';
 
-  // 点外面/按 Esc 关菜单
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
     if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false);
-    };
-    document.addEventListener('mousedown', onDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', onDown);
-      document.removeEventListener('keydown', onKey);
-    };
+    const down = (e: MouseEvent) => { if (!rootRef.current?.contains(e.target as Node)) setOpen(false); };
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', down);
+    document.addEventListener('keydown', key);
+    return () => { document.removeEventListener('mousedown', down); document.removeEventListener('keydown', key); };
   }, [open]);
 
-  // 补拉后轮询 pending 直到本次补回的归零（或超时 / 没配 AI / 读不到 health）
   useEffect(() => {
-    if (!track) return;
+    setJobs([]); setReady(false); setConnectionError(null); setActionError(null);
+    setPending(null); setProcessingNote(null); setHidden(false);
+    if (!epoch || readonly) return;
     let alive = true;
-    let fails = 0;
-    const poll = () => {
-      getHealth()
-        .then((h) => h, () => null)
-        .then((h) => {
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        if (actionLock.current) return;
+        const sequence = controlSequence.current;
+        const result = await getHistoryJobs(epoch);
+        if (!alive || sequence !== controlSequence.current) return;
+        // A control response can be newer than an already in-flight status read.
+        setJobs(previous => result.jobs.map(job => {
+          const known = previous.find(item => item.id === job.id);
+          return known && known.updated_at > job.updated_at ? known : job;
+        }));
+        setReady(true); setConnectionError(null); setActionError(null);
+        if (result.jobs.some(job => job.messages > 0)) {
+          const health = await getHealth().catch(() => null);
           if (!alive) return;
-          fails = h === null ? fails + 1 : 0;
-          const step = trackStep({ ...track, fails }, h, Date.now());
+          const step = trackStep({ total: 0, base: 0, startedAt: 0, fails: 0 }, health, Date.now());
           if (step.kind === 'progress') {
             if (step.left >= 0) setPending(step.left);
-            return;
+            setProcessingNote(step.message ?? null);
+          } else {
+            setPending(step.kind === 'done' ? 0 : health?.pending ?? null);
+            setProcessingNote(step.kind === 'stop' ? step.message : null);
           }
-          setTrack(null);
-          setPending(0);
-          toast(step.kind === 'done' ? '已启用群当前没有待整理的消息' : step.message);
-        });
+        }
+      } catch (error) {
+        if (alive) { setConnectionError(errorText(error)); setReady(false); }
+      } finally {
+        if (alive) timer = setTimeout(() => void poll(), POLL_MS);
+      }
     };
-    const timer = setInterval(poll, 3_000);
-    return () => {
-      alive = false;
-      clearInterval(timer);
-    };
-  }, [track, toast]);
+    void poll();
+    return () => { alive = false; clearTimeout(timer); };
+  }, [epoch, readonly]);
 
-  async function onPick(days: 1 | 7 | 30) {
-    if (!conn || busy) return;
-    stopRequested.current = false;
-    setStopping(false);
-    setOpen(false);
-    setOutcome(null);
-    setBusy(true);
-    setPull({ qq: qqOnline, qqDone: !qqOnline, wechat: wechatOnline, wechatTotal: wechatOnline ? null : 0,
-      wechatDone: 0, wechatSkipped: 0, page: 0, group: null, messages: 0 });
+  const accept = (job: HistoryJobDTO) => setJobs(previous => [...previous.filter(item => item.platform !== job.platform), job]);
+
+  async function start(days: HistoryDays) {
+    if (!epoch || !ready || running || actionLock.current) return;
+    actionLock.current = true; setWorking(true); setOpen(false); setHidden(false); setActionError(null);
+    controlSequence.current++;
+    const requestEpoch = epoch;
     try {
-      const res = await syncAllHistory(days, {
-        epoch: conn.account_epoch, qq: qqOnline, wechat: wechatOnline, alive: () => mounted.current && !stopRequested.current,
-        onProgress: (progress: HistorySyncProgress) => {
-          if (!mounted.current) return;
-          setPull((previous) => {
-            if (!previous) return previous;
-            if (progress.kind === 'qq_done') return { ...previous, qqDone: true };
-            if (progress.kind === 'wechat_start') return { ...previous, wechatTotal: progress.total };
-            if (progress.kind === 'wechat_request') return { ...previous, page: progress.page, group: progress.group_id };
-            if (progress.kind === 'wechat_page') return { ...previous, page: progress.page, messages: progress.messages };
-            return { ...previous, wechatDone: progress.completed,
-              wechatSkipped: previous.wechatSkipped + (progress.skipped ? 1 : 0), page: 0, group: null, messages: progress.messages };
-          });
-        },
+      const platforms = [conn?.state === 'online' ? 'qq' as const : null, conn?.wechat === 'collecting' ? 'wechat' as const : null]
+        .filter((platform): platform is 'qq' | 'wechat' => platform !== null);
+      const results = await Promise.allSettled(platforms.map(platform => startHistoryJob(requestEpoch, platform, days)));
+      if (!mounted.current || scope.current !== requestEpoch) return;
+      const errors: string[] = [];
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled') accept(result.value.job);
+        else errors.push(`${platforms[index] === 'qq' ? 'QQ' : '微信'}：${errorText(result.reason)}`);
       });
-      if (!mounted.current) return;
-      const failures = (res.qq?.failures ?? 0) + (res.wechat?.failed ? 1 : 0);
-      const skipped = res.wechat?.skipped ?? [];
-      if (res.cancelled) setOutcome('已停止后续补拉；已读取的消息保留，尚未完成的群可再次补拉。');
-      if (res.errors.length || failures || skipped.length) {
-        const parts = [
-          ...(res.qq ? [`${res.qq.failures} 个 QQ 群未补全`] : []),
-          ...(res.wechat ? [`${skipped.length} 个微信群跳过`] : []),
-          ...res.errors.map(({ platform, error }) => `${platform}补拉失败：${errorText(error)}`),
-        ];
-        setOutcome(`补拉结束：${parts.join('，')}。请检查群状态后重试。`);
-      }
-      if (res.errors.length > 0) toastError(toast, res.errors[0].error);
-      else if (failures > 0) toast(`有 ${failures} 个群可能没补全，建议稍后再补拉一次`);
-      if (skipped.length > 0) {
-        const notSynced = skipped.every((s) => s.reason === 'WECHAT_MESSAGE_SELECTED_GROUP_NOT_FOUND');
-        toast(`微信有 ${skipped.length} 个群读取失败，已跳过${notSynced ? '（电脑上还没有这些群的记录）' : ''}，其余群继续补拉`, 'error');
-      }
-      const messages = (res.qq?.messages ?? 0) + (res.wechat?.messages ?? 0);
-      if (messages === 0) {
-        if (!res.cancelled && failures === 0 && skipped.length === 0 && res.errors.length === 0) toast('本次范围内没有新增消息');
-        return;
-      }
-      toast(`补回 ${messages} 条消息，正在整理…`);
-      setPending(0);
-      setTrack({ total: messages, base: 0, startedAt: Date.now() });
-    } catch (e) {
-      if (mounted.current) { setOutcome('补拉中断，请检查连接后重试。'); toastError(toast, e); }
+      if (errors.length) { setActionError(errors.join('；')); setReady(false); }
     } finally {
-      if (mounted.current) { setBusy(false); setPull(null); setStopping(false); }
+      actionLock.current = false;
+      if (mounted.current) setWorking(false);
     }
   }
 
-  if (isLanReadonly()) return null;
+  async function control(job: HistoryJobDTO, action: 'cancel' | 'retry') {
+    if (!epoch || actionLock.current || !ready) return;
+    actionLock.current = true; setWorking(true); setActionError(null); setHidden(false);
+    controlSequence.current++;
+    const requestEpoch = epoch;
+    try {
+      const result = await (action === 'cancel' ? cancelHistoryJob : retryHistoryJob)(requestEpoch, job.id);
+      if (mounted.current && scope.current === requestEpoch) accept(result.job);
+    } catch (error) {
+      if (mounted.current && scope.current === requestEpoch) { setActionError(errorText(error)); setReady(false); }
+    } finally {
+      actionLock.current = false;
+      if (mounted.current) setWorking(false);
+    }
+  }
 
-  const progressText = pull && [
-    pull.qq ? `QQ ${pull.qqDone ? '已结束' : '补拉中，暂无法估算剩余时间'}` : null,
-    pull.wechat ? pull.wechatTotal === null ? '微信准备中'
-      : `微信已尝试 ${pull.wechatDone}/${pull.wechatTotal} 群${pull.wechatSkipped ? `，跳过 ${pull.wechatSkipped} 群` : ''}${pull.page ? `，当前第 ${pull.page} 页` : ''}` : null,
-    pull.messages > 0 ? `微信已读取 ${pull.messages} 条` : null,
-  ].filter(Boolean).join(' · ');
-
-  return (
-    <div ref={rootRef} className="relative shrink-0">
-      <button
-        type="button"
-        aria-label="补拉历史消息"
-        aria-expanded={open}
-        disabled={!online || busy}
-        title={online ? '补拉已开启监听的群的历史消息' : '先连上 QQ 或开启微信群监听'}
-        onClick={() => setOpen((o) => !o)}
-        className="flex h-9 items-center gap-1.5 rounded-md px-1.5 text-xs text-slate-500 hover:bg-slate-100 focus:bg-slate-100 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        <svg
-          viewBox="0 0 24 24"
-          className={`h-4 w-4 ${busy || (tracking && pending > 0) ? 'animate-spin' : ''}`}
-          fill="none"
-          stroke="currentColor"
-          strokeWidth={1.8}
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          aria-hidden
-        >
-          <path d="M21 12a9 9 0 1 1-2.6-6.4M21 4v5h-5" />
-        </svg>
-        <span className="hidden sm:inline">{busy ? '补拉中…' : '补拉历史'}</span>
-        {tracking && pending > 0 && (
-          <span title="所有已启用群的待整理消息；有新消息进入时会增加"
-            className="rounded-full bg-blue-100 px-1.5 text-[11px] font-medium text-blue-700">
-            全局待整理 {pending}
-          </span>
-        )}
-      </button>
-
-      {busy && pull && (
-        <div role="status" className="fixed inset-x-3 top-16 z-40 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 shadow-lg sm:absolute sm:inset-x-auto sm:left-0 sm:top-full sm:mt-1 sm:w-72">
-          <div className="mb-1.5" aria-live="polite">{progressText}</div>
-          {pull.group && <p className="mb-1.5 break-all">正在读取群 {pull.group} 的第 {pull.page} 页…</p>}
-          {stopping ? <p className="mb-1.5">正在等待当前请求结束，随后停止后续微信补拉；已发起的 QQ 补拉仍会完成。</p>
-            : pull.wechat && <button type="button" className="mb-1.5 underline" onClick={() => {
-              stopRequested.current = true; setStopping(true);
-            }}>停止后续补拉</button>}
-          {pull.wechat && <div role="progressbar" aria-label="微信历史读取进度" aria-valuemin={0}
-            aria-valuemax={pull.wechatTotal ?? undefined} aria-valuenow={pull.wechatTotal === null ? undefined : pull.wechatDone}
-            aria-valuetext={pull.wechatTotal === null ? '微信准备中' : `已尝试 ${pull.wechatDone}/${pull.wechatTotal} 群，跳过 ${pull.wechatSkipped} 群`}
-            className="h-1.5 overflow-hidden rounded-full bg-slate-100">
-            <div className={`h-full bg-emerald-500 transition-[width] duration-300 ${pull.wechatTotal === null ? 'animate-pulse' : ''}`}
-              style={{ width: pull.wechatTotal === null ? '35%' : `${pull.wechatTotal === 0 ? 100 : pull.wechatDone / pull.wechatTotal * 100}%` }} />
-          </div>}
-          {pull.qq && !pull.qqDone && <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-100" aria-label="QQ 正在补拉">
-            <div className="h-full w-1/3 animate-pulse bg-sky-500" />
-          </div>}
-        </div>
-      )}
-
-      {outcome && !busy && <div role="alert" className="fixed inset-x-3 top-16 z-40 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 shadow-lg sm:absolute sm:inset-x-auto sm:left-0 sm:top-full sm:mt-1 sm:w-72">
-        <span>{outcome}</span>
-        <button type="button" aria-label="关闭补拉结果" title="关闭" onClick={() => setOutcome(null)} className="ml-2 float-right text-base leading-none">×</button>
-      </div>}
-
-      {open && (
-        <div className="absolute right-0 top-full z-40 mt-1 w-60 rounded-xl border border-slate-200 bg-white py-1 shadow-lg">
-          <p className="px-3 pb-1 pt-2 text-xs text-slate-400">
-            只补拉已开启监听的 QQ 群和微信群；微信只能补回已同步到电脑的记录。待整理数字为全部启用群的积压。
-          </p>
-          {OPTIONS.map((o) => (
-            <button
-              key={o.days}
-              type="button"
-              onClick={() => void onPick(o.days)}
-              className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
-            >
-              <span>{o.label}</span>
-              {o.hint && <span className="max-w-24 text-right text-[11px] leading-tight text-slate-400">{o.hint}</span>}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+  if (readonly) return null;
+  const showPanel = !hidden && (jobs.length > 0 || connectionError || actionError);
+  return <div ref={rootRef} className="relative shrink-0">
+    <button type="button" aria-label="补拉历史消息" aria-expanded={open} disabled={!online || working || running || !ready}
+      title={running ? '后台正在补拉，可查看进度或停止后续补拉' : online ? '补回已开启监听的群的历史消息' : '请先连接 QQ 或开启微信群监听'}
+      onClick={() => setOpen(value => !value)}
+      className="flex h-9 items-center gap-1.5 rounded-md px-1.5 text-xs text-slate-500 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50">
+      <svg viewBox="0 0 24 24" className={`h-4 w-4 ${running ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden>
+        <path d="M21 12a9 9 0 1 1-2.6-6.4M21 4v5h-5" />
+      </svg>
+      <span className="hidden sm:inline">{running ? '补拉中…' : '补拉历史'}</span>
+      {pending !== null && pending > 0 && <span title="全部启用群的待整理数，实时新消息进入时可能增加" className="rounded-full bg-blue-100 px-1.5 text-blue-700">全局待整理 {pending}</span>}
+    </button>
+    {hidden && jobs.length > 0 && <button type="button" className="text-xs underline" onClick={() => setHidden(false)}>查看补拉结果</button>}
+    {showPanel && <div role="status" className="fixed inset-x-3 top-16 z-40 max-h-[70vh] overflow-auto rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 shadow-lg sm:absolute sm:inset-x-auto sm:left-0 sm:top-full sm:mt-1 sm:w-80">
+      {(connectionError || actionError) && <p role="alert" className="mb-2 text-amber-800">{connectionError || actionError} 后台任务状态以重连后的进度为准。</p>}
+      {connectionError && jobs.length > 0 && <p className="mb-2">以下为最后确认的进度，连接恢复后会自动更新。</p>}
+      {jobs.map(job => <section key={job.id} aria-label={`${historyPlatform(job)} 补拉进度`} className="mb-2 border-b border-slate-100 pb-2 last:border-0">
+        <p aria-live="polite">{historyProgress(job)}</p>
+        {job.platform === 'qq' && job.status === 'running' && job.waiting_since != null && <p className="mt-1 text-amber-800" aria-live="polite">
+          QQ 尚未返回当前页，处理状态未知；正在继续等待原请求，已存进度保留，可以取消。无需重新补拉。
+        </p>}
+        {job.current_group_id && historyRunning(job) && <p className="mt-1 break-all">当前群：{job.current_group_id}，正在读取第 {(job.groups.find(group => group.group_id === job.current_group_id)?.pages ?? 0) + 1} 页</p>}
+        {job.error && <p className="mt-1 text-amber-800">原因：{historyError(job.error)}</p>}
+        {job.groups.filter(group => group.error).map(group => <p key={group.group_id} className="mt-1 break-all text-amber-800">{group.group_id}：{historyError(group.error!)}</p>)}
+        {job.status === 'cancelling' && <p className="mt-1">{job.platform === 'qq'
+          ? '正在取消等待，保留已保存进度。'
+          : '当前页保存后停止，已补入记录保留。'}</p>}
+        {job.status === 'running' && <button type="button" disabled={working || !ready} onClick={() => void control(job, 'cancel')} className="mt-1 underline disabled:opacity-50">停止 {historyPlatform(job)} 后续补拉</button>}
+        {job.status === 'running' && <p className="mt-1 text-slate-400">{job.platform === 'qq'
+          ? '停止会取消当前等待，保留已保存进度。'
+          : '停止会在当前页保存后生效。'}</p>}
+        {!historyRunning(job) && job.retryable && <><p className="mt-1">已补入记录保留；重试会恢复未完成部分，重复消息自动去重。</p><button type="button" disabled={working || !ready || running} onClick={() => void control(job, 'retry')} className="mt-1 underline disabled:opacity-50">恢复 {historyPlatform(job)} 补拉</button></>}
+      </section>)}
+      {running && <p>耗时取决于记录量；可以切换页面或刷新，回来后会重新连接进度。</p>}
+      {processingNote && <p className="mt-1">{processingNote}</p>}
+      {pending === 0 && jobs.some(job => job.messages > 0) && <p className="mt-1">全部启用群当前没有待整理消息。</p>}
+      {!running && <button type="button" aria-label="关闭补拉结果" className="mt-2 underline" onClick={() => setHidden(true)}>收起结果</button>}
+    </div>}
+    {open && <div className="absolute right-0 top-full z-40 mt-1 w-60 rounded-xl border border-slate-200 bg-white py-1 shadow-lg">
+      <p className="px-3 pb-1 pt-2 text-xs text-slate-400">只补回已开启监听的 QQ 群和微信群。微信只能读取已同步到电脑的记录。任务在后台持续执行，可停止和恢复。</p>
+      {OPTIONS.map(days => <button key={days} type="button" onClick={() => void start(days)} className="block w-full px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50">补回最近 {days} 天{days === 30 && <span className="ml-1 text-xs text-slate-400">消息多时消耗较多 AI 额度</span>}</button>)}
+    </div>}
+  </div>;
 }

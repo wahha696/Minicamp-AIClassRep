@@ -159,6 +159,31 @@ export interface Occurrence {
   end: number;
   exception?: CourseException;
 }
+/** Completion belongs to one dated occurrence, never to its recurring rule. */
+export interface CourseCompletionDTO {
+  occurrence_id: string;
+  date: string;
+  start: number;
+  end: number;
+  done: boolean;
+  updated_at: number;
+}
+export interface CourseCompletionRequest {
+  occurrence_id: string;
+  date: string;
+  expected_start: number;
+  expected_end: number;
+  expected_revision: number;
+  done: boolean;
+}
+export interface CourseCompletionsResponse {
+  revision: number;
+  completions: CourseCompletionDTO[];
+}
+export interface CourseCompletionResponse {
+  revision: number;
+  completion: CourseCompletionDTO;
+}
 export function expandTimetable(t: TimetableDTO, from: number, to: number): Occurrence[] {
   const origin = dateStamp(t.semester_start);
   if (!Number.isFinite(origin) || to <= from) return [];

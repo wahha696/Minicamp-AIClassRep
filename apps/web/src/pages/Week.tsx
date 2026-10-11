@@ -8,7 +8,7 @@ import type { EventDTO } from '../api/types';
 import EventDrawer from '../components/EventDrawer';
 import SlotStack from '../components/SlotStack';
 import WeekGrid, { CourseCard } from '../components/WeekGrid';
-import { expandTimetable, findConflicts, DAY } from '../../../../shared/timetable';
+import { expandTimetable, findConflicts, DAY, dateString } from '../../../../shared/timetable';
 import { usePolling } from '../hooks/usePolling';
 import { isUpdated, levelStyle, typeMeta } from '../lib/eventMeta';
 import { formatWhen, hhmm, weekdayDate } from '../lib/time';
@@ -16,7 +16,8 @@ import { weekOf } from '../lib/timetable';
 import { groupByDay, thisMonday, weekRange, type WeekItem } from '../lib/week';
 import { groupBySlot } from '../lib/slots';
 import ReadStatus from '../components/ReadStatus';
-import { useAccess } from '../components/ConnectStatus';
+import { useAccess, useConnectStatus } from '../components/ConnectStatus';
+import { useCourseCompletions } from '../hooks/useCourseCompletions';
 
 const WEEK_MS = 7 * 24 * 3_600_000;
 const MODE_KEY = 'weekMode';
@@ -87,6 +88,7 @@ function Item({ item, onClick }: { item: WeekItem; onClick: () => void }) {
 
 export default function Week() {
   const { readonly } = useAccess();
+  const { data: connection } = useConnectStatus();
   // 当前查看那周的周一 0 点（上海时间）
   const [monday, setMonday] = useState(() => thisMonday());
   const followCurrent = useRef(true);
@@ -132,6 +134,7 @@ export default function Week() {
   const loading = firstLoading || (data === undefined && !error);
   const days = useMemo(() => groupByDay(data ?? [], monday), [data, monday]);
   const { from, to } = weekRange(monday);
+  const completions = useCourseCompletions(connection?.account_epoch ?? '', dateString(from), dateString(to), timetable.data?.revision, readonly);
   const total = new Set(days.flatMap((day) => day.items.map((item) => item.event.id))).size;
   const isThisWeek = monday === thisMonday();
 
@@ -227,6 +230,7 @@ export default function Week() {
 
       <ReadStatus error={error} cached={data !== undefined} lastSuccessAt={lastSuccessAt} onRetry={() => void refresh()} />
       <ReadStatus error={timetable.error} cached={timetable.data !== undefined} lastSuccessAt={timetable.lastSuccessAt} onRetry={() => void timetable.refresh()} />
+      {hasCourses && <ReadStatus error={completions.state.error} cached={completions.state.data !== undefined} lastSuccessAt={completions.state.lastSuccessAt} onRetry={() => void completions.state.refresh()} />}
 
       {mode === 'grid' && !hasCourses && timetable.data !== undefined && !readonly && !timetable.loading && (
         <p className="mt-4 rounded-lg bg-sky-50 px-4 py-2.5 text-sm text-sky-800">
@@ -246,6 +250,7 @@ export default function Week() {
             itemsByDay={days.map((d) => d.items)}
             allEvents={data??[]}
             onPick={setSelectedId}
+            completionFor={completions.forOccurrence}
           />
         </div>
       ) : (
@@ -265,7 +270,7 @@ export default function Week() {
                 <span>{weekdayDate(d.from)}</span>
                 {d.isToday && <span className="text-xs font-normal">今天</span>}
               </h2>
-              <div className="mb-2 space-y-2">{courseOccurrences.filter(o=>o.start<d.from+DAY&&o.end>d.from).map(o=><CourseCard key={o.id} occurrence={o} conflicts={courseConflicts} names={courseNames}/>)}</div>
+              <div className="mb-2 space-y-2">{courseOccurrences.filter(o=>o.start<d.from+DAY&&o.end>d.from).map(o=><CourseCard key={o.id} occurrence={o} conflicts={courseConflicts} names={courseNames} completion={completions.forOccurrence(o)}/>)}</div>
 
               {loading ? (
                 <div className="h-12 animate-pulse rounded-lg bg-slate-200/60" />

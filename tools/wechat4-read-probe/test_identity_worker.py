@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from identity_snapshot import IdentitySnapshot
-from identity_worker import request, serve
+from identity_worker import request, serve, safe_failure
 from identity_discovery import Discovery
 from reader import ReadError
 from test_managed_windows import PROCESS, MODULE, SHA
@@ -18,6 +18,34 @@ def command(seq, name='sample', **changes):
 
 
 class WorkerTests(unittest.TestCase):
+    def test_runtime_import_failure_is_reported_without_discovery_or_private_details(self):
+        events, discover = [], Mock()
+        with patch('identity_worker._RUNTIME_IMPORT_FAILED', True):
+            code = serve(metadata_path=None, input_stream=io.StringIO(command(0, 'initialize')),
+                emit=events.append, discover=discover)
+        self.assertEqual(code, 2)
+        self.assertEqual(events, [dict(v=1, token=TOKEN, seq=0, kind='unavailable', reason='runtime_failed')])
+        discover.assert_not_called()
+
+    def test_known_module_and_access_failures_are_distinct_from_unsupported_version(self):
+        for error, expected in [(ReadError('STATIC_PROGRAM_HASH_CHANGED'), 'module_unsupported'),
+                                (ReadError('PROCESS_QUERY_ACCESS_FAILED'), 'process_unavailable'),
+                                (ImportError('private module filename'), 'runtime_failed')]:
+            events = []
+            target = Discovery('found', PROCESS, MODULE, SHA)
+            code = serve(metadata_path=None, input_stream=io.StringIO(command(0, 'initialize')),
+                emit=events.append, discover=Mock(return_value=target), inspect=Mock(side_effect=error))
+            self.assertEqual(code, 2)
+            self.assertEqual(events[0]['reason'], expected)
+            self.assertNotIn(str(error), json.dumps(events))
+        self.assertIsNone(safe_failure(ReadError('private unexpected detail')))
+
+    def test_memory_read_access_failure_after_ready_reports_only_safe_current_sequence(self):
+        code, events = self.run_worker(command(0, 'initialize') + command(1),
+            Mock(side_effect=ReadError('PROCESS_READ_ACCESS_FAILED')))
+        self.assertEqual(code, 2)
+        self.assertEqual(events[-1], dict(v=1, token=TOKEN, seq=1, kind='unavailable', reason='process_unavailable'))
+
     def test_automatic_discovery_uses_current_metadata_without_saved_account_or_pid(self):
         events = []
         inspect, observe = Mock(return_value='profile'), Mock()

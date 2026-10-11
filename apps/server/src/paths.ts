@@ -1,13 +1,26 @@
-// 根目录与各路径。ROOT = 从本文件所在目录往上找、第一个包含「启动.bat」的目录
-// （仓库根和压缩包根都有这个文件）。开发时是仓库根，打包后是压缩包根。
-import { existsSync } from 'node:fs';
+// 根目录必须同时满足应用布局边界和启动标记；残缺副本不得继续向上借用另一安装。
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-function findRoot(): string {
-  let dir = dirname(fileURLToPath(import.meta.url));
+function isAppBoundary(dir: string): boolean {
+  // Source and packaged layouts are both authoritative, even if manifests are missing.
+  // The shipped package has app/version.json, not a root package.json.
+  if (existsSync(join(dir, 'apps', 'server')) || existsSync(join(dir, 'app', 'server'))
+    || existsSync(join(dir, 'pnpm-workspace.yaml'))) return true;
+  try {
+    const pkg: unknown = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+    return !!pkg && typeof pkg === 'object' && 'name' in pkg && pkg.name === 'classrep';
+  } catch { return false; }
+}
+
+export function findRoot(startDir = dirname(fileURLToPath(import.meta.url))): string {
+  let dir = resolve(startDir);
   for (let i = 0; i < 8; i++) {
-    if (existsSync(join(dir, '启动.bat'))) return dir;
+    if (isAppBoundary(dir)) {
+      if (existsSync(join(dir, '启动.bat'))) return dir;
+      throw new Error(`应用安装不完整：${dir} 缺少「启动.bat」，拒绝使用上级目录的数据；请恢复完整安装文件`);
+    }
     const parent = resolve(dir, '..');
     if (parent === dir) break;
     dir = parent;

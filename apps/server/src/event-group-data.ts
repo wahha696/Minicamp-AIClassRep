@@ -7,6 +7,12 @@ import type { EventStatus } from './types.js';
  */
 export function clearGroupEventData(groupId: string, markSeen: boolean): void {
   if (!db.isTransaction) throw new Error('GROUP_CLEAR_TRANSACTION_REQUIRED');
+  if (markSeen) {
+    db.prepare(`INSERT OR IGNORE INTO message_seen(group_id,message_id,sent_at)
+      SELECT group_id,json_extract(s.value,'$.message_id'),json_extract(s.value,'$.sent_at')
+      FROM assistant_suppressions a,json_each(a.sources) s WHERE a.group_id=?`).run(groupId);
+  }
+  db.prepare('DELETE FROM assistant_suppressions WHERE group_id=?').run(groupId);
   const events = db.prepare(`SELECT id,group_id,status FROM events e WHERE group_id=? OR EXISTS
     (SELECT 1 FROM event_sources s WHERE s.event_id=e.id AND s.group_id=?)`).all(groupId, groupId) as {
       id: number; group_id: string; status: EventStatus;

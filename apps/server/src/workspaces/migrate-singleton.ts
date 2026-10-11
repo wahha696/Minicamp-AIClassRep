@@ -6,7 +6,29 @@ import { WorkspaceRegistry, WorkspaceError } from './registry.js';
 
 const tables = ['groups', 'messages', 'events', 'event_sources', 'event_history', 'event_proposals',
   'todos', 'level_feedback', 'level_rules', 'courses', 'group_sync', 'kv', 'pipeline_failures',
-  'message_seen', 'wechat_delivery_batches', 'timetable_versions'];
+  'message_seen', 'wechat_delivery_batches', 'timetable_versions', 'assistant_memories', 'assistant_suppressions', 'course_completions'];
+
+/** The singleton merge runs before openDb migrates the destination. Older targets
+ * therefore need these known v11/v12 tables before a newer secondary library can
+ * be copied. Never execute schema SQL supplied by the source database. */
+function ensureAssistantTables(target: DatabaseSync): void {
+  target.exec(`
+    CREATE TABLE IF NOT EXISTS course_completions (
+      completion_key TEXT PRIMARY KEY, occurrence_id TEXT NOT NULL, date TEXT NOT NULL,
+      start INTEGER NOT NULL, end INTEGER NOT NULL, done INTEGER NOT NULL CHECK (done IN (0,1)), updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS assistant_memories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, action TEXT NOT NULL,
+      course TEXT NOT NULL DEFAULT '', event_types TEXT NOT NULL DEFAULT '[]',
+      enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS assistant_suppressions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, dedupe_key TEXT NOT NULL UNIQUE,
+      rule_id INTEGER NOT NULL, group_id TEXT NOT NULL, title TEXT NOT NULL,
+      course TEXT NOT NULL, sources TEXT NOT NULL, created_at INTEGER NOT NULL
+    );
+  `);
+}
 
 /** Runs before collectors start. Original libraries and checked SQLite snapshots remain on disk. */
 export function migrateToSingleton(registry: WorkspaceRegistry, roots: { spaces: string; accounts: string }, backupRoot: string): void {
@@ -46,6 +68,7 @@ export function migrateToSingleton(registry: WorkspaceRegistry, roots: { spaces:
   const destination = new DatabaseSync(targetPath);
   try {
     destination.exec('BEGIN IMMEDIATE');
+    ensureAssistantTables(destination);
     for (const space of spaces.filter(s => s.space_id !== target.space_id)) {
       const marker = `singleton_merged:${space.space_id}`;
       if (destination.prepare('SELECT 1 FROM kv WHERE key=?').get(marker)) continue;
@@ -69,6 +92,9 @@ function mergeLibrary(target: DatabaseSync, source: DatabaseSync, sourceId: stri
   const maps = new Map<string, Map<number, number>>();
   const sourceTables = new Set(source.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map(row => String(row.name)));
   if ([...sourceTables].some(table => !tables.includes(table))) throw new Error('WORKSPACE_MERGE_SCHEMA_UNSUPPORTED');
+  const orphanRules = new Map<number, number>();
+  let nextOrphanRule = Number(target.prepare(`SELECT MIN(rule_id) AS lowest FROM assistant_suppressions`).get()?.lowest ?? 0);
+  nextOrphanRule = Math.min(nextOrphanRule, 0) - 1;
   for (const table of tables) {
     if (!sourceTables.has(table)) continue;
     const columns = target.prepare(`PRAGMA table_info("${table}")`).all();
@@ -81,6 +107,24 @@ function mergeLibrary(target: DatabaseSync, source: DatabaseSync, sourceId: stri
       const oldId = typeof row.id === 'number' ? row.id : null;
       if (oldId !== null) delete row.id;
       if (table === 'wechat_delivery_batches' && row.destination === sourceId) row.destination = targetId;
+      if (table === 'assistant_suppressions') {
+        const oldRule = Number(row.rule_id);
+        if (!Number.isSafeInteger(oldRule)) throw new Error('WORKSPACE_MERGE_MEMORY_REFERENCE');
+        let mapped = maps.get('assistant_memories')?.get(oldRule);
+        // Deleting a preference deliberately preserves historical source evidence.
+        // Give such orphan references a negative, non-reusable ID instead of
+        // accidentally attributing them to a different rule in the primary DB.
+        if (mapped === undefined) {
+          mapped = orphanRules.get(oldRule);
+          if (mapped === undefined) { mapped = nextOrphanRule--; orphanRules.set(oldRule, mapped); }
+        }
+        row.rule_id = mapped;
+        // This audit fingerprint includes the old rule ID and event type, which
+        // cannot be reconstructed from a stored source snapshot. Namespace it
+        // by the source library; the per-library transaction marker makes retries
+        // idempotent even if registry consolidation fails after the data commit.
+        row.dedupe_key = createHash('sha256').update(JSON.stringify(['assistant-migration', sourceId, targetId, row.dedupe_key])).digest('hex');
+      }
       if (table === 'kv' && String(row.key).startsWith('wechat_selection_v1:')) {
         const state = JSON.parse(String(row.value));
         if (state.destination !== sourceId || typeof state.account !== 'string') throw new Error('WORKSPACE_MERGE_SELECTION_INVALID');
@@ -105,7 +149,7 @@ function mergeLibrary(target: DatabaseSync, source: DatabaseSync, sourceId: stri
           .get(...primary.map(key => row[key]!));
         if (existing) {
           // Workspace preferences use the primary library; both originals are backed up.
-          if ((table === 'kv' && !String(row.key).startsWith('wechat_selection_v1:'))
+          if (table === 'course_completions' || (table === 'kv' && !String(row.key).startsWith('wechat_selection_v1:'))
               || Object.keys(row).every(key => existing[key] === row[key])) continue;
           throw new Error(`WORKSPACE_MERGE_CONFLICT:${table}`);
         }

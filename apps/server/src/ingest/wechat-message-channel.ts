@@ -48,7 +48,7 @@ interface Options {
   signal: AbortSignal;
   proof(): Promise<WechatReadContext | null>;
   activated(group: string, activation: string): void;
-  receive(batch: unknown): WechatAcknowledgement;
+  receive(batch: unknown, command?: string): WechatAcknowledgement;
   launch?: (executable: string, args: string[]) => ChildProcessWithoutNullStreams;
 }
 interface Pending {
@@ -113,6 +113,13 @@ export class WechatMessageChannel {
       const schema = <T extends z.ZodRawShape>(shape: T) => z.object({
         v: z.literal(1), token: z.literal(this.token), seq: z.literal(pending.seq), ...shape,
       }).strict();
+      if (base.kind === 'heartbeat') {
+        schema({ kind: z.literal('heartbeat') }).parse(value);
+        if (!['history_start', 'history_next'].includes(pending.command)) throw new Error();
+        await this.proof();
+        if (!this.isClosed() && this.pending === pending) pending.timer.refresh();
+        return;
+      }
       if (base.kind === 'error') {
         const error = schema({ kind: z.literal('error'), reason: z.string().max(256),
           sink_phase: z.enum(['identity_recheck', 'receipt_commit', 'unknown']).optional(),
@@ -136,10 +143,11 @@ export class WechatMessageChannel {
         } else {
           if (!['tick', 'history_start', 'history_next'].includes(pending.command)) throw new Error();
           await this.proof();
-          payload = this.options.receive(item.payload);
+          payload = this.options.receive(item.payload, pending.command);
         }
         if (this.isClosed() || this.pending !== pending) return;
         pending.mid = item.mid;
+        pending.timer.refresh();
         this.write({ v: 1, token: this.token, seq: pending.seq, command: `${item.kind}_ack`, mid: item.mid, payload });
         return;
       }
@@ -243,13 +251,14 @@ export class WechatMessageChannel {
     return result;
   }, 120000); } // Delivery may first read contact names (bounded ~50s in the worker).
   status() { return this.command('status', {}, (value) => this.checkStatus(value)); }
-  history(group: string, days: 1 | 7 | 30, approveHistoryRead: boolean) {
+  history(group: string, days: 1 | 7 | 30, approveHistoryRead: boolean, nowSeconds?: number) {
     if (approveHistoryRead !== true || ![1, 7, 30].includes(days) || !this.options.groups.some((g) => g.group_id === group)) {
       return Promise.reject(new Error('WECHAT_HISTORY_CONSENT_OR_SCOPE_REQUIRED'));
     }
     // History captures/decrypts the source and delivers the saved page before
     // replying. It needs the full work budget, not the 45s status-query budget.
-    return this.command('history_start', { group_id: group, days, approve_history_read: true }, (v) => historySchema.parse(v), 180000);
+    return this.command('history_start', { group_id: group, days, approve_history_read: true,
+      ...(nowSeconds === undefined ? {} : { now_seconds: nowSeconds }) }, (v) => historySchema.parse(v), 180000);
   }
   historyNext() { return this.command('history_next', {}, (v) => historySchema.parse(v), 180000); }
   issues(group: string) {

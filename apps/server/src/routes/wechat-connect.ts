@@ -12,9 +12,12 @@ const messages: Record<string, string> = {
   WECHAT_CONNECTION_BUSY: '微信连接正在处理，请稍后重试',
   WECHAT_CONNECTION_ALREADY_OPEN: '微信已经连接，请先断开后再重连',
   WECHAT_NOT_RUNNING: '请先打开并登录电脑微信',
-  WECHAT_VERSION_UNSUPPORTED: '当前微信版本尚未通过兼容验证',
+  WECHAT_VERSION_UNSUPPORTED: '当前仅验证 Windows x64 微信 4.1.15.50 的指定构建，尚未实现 3.x 或其他 4.x 版本支持；请保留原有数据，等待兼容更新',
+  WECHAT_MODULE_UNSUPPORTED: '微信版本号匹配，但程序模块与已验证构建不一致；已停止读取，请保留数据并等待兼容更新',
+  WECHAT_PROCESS_UNAVAILABLE: '无法读取可用的微信主进程或程序模块；请确认微信已登录且与课代表在同一 Windows 用户下运行，再重连。这不一定是版本问题',
+  WECHAT_RUNTIME_FAILED: '微信读取组件或本机运行库加载失败；请重新运行启动脚本修复依赖后重试，无需更换微信版本',
   WECHAT_MULTIPLE_CLIENTS: '检测到多个微信实例，请保留要连接的一个后重试',
-  WECHAT_RUNTIME_MISSING: '微信组件不完整，请重新安装课代表后重试',
+  WECHAT_RUNTIME_MISSING: '课代表自带的 Python 或微信读取脚本缺失；请重新运行启动脚本修复依赖或重新完整安装，无需更换微信版本',
   WECHAT_IDENTITY_LOST: '微信登录状态无法确认，请检查电脑微信后重新连接',
 };
 

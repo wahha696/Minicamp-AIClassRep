@@ -1,36 +1,14 @@
-import { describe, expect, it } from 'vitest';
-import { TRACK_MAX_FAILS, TRACK_MAX_MS, syncLeft, trackStep } from './syncTrack';
-
-const T0 = 1_000_000;
-const track = (over = {}) => ({ total: 20, base: 5, startedAt: T0, fails: 0, ...over });
-
-describe('补拉后的整理进度', () => {
-  it('只能报告全局积压，不用基线相减猜本次任务进度', () => {
-    expect(syncLeft(track(), 25)).toBe(25);
-    expect(syncLeft(track(), 12)).toBe(12);
-    expect(syncLeft(track(), 40)).toBe(40);
-    expect(syncLeft(track(), 3)).toBe(3);
-  });
-
-  it('只有全局待整理为零才结束，不因旧积压消化而提前宣布完成', () => {
-    expect(trackStep(track({ base: 100 }), { pending: 20, llm: 'ok' }, T0 + 3000)).toEqual({ kind: 'progress', left: 20 });
-    expect(trackStep(track(), { pending: 0, llm: 'ok' }, T0 + 3000)).toEqual({ kind: 'done' });
-  });
-
-  it('还有剩余 → 显示剩余数', () => {
-    expect(trackStep(track(), { pending: 12, llm: 'ok' }, T0 + 3000)).toEqual({ kind: 'progress', left: 12 });
-  });
-
-  it('没配 AI → 停止跟踪，不再一直转圈', () => {
-    expect(trackStep(track(), { pending: 25, llm: 'unconfigured' }, T0 + 3000)).toMatchObject({ kind: 'stop' });
-  });
-
-  it('超过上限时间 → 停止跟踪', () => {
-    expect(trackStep(track(), { pending: 25, llm: 'ok' }, T0 + TRACK_MAX_MS)).toMatchObject({ kind: 'stop' });
-  });
-
-  it('读不到 health：偶尔失败沿用上次数字，连续失败到上限才停', () => {
-    expect(trackStep(track({ fails: 1 }), null, T0)).toEqual({ kind: 'progress', left: -1 });
-    expect(trackStep(track({ fails: TRACK_MAX_FAILS }), null, T0)).toMatchObject({ kind: 'stop' });
-  });
+import { expect, it } from 'vitest';
+import { syncLeft, trackStep } from './syncTrack';
+const track = { total: 20, base: 5, startedAt: 0, fails: 0 };
+it('全局待整理不能冒充本次任务完成量', () => { expect(syncLeft(track, 40)).toBe(40); expect(syncLeft(track, -1)).toBe(0); });
+it('有积压时持续等待，数小时后不硬截止', () => {
+  expect(trackStep(track, { pending: 12, llm: 'ok' }, 12 * 60 * 60_000)).toEqual({ kind: 'progress', left: 12 });
+  expect(trackStep(track, { pending: 0, llm: 'ok' }, 0)).toEqual({ kind: 'done' });
+});
+it('连接故障连续发生时仍重连，保留上次数字', () => {
+  expect(trackStep({ ...track, fails: 100 }, null, 0)).toEqual({ kind: 'progress', left: -1, message: '暂时看不到整理进度，正在重连后台' });
+});
+it('没有AI配置时说明原因，补回的消息不丢弃', () => {
+  expect(trackStep(track, { pending: 25, llm: 'unconfigured' }, 0)).toEqual({ kind: 'stop', message: '还没配置 AI，补回的消息暂不整理' });
 });

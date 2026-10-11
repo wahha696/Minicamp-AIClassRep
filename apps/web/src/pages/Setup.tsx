@@ -1,18 +1,13 @@
-// /setup 首次配置向导（修复计划 3.2）：两步 ——
-//   ① DeepSeek API Key（必填，保存后真实校验一次）
-//   ② 去 /connect 扫码登录 QQ
-// 快判走本地模型，无远端 key 步骤；Jev 已淘汰（仅保留服务端对照用接口）。
-// FirstRunGuard 在 first_run（没有 uin 或 DeepSeek 未配置）时把用户拦到这里。
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
+// 首次引导与设置共用 AI 表单，支持 DeepSeek 和自定义 OpenAI 兼容接口。
+import { useEffect, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getAiSettings, saveAiSettings, testAiSettings } from '../api/client';
-import { useToast } from '../components/Toast';
-import { toastError } from '../lib/errors';
+import { getAiSettings } from '../api/client';
+import AiSettingsCard from '../components/AiSettingsCard';
 import { SKIP_CONNECT_KEY, writeAccountFlag } from '../lib/status';
 import { useAccess } from '../components/ConnectStatus';
 
 export default function Setup() {
-  // 0 = 读取中：已配过 DeepSeek 时直接续到第 2 步，别让用户以为 key 没存上又被弹回来
+  // 0 = 读取中：已配过任意 AI 服务 时直接续到第 2 步，别让用户以为 key 没存上又被弹回来
   const [step, setStep] = useState<0 | 1 | 2>(0);
   const [tested, setTested] = useState(false);
   const { demoAvailable } = useAccess();
@@ -40,15 +35,11 @@ export default function Setup() {
       </header>
 
       {step === 1 && (
-        <KeyStep
-          title="① 填 DeepSeek API Key"
-          desc="群消息靠它整理成日程，必填。"
-          placeholder="sk-..."
-          helpUrl="https://platform.deepseek.com/api_keys"
-          helpText="在 DeepSeek 开放平台创建"
-          required
-          onDone={() => { setTested(true); setStep(2); }}
-        />
+        <section aria-label="配置 AI 服务">
+          <h2 className="mb-2 text-lg font-semibold text-slate-900">① 配置 AI 服务</h2>
+          <p className="mb-4 text-sm text-slate-500">选择 DeepSeek 或自定义 OpenAI 兼容服务，用于把群消息整理成日程。</p>
+          <AiSettingsCard submitLabel="测试并继续" onConfigured={() => { setTested(true); setStep(2); }} />
+        </section>
       )}
       {step === 2 && (
         <Panel>
@@ -82,95 +73,4 @@ export default function Setup() {
 
 function Panel({ children }: { children: ReactNode }) {
   return <div className="rounded-2xl border border-slate-200 bg-white px-6 py-8 shadow-sm">{children}</div>;
-}
-
-function KeyStep({
-  title,
-  desc,
-  placeholder,
-  helpUrl,
-  helpText,
-  required,
-  onDone,
-}: {
-  title: string;
-  desc: string;
-  placeholder: string;
-  helpUrl: string;
-  helpText: string;
-  required?: boolean;
-  onDone: () => void;
-}) {
-  const toast = useToast();
-  const [key, setKey] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ ok: boolean; error?: string } | null>(null);
-
-  async function onSubmit(ev: FormEvent) {
-    ev.preventDefault();
-    if (busy) return;
-    const k = key.trim();
-    if (!k) {
-      if (required) {
-        toast('这个 Key 必填，先填上再继续', 'error');
-        return;
-      }
-      onDone(); // 可选步骤空提交 = 跳过
-      return;
-    }
-    setBusy(true);
-    setResult(null);
-    try {
-      // 先存（格式校验在服务端做），再真实连一次——无效 key 不放行
-      const r = await testAiSettings('deepseek', k);
-      const res = r.deepseek ?? { ok: false, error: '没有返回结果' };
-      setResult(res);
-      if (res.ok) {
-        await saveAiSettings({ deepseek_key: k });
-        toast('鉴权检查通过，已保存');
-        onDone();
-      } else {
-        toast('检查未通过，未替换已保存配置', 'error');
-      }
-    } catch (e) {
-      toastError(toast, e);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Panel>
-      <h2 className="text-lg font-semibold text-slate-900">{title}</h2>
-      <p className="mt-1 text-sm text-slate-500">{desc}</p>
-      <form onSubmit={(e) => void onSubmit(e)} className="mt-5">
-        <input
-          type="password"
-          autoComplete="off"
-          autoFocus
-          value={key}
-          onChange={(e) => setKey(e.target.value)}
-          placeholder={placeholder}
-          aria-label={title}
-          className="w-full rounded-lg border border-slate-300 px-3 py-2.5 font-mono text-sm outline-none focus:border-slate-500"
-        />
-        <p className="mt-1.5 text-xs text-slate-400">
-          <a href={helpUrl} target="_blank" rel="noreferrer" className="underline">
-            {helpText}
-          </a>
-          。只保存在这台电脑上。
-        </p>
-        {result && !result.ok && <p className="mt-2 text-xs text-rose-600">{result.error ?? '连接失败'}</p>}
-        <div className="mt-5 flex items-center justify-end gap-3">
-          <button
-            type="submit"
-            disabled={busy}
-            className="rounded-xl bg-slate-900 px-6 py-2.5 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-60"
-          >
-            {busy ? '校验中…' : required ? '测试并继续' : key.trim() ? '测试并继续' : '下一步'}
-          </button>
-        </div>
-      </form>
-    </Panel>
-  );
 }

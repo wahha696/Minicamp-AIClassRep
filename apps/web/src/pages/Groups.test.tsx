@@ -8,12 +8,13 @@ import type { WechatCatalogDTO } from '../../../../shared/wechat';
 import { loadPresets, savePresets, wechatBusinessGroupId } from '../lib/groups';
 import type { GroupDTO } from '../api/types';
 import { setCurrentSpace } from '../lib/account';
-const api = vi.hoisted(() => ({ groups: vi.fn(), timetable: vi.fn(), patch: vi.fn(), clear: vi.fn(), retry: vi.fn(), toast: vi.fn(), select: vi.fn(), catalog: vi.fn(), intake: vi.fn(), start: vi.fn(), stop: vi.fn() }));
-vi.mock('../api/client', () => ({ getGroups: api.groups, getTimetable: api.timetable, patchGroup: api.patch, deleteGroupData: api.clear, retryGroup: api.retry, selectWechatGroups: api.select, getWechatIntake: api.intake, startWechatIntake: api.start, stopWechatIntake: api.stop }));
+const api = vi.hoisted(() => ({ health: vi.fn(), panel: vi.fn(), groups: vi.fn(), timetable: vi.fn(), patch: vi.fn(), clear: vi.fn(), retry: vi.fn(), toast: vi.fn(), select: vi.fn(), catalog: vi.fn(), intake: vi.fn(), start: vi.fn(), stop: vi.fn() }));
+vi.mock('../api/client', () => ({ getHealth: api.health, getGroups: api.groups, getTimetable: api.timetable, patchGroup: api.patch, deleteGroupData: api.clear, retryGroup: api.retry, selectWechatGroups: api.select, getWechatIntake: api.intake, startWechatIntake: api.start, stopWechatIntake: api.stop }));
 vi.mock('../components/Toast', () => ({ useToast: () => api.toast }));
 vi.mock('../components/SyncStatus', () => ({ default: () => null }));
 vi.mock('../components/ConnectStatus', () => ({ useConnectStatus: () => ({ data: { account_epoch: 'test', workspace: { wechat_available: true, current: { bindings: [{ platform: 'wechat', account_id: 'wxid_test' }] } } }, refresh: vi.fn() }) }));
-vi.mock('../components/WechatPanel', () => ({ default: ({ renderGroups }: { renderGroups: (catalog: WechatCatalogDTO, reload: () => Promise<void>) => React.ReactNode }) => {
+vi.mock('../components/WechatPanel', () => ({ default: ({ renderGroups, installationId }: { installationId?: string; renderGroups: (catalog: WechatCatalogDTO, reload: () => Promise<void>) => React.ReactNode }) => {
+  api.panel(installationId);
   const [catalog, setCatalog] = useState(api.catalog());
   return <div>微信选群与采集{renderGroups(catalog, async () => { setCatalog(api.catalog()); })}</div>;
 } }));
@@ -22,6 +23,7 @@ const group = (id: string, extra: Partial<GroupDTO> = {}): GroupDTO => ({ group_
   message_count: 0, event_count: 0, course_name: null, platform: 'qq', ...extra });
 beforeEach(() => {
   Object.values(api).forEach((fn) => fn.mockReset()); setCurrentSpace('synthetic-space'); localStorage.clear();
+  api.health.mockResolvedValue({ installation_id: 'synthetic-installation' });
   vi.stubGlobal('crypto', webcrypto);
   api.catalog.mockReturnValue({ catalog: null, selected_group_ids: [] });
   const idle = { state: 'idle', collecting: false, intake_id: null, scope: null, groups: [] };
@@ -34,6 +36,21 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); setCurrentSpace(undefined); vi.unstubAllGlobals(); });
 const page = () => render(<MemoryRouter><Groups /></MemoryRouter>);
+
+it('passes only the installation identity from health, after the initial check completes', async () => {
+  let finish!: (health: { installation_id: string }) => void;
+  api.health.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+  page(); fireEvent.click(screen.getByRole('tab', { name: '微信群' }));
+  expect(api.panel).not.toHaveBeenCalled();
+  await act(async () => { finish({ installation_id: 'server-installation' }); });
+  await waitFor(() => expect(api.panel).toHaveBeenCalledWith('server-installation'));
+});
+
+it('allows manual path use without a cache identity if the health read fails', async () => {
+  api.health.mockRejectedValue(new Error('unavailable'));
+  page(); fireEvent.click(screen.getByRole('tab', { name: '微信群' }));
+  await waitFor(() => expect(api.panel).toHaveBeenCalledWith(undefined));
+});
 
 it('distinguishes WeChat selection from actual collection and offers the connection entry', async () => {
   api.groups.mockResolvedValue([group('微信甲', { platform: 'wechat', enabled: true, collecting: false }),

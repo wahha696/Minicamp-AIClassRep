@@ -5,10 +5,12 @@ Selected receipt storage is intentional; keys/full source images are not saved.
 """
 import argparse
 import json
+import math
 import ntpath
 import re
 import sys
 import time
+import threading
 
 from catalog_worker import FAILURE_REASONS
 from cng import CryptoError
@@ -81,18 +83,34 @@ DELIVERY_TURNS = 10  # Bound each command, including draining pre-existing recei
 
 
 def serve(*, input_stream, emit, create_capture=selected_capture, create_intake=GroupMessageIntake,
-          create_decoder=PackagedZstdDecoder, clock=time.time, monotonic=time.monotonic):
+          create_decoder=PackagedZstdDecoder, clock=time.time, monotonic=time.monotonic, heartbeat_seconds=10):
     first = read(input_stream)
     if first is None: return 0
     envelope(first, None, 0, {'command', 'config'})
     if first['command'] != 'initialize': raise ReadError('MESSAGE_CHANNEL_REQUEST_INVALID')
     config, token, seq, mid = configuration(first['config']), first['token'], 0, 0
     intake = None
+    send_lock, heartbeat_stop = threading.RLock(), None
     def send(kind, **fields):
-        value = dict(v=1, token=token, seq=seq, kind=kind, **fields)
-        if len(json.dumps(value, ensure_ascii=False).encode('utf-8')) + 1 > LIMIT:
-            raise ReadError('MESSAGE_CHANNEL_LIMIT')
-        emit(value)
+        with send_lock:
+            if kind in ('result', 'error', 'stopped') and heartbeat_stop is not None:
+                heartbeat_stop.set()
+            value = dict(v=1, token=token, seq=seq, kind=kind, **fields)
+            if len(json.dumps(value, ensure_ascii=False).encode('utf-8')) + 1 > LIMIT:
+                raise ReadError('MESSAGE_CHANNEL_LIMIT')
+            emit(value)
+    def start_heartbeat():
+        nonlocal heartbeat_stop
+        stop = heartbeat_stop = threading.Event()
+        def pulse():
+            while not stop.wait(heartbeat_seconds):
+                with send_lock:
+                    if stop.is_set(): return
+                    try: send('heartbeat')
+                    except Exception:
+                        stop.set()
+                        return
+        threading.Thread(target=pulse, daemon=True, name='history-pipe-heartbeat').start()
     def exchange(kind, payload):
         nonlocal mid
         mid += 1
@@ -160,12 +178,19 @@ def serve(*, input_stream, emit, create_capture=selected_capture, create_intake=
                     send('result', result=dict(saved=saved, delivered=delivered, status=intake.status()))
                 elif name in ('history_start', 'history_next'):
                     if name == 'history_start':
-                        if (set(args) != {'group_id', 'days', 'approve_history_read'} or args['group_id'] not in names
+                        if (set(args) not in ({'group_id', 'days', 'approve_history_read'},
+                                             {'group_id', 'days', 'approve_history_read', 'now_seconds'}) or args['group_id'] not in names
                                 or type(args['days']) is not int or args['days'] not in (1, 7, 30)
                                 or args['approve_history_read'] is not True): raise ReadError('MESSAGE_CHANNEL_REQUEST_INVALID')
-                        history = dict(group=args['group_id'], days=args['days'], now_seconds=clock(), after=None)
+                        now_seconds = args.get('now_seconds', clock())
+                        if (type(now_seconds) not in (int, float) or not math.isfinite(now_seconds)
+                                or not 0 <= now_seconds <= (1 << 53) - 1): raise ReadError('MESSAGE_CHANNEL_REQUEST_INVALID')
+                        history = dict(group=args['group_id'], days=args['days'], now_seconds=now_seconds, after=None)
                         source_done = False
                     elif args or history is None: raise ReadError('MESSAGE_CHANNEL_REQUEST_INVALID')
+                    # Parent bounds silence/disconnection, not normal total work.
+                    # No payload, names or source contents travel in heartbeats.
+                    start_heartbeat()
                     inserted = 0
                     if not source_done:
                         page = intake.refresh_history(**history, limit=HISTORY_PAGE_LIMIT, approve_history_read=True)
@@ -201,6 +226,7 @@ def serve(*, input_stream, emit, create_capture=selected_capture, create_intake=
         send('error', reason=reason, **fields)
         return 2
     finally:
+        if heartbeat_stop is not None: heartbeat_stop.set()
         if intake is not None: intake.close()
 
 

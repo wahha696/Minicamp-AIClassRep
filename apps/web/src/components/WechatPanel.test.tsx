@@ -26,25 +26,112 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); localStorage.clear(); });
 function panel(props: Partial<Parameters<typeof WechatPanel>[0]> = {}) {
-  return render(<MemoryRouter><WechatPanel mode="groups" available local epoch="synthetic-epoch" account="wxid_synthetic" onChanged={vi.fn()} {...props} /></MemoryRouter>);
+  return render(<MemoryRouter><WechatPanel installationId="synthetic-installation" mode="groups" available local epoch="synthetic-epoch" account="wxid_synthetic" onChanged={vi.fn()} {...props} /></MemoryRouter>);
 }
+
+describe('微信连接诊断按实际原因区分', () => {
+  it.each([
+    ['WECHAT_VERSION_UNSUPPORTED', '此微信版本尚未适配'],
+    ['WECHAT_MODULE_UNSUPPORTED', '实际程序模块的构建或结构尚未通过验证'],
+    ['WECHAT_PROCESS_UNAVAILABLE', '尚不能判断版本是否兼容'],
+    ['WECHAT_RUNTIME_MISSING', '随应用提供的 Python 或读取程序缺失'],
+    ['WECHAT_RUNTIME_FAILED', 'Python 或本机原生依赖加载失败'],
+    ['WECHAT_NOT_RUNNING', '请先打开并登录微信'],
+    ['WECHAT_MULTIPLE_CLIENTS', '检测到多个微信实例'],
+    ['WECHAT_IDENTITY_LOST', '微信登录状态无法确认或已经变化'],
+    ['UNKNOWN_SYNTHETIC_FAILURE', '原因尚未确定'],
+  ])('连接页准确呈现 %s，不凭失败猜测版本', async (error, message) => {
+    api.status.mockResolvedValue({ ...connection, state: 'error', connection_id: null, error });
+    panel({ mode: 'connection' });
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain(message));
+    expect(api.connect).not.toHaveBeenCalled();
+    if (error !== 'WECHAT_VERSION_UNSUPPORTED') expect(screen.getByRole('alert').textContent).not.toContain('此微信版本尚未适配');
+  });
+
+  it('群管理同样展示连接故障，不能只叫用户重新登录', async () => {
+    api.status.mockResolvedValue({ ...connection, state: 'error', connection_id: null, error: 'WECHAT_RUNTIME_FAILED' });
+    panel(); await screen.findByText('微信尚未连接。');
+    expect(screen.getByRole('alert').textContent).toContain('原生依赖加载失败');
+  });
+
+  it.each([
+    ['WECHAT_CATALOG_CONTACT_SCOPE_ACCOUNT_NOT_FOUND', '未找到当前微信账号'],
+    ['WECHAT_CATALOG_SNAPSHOT_LOCK_BUSY', '正在整理本地数据'],
+    ['WECHAT_CATALOG_WORKER_FAILED', '群列表读取组件未能完成'],
+    ['UNKNOWN_SYNTHETIC_CATALOG', '原因尚未确定'],
+  ])('群列表故障 %s 不统一归咎存储位置', async (error, message) => {
+    api.groups.mockResolvedValue({ ...catalog, state: 'error', error });
+    panel(); await waitFor(() => expect(screen.getByRole('alert').textContent).toContain(message));
+    expect(api.refresh).not.toHaveBeenCalled();
+  });
+
+  it('兼容说明同时解释旧版本、相同版本的不同构建及非版本故障', async () => {
+    panel({ mode: 'connection' }); await screen.findByText('微信账号已识别');
+    expect(screen.getByText(/读取适配基线：4.1.15.50 指定构建/)).toBeTruthy();
+    expect(screen.getByText(/旧版不一定更兼容/)).toBeTruthy();
+    expect(screen.getByText(/版本号相同也可能有不同构建/)).toBeTruthy();
+    expect(screen.getByText(/普通连接失败不等于版本不支持/)).toBeTruthy();
+  });
+});
 
 describe('local WeChat path preference (synthetic accounts only)', () => {
   const pathA = 'E:\\Synthetic A\\xwechat_files';
   const pathB = 'D:\\Synthetic B\\xwechat_files';
   const input = () => screen.getByLabelText('微信存储位置') as HTMLInputElement;
   const renderAccount = (account: string | undefined, epoch = 'synthetic-epoch') =>
-    <MemoryRouter><WechatPanel mode="groups" available local epoch={epoch} account={account} onChanged={vi.fn()} /></MemoryRouter>;
+    <MemoryRouter><WechatPanel installationId="synthetic-installation" mode="groups" available local epoch={epoch} account={account} onChanged={vi.fn()} /></MemoryRouter>;
+
+  it('does not migrate an old account-only path or read another installation on the same browser origin', async () => {
+    const legacyKey = 'classrep.wechat.data-root.v1:wxid_synthetic';
+    localStorage.setItem(legacyKey, pathA);
+    saveWechatDataRoot('other-installation', 'wxid_synthetic', pathB);
+    const view = panel(); await screen.findByLabelText('微信存储位置');
+    expect(input().value).toBe('');
+    expect(localStorage.getItem(legacyKey)).toBe(pathA);
+    fireEvent.change(input(), { target: { value: pathA } });
+    expect(loadWechatDataRoot('synthetic-installation', 'wxid_synthetic')).toBe(pathA);
+    expect(loadWechatDataRoot('other-installation', 'wxid_synthetic')).toBe(pathB);
+    view.unmount(); panel({ installationId: 'other-installation' }); await screen.findByLabelText('微信存储位置');
+    expect(input().value).toBe(pathB);
+    expect(screen.getByText(/已回填此浏览器为当前安装和账号保存的路径/)).toBeTruthy();
+    expect((screen.getByLabelText('允许读取微信群目录') as HTMLInputElement).checked).toBe(false);
+    expect(api.refresh).not.toHaveBeenCalled();
+  });
+
+  it('does not use a fallback cache when the installation identity is unavailable', async () => {
+    saveWechatDataRoot('synthetic-installation', 'wxid_synthetic', pathA);
+    panel({ installationId: undefined }); await screen.findByLabelText('微信存储位置');
+    expect(input().value).toBe('');
+    fireEvent.change(input(), { target: { value: pathB } });
+    expect(loadWechatDataRoot(undefined, 'wxid_synthetic')).toBe('');
+    expect(loadWechatDataRoot('synthetic-installation', 'wxid_synthetic')).toBe(pathA);
+    expect(localStorage.length).toBe(1);
+    expect(screen.getByText(/路径不会保存/)).toBeTruthy();
+  });
+
+  it('clears only the current installation/account memory and revokes the draft read consent', async () => {
+    saveWechatDataRoot('synthetic-installation', 'wxid_synthetic', pathA);
+    saveWechatDataRoot('other-installation', 'wxid_synthetic', pathB);
+    panel(); await screen.findByLabelText('微信存储位置');
+    fireEvent.click(screen.getByText('更新群列表'));
+    fireEvent.click(screen.getByLabelText('允许读取微信群目录'));
+    fireEvent.click(screen.getByRole('button', { name: '清除当前路径记忆' }));
+    expect(input().value).toBe('');
+    expect(loadWechatDataRoot('synthetic-installation', 'wxid_synthetic')).toBe('');
+    expect(loadWechatDataRoot('other-installation', 'wxid_synthetic')).toBe(pathB);
+    expect((screen.getByLabelText('允许读取微信群目录') as HTMLInputElement).checked).toBe(false);
+    expect(api.refresh).not.toHaveBeenCalled();
+  });
 
   it('restores only the identified account when its binding arrives after the initial render', async () => {
-    saveWechatDataRoot('wxid_synthetic', pathA);
-    saveWechatDataRoot('wxid_other', pathB);
+    saveWechatDataRoot('synthetic-installation', 'wxid_synthetic', pathA);
+    saveWechatDataRoot('synthetic-installation', 'wxid_other', pathB);
     const view = panel({ account: undefined });
     await screen.findByLabelText('微信存储位置');
     expect(input().value).toBe('');
     fireEvent.change(input(), { target: { value: 'C:\\Unknown account\\xwechat_files' } });
-    expect(loadWechatDataRoot('wxid_synthetic')).toBe(pathA);
-    expect(loadWechatDataRoot('wxid_other')).toBe(pathB);
+    expect(loadWechatDataRoot('synthetic-installation', 'wxid_synthetic')).toBe(pathA);
+    expect(loadWechatDataRoot('synthetic-installation', 'wxid_other')).toBe(pathB);
     view.rerender(renderAccount('wxid_other'));
     await screen.findByLabelText('微信存储位置');
     expect(input().value).toBe(pathB);
@@ -53,7 +140,7 @@ describe('local WeChat path preference (synthetic accounts only)', () => {
   });
 
   it('restores through logout and relogin rerenders even when the account binding arrives last', async () => {
-    saveWechatDataRoot('wxid_synthetic', pathA);
+    saveWechatDataRoot('synthetic-installation', 'wxid_synthetic', pathA);
     const view = panel();
     await screen.findByLabelText('微信存储位置');
     fireEvent.click(screen.getByLabelText('允许读取微信群目录'));
@@ -74,8 +161,8 @@ describe('local WeChat path preference (synthetic accounts only)', () => {
   });
 
   it.each(['source-first', 'binding-first'] as const)('keeps paths scoped while account and source updates arrive %s', async (order) => {
-    saveWechatDataRoot('wxid_synthetic', pathA);
-    saveWechatDataRoot('wxid_other', pathB);
+    saveWechatDataRoot('synthetic-installation', 'wxid_synthetic', pathA);
+    saveWechatDataRoot('synthetic-installation', 'wxid_other', pathB);
     vi.useFakeTimers();
     let view!: ReturnType<typeof panel>;
     await act(async () => { view = panel(); });
@@ -96,7 +183,7 @@ describe('local WeChat path preference (synthetic accounts only)', () => {
       await act(() => vi.advanceTimersByTimeAsync(2000));
     }
     expect(input().value).toBe(pathB);
-    expect(loadWechatDataRoot('wxid_synthetic')).toBe(pathA);
+    expect(loadWechatDataRoot('synthetic-installation', 'wxid_synthetic')).toBe(pathA);
     expect(api.refresh).not.toHaveBeenCalled();
     view.unmount();
     expect(vi.getTimerCount()).toBe(0);
@@ -131,17 +218,17 @@ describe('local WeChat path preference (synthetic accounts only)', () => {
   it('isolates accounts even within the same workspace and epoch', async () => {
     const view = panel(); await screen.findByLabelText('微信存储位置');
     fireEvent.change(input(), { target: { value: pathA } });
-    const renderAccount = (account: string) => <MemoryRouter><WechatPanel mode="groups" available local epoch="synthetic-epoch" account={account} onChanged={vi.fn()} /></MemoryRouter>;
+    const renderAccount = (account: string) => <MemoryRouter><WechatPanel installationId="synthetic-installation" mode="groups" available local epoch="synthetic-epoch" account={account} onChanged={vi.fn()} /></MemoryRouter>;
     view.rerender(renderAccount('wxid_other')); await screen.findByLabelText('微信存储位置');
     expect(input().value).toBe('');
     fireEvent.change(input(), { target: { value: pathB } });
     view.rerender(renderAccount('wxid_synthetic')); await screen.findByLabelText('微信存储位置');
     expect(input().value).toBe(pathA);
-    expect(loadWechatDataRoot('wxid_other')).toBe(pathB); expect(api.refresh).not.toHaveBeenCalled();
+    expect(loadWechatDataRoot('synthetic-installation', 'wxid_other')).toBe(pathB); expect(api.refresh).not.toHaveBeenCalled();
   });
 
   it('keeps edits through polling and sends the edited path only on an explicit read', async () => {
-    saveWechatDataRoot('wxid_synthetic', pathA); vi.useFakeTimers();
+    saveWechatDataRoot('synthetic-installation', 'wxid_synthetic', pathA); vi.useFakeTimers();
     await act(async () => { panel(); });
     fireEvent.change(input(), { target: { value: pathB } });
     await act(() => vi.advanceTimersByTimeAsync(2000));
@@ -154,21 +241,21 @@ describe('local WeChat path preference (synthetic accounts only)', () => {
   });
 
   it('rejects malformed paths without replacing the saved path; clearing forgets it', async () => {
-    saveWechatDataRoot('wxid_synthetic', pathA);
+    saveWechatDataRoot('synthetic-installation', 'wxid_synthetic', pathA);
     const view = panel(); await screen.findByLabelText('微信存储位置');
     fireEvent.click(screen.getByText('更新群列表'));
     fireEvent.change(input(), { target: { value: 'relative\\xwechat_files' } });
     fireEvent.click(screen.getByLabelText('允许读取微信群目录'));
     expect((screen.getByRole('button', { name: '读取群列表' }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByRole('alert').textContent).toContain('完整 Windows 路径');
-    expect(loadWechatDataRoot('wxid_synthetic')).toBe(pathA);
+    expect(loadWechatDataRoot('synthetic-installation', 'wxid_synthetic')).toBe(pathA);
     fireEvent.change(input(), { target: { value: '' } }); view.unmount();
     panel(); await screen.findByLabelText('微信存储位置');
     expect(input().value).toBe(''); expect(api.refresh).not.toHaveBeenCalled();
   });
 
   it('ignores corrupted storage and does not use a shared fallback for an unknown account', async () => {
-    saveWechatDataRoot('wxid_synthetic', pathA);
+    saveWechatDataRoot('synthetic-installation', 'wxid_synthetic', pathA);
     localStorage.setItem(localStorage.key(0)!, '{"invalid":true}');
     const view = panel(); await screen.findByLabelText('微信存储位置'); expect(input().value).toBe('');
     view.unmount(); localStorage.clear(); panel({ account: undefined }); await screen.findByLabelText('微信存储位置');
@@ -196,7 +283,7 @@ describe('local WeChat path preference (synthetic accounts only)', () => {
     fireEvent.click(screen.getByRole('button', { name: '读取群列表' }));
     await screen.findByRole('alert'); expect(input().disabled).toBe(false);
     fireEvent.change(input(), { target: { value: pathB } });
-    expect(loadWechatDataRoot('wxid_synthetic')).toBe(pathB);
+    expect(loadWechatDataRoot('synthetic-installation', 'wxid_synthetic')).toBe(pathB);
     expect((screen.getByLabelText('允许读取微信群目录') as HTMLInputElement).checked).toBe(false);
     expect(api.refresh).toHaveBeenCalledOnce();
   });

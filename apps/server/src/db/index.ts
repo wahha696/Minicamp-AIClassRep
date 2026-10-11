@@ -184,6 +184,36 @@ CREATE TABLE IF NOT EXISTS kv (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS assistant_memories (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  text TEXT NOT NULL,
+  action TEXT NOT NULL,
+  course TEXT NOT NULL DEFAULT '',
+  event_types TEXT NOT NULL DEFAULT '[]',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS course_completions (
+  completion_key TEXT PRIMARY KEY,
+  occurrence_id TEXT NOT NULL,
+  date TEXT NOT NULL,
+  start INTEGER NOT NULL,
+  end INTEGER NOT NULL,
+  done INTEGER NOT NULL CHECK (done IN (0,1)),
+  updated_at INTEGER NOT NULL
+);
+-- Explicit user rules never delete chat: retain a source snapshot for each excluded candidate.
+CREATE TABLE IF NOT EXISTS assistant_suppressions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  dedupe_key TEXT NOT NULL UNIQUE,
+  rule_id INTEGER NOT NULL,
+  group_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  course TEXT NOT NULL,
+  sources TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
 -- 逐群失败与暂停状态持久化：重启不能绕过用户选择的连续失败上限。
 -- 只保存失败分类，不保存 AI 原始响应、错误正文或凭据。
 CREATE TABLE IF NOT EXISTS pipeline_failures (
@@ -213,8 +243,8 @@ CREATE TABLE IF NOT EXISTS wechat_delivery_batches (
 );
 `;
 
-/** v10 combines source provenance, pending retention and processing diagnostics. */
-export const SCHEMA_VERSION = 10;
+/** v12 adds current-space, reversible completion of individual course occurrences. */
+export const SCHEMA_VERSION = 12;
 
 
 function schemaVersion(): number {

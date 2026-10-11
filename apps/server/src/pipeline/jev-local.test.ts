@@ -6,6 +6,7 @@ import { env } from '../env.js';
 import type { Message } from '../types.js';
 import {
   getFastjudgePython,
+  ensureFastjudgeRuntime,
   getFastjudgeRoot,
   getLocalModelPath,
   localJevAvailable,
@@ -36,6 +37,21 @@ afterEach(() => {
 });
 
 describe('jev-local paths (Windows-first, fail-closed)', () => {
+  it('启动器已报告 Python 失败时不可用且不再次探测或下载；成功重启可恢复', () => {
+    const previous = process.env.CLASSREP_PYTHON_SETUP_FAILED;
+    try {
+      process.env.CLASSREP_PYTHON_SETUP_FAILED = '1';
+      expect(localJevAvailable()).toBe(false);
+      expect(localJevReady()).toBe(false);
+      ensureFastjudgeRuntime(); // Must return before spawning Python or an installer.
+      delete process.env.CLASSREP_PYTHON_SETUP_FAILED;
+      expect(localJevAvailable()).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.CLASSREP_PYTHON_SETUP_FAILED;
+      else process.env.CLASSREP_PYTHON_SETUP_FAILED = previous;
+    }
+  });
+
   it('仓库根带 classrep-fastjudge 时免配置自动启用（约定路径）', () => {
     // 工作区已随仓库分发：不配置任何 env 也应解析到 <repo>/classrep-fastjudge
     expect(getFastjudgeRoot()).toMatch(/classrep-fastjudge$/);
@@ -110,6 +126,9 @@ describe('spawnEnv encoding (zh-CN Windows)', () => {
 
 function makeFakeRoot(mode: 'ok' | 'short'): { dir: string; marker: string } {
   const dir = mkdtempSync(join(tmpdir(), 'fj-fake-'));
+  // This fake Python worker is CommonJS even when TEMP is inside an ESM checkout.
+  // Without its own boundary Node rejects the .py extension before reading stdin.
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ type: 'commonjs' }));
   const marker = join(dir, 'spawns.log');
   mkdirSync(join(dir, 'src'), { recursive: true });
   mkdirSync(join(dir, 'models'), { recursive: true });

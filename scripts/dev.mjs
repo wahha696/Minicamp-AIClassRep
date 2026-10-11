@@ -15,11 +15,14 @@ import {
   startServerChild,
 } from './lib/start-server.mjs';
 import { webBuildFresh } from './lib/build-cache.mjs';
-import { corepackEnv, resolvePnpm } from './lib/pnpm.mjs';
+import { resolvePnpm } from './lib/pnpm.mjs';
+import { checkNodeRuntime } from './lib/node-runtime.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const noUpdate = process.argv.includes('--no-update');
 const log = (msg) => console.log(msg);
+const nodeCheck = await checkNodeRuntime();
+if (!nodeCheck.ok) { console.error(nodeCheck.error); process.exit(1); }
 
 // pnpm 解析（D02，和 bootstrap.mjs 同一套）：PATH 里的坏 shim 会探活失败自动跳过
 // → corepack 装到 .corepack/bin → 再不行自动下载 pnpm dist 到 .pnpm-dist/ 用 node 跑。
@@ -33,7 +36,7 @@ function runPnpm(args) {
     stdio: 'inherit',
     shell: pnpm.shell,
     windowsHide: true,
-    env: { ...process.env, ...corepackEnv() },
+    env: pnpm.env,
   });
   return r.status === 0;
 }
@@ -98,7 +101,13 @@ async function start() {
 
   log('[3/3] 启动后端，几秒后自动打开浏览器...');
   log('（关闭此窗口 / 按 Ctrl+C 即退出）');
-  const { child: server, launchId } = startServerChild({ root: ROOT, watch: true });
+  if (!pnpm) { console.error('pnpm 不可用，请使用启动.bat 检查依赖。'); process.exit(1); }
+  const { child: server, launchId } = startServerChild({ root: ROOT, watch: true, pnpm });
+  server.on('error', error => { console.error(`后端无法启动：${error.message}`); process.exit(1); });
+  server.on('exit', (code) => {
+    log(`后端已退出（${code ?? 1}）`);
+    process.exit(code ?? 1);
+  });
 
   const port = await findHealthyPort(60_000, launchId);
   if (port !== null) {
@@ -108,10 +117,6 @@ async function start() {
     log('本次后端 60 秒内没有就绪，请查看启动日志中的地址或错误。');
   }
 
-  server.on('exit', (code) => {
-    log(`后端已退出（${code ?? 0}）`);
-    process.exit(code ?? 0);
-  });
 }
 
 if (!noUpdate && updateToLatest()) {

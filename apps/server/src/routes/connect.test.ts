@@ -16,7 +16,7 @@ const { logoutMock, restartMock, isOnlineMock, syncHistoryMock, getConnectStatus
 
 vi.mock('../napcat/index.js', () => ({ restartNapcat: restartMock, logoutNapcat: logoutMock }));
 vi.mock('../napcat/onebot.js', () => ({ isOnline: isOnlineMock }));
-vi.mock('../ingest/history.js', () => ({ syncHistory: syncHistoryMock }));
+vi.mock('../ingest/history.js', () => ({ startHistorySync: syncHistoryMock }));
 vi.mock('../env.js', async (original) => {
   const actual = await original<typeof import('../env.js')>();
   return { ...actual, env: { ...actual.env, DEMO_MODE: true } };
@@ -221,25 +221,25 @@ describe('POST /api/sync', () => {
     expect(syncHistoryMock).not.toHaveBeenCalled();
   });
 
-  it('online → 返回 { groups, messages }', async () => {
+  it('online → 立即返回 202 和任务引用，不持有整个读取过程', async () => {
     isOnlineMock.mockReturnValue(true);
-    syncHistoryMock.mockResolvedValue({ groups: 3, messages: 57 });
+    syncHistoryMock.mockReturnValue({ id: 'synthetic-history-job', status: 'running', messages: 0 });
     const res = await app().request('/api/sync', { method: 'POST' });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ groups: 3, messages: 57 });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ job: { id: 'synthetic-history-job', status: 'running', messages: 0 } });
     expect(syncHistoryMock).toHaveBeenCalledOnce();
     expect(syncHistoryMock).toHaveBeenCalledWith(7); // 缺省 7 天
   });
 
   it.each([1, 7, 30] as const)('days=%s 透传给 syncHistory', async (days) => {
     isOnlineMock.mockReturnValue(true);
-    syncHistoryMock.mockResolvedValue({ groups: 0, messages: 0 });
+    syncHistoryMock.mockReturnValue({ id: 'synthetic-history-job', status: 'running' });
     const res = await app().request('/api/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ days }),
     });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(202);
     expect(syncHistoryMock).toHaveBeenCalledWith(days);
   });
 
@@ -257,7 +257,7 @@ describe('POST /api/sync', () => {
 
   it('syncHistory 抛错 → 500 + 中文 error', async () => {
     isOnlineMock.mockReturnValue(true);
-    syncHistoryMock.mockRejectedValue(new Error('boom'));
+    syncHistoryMock.mockImplementation(() => { throw new Error('boom'); });
     const res = await app().request('/api/sync', { method: 'POST' });
     expect(res.status).toBe(500);
     const body = (await res.json()) as { error: string };

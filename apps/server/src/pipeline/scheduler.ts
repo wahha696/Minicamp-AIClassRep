@@ -9,6 +9,7 @@
 //   · 其余（Jev 拿不准）：等 UNCERTAIN_WAIT_MS 攒一攒上下文再交给 LLM。
 // Jev 分数在攒批期间就提前打好（triage），处理批次时直接复用，不再多等一次 Jev。
 import { accountDataState } from '../accounts.js';
+import { applyAssistantMemoryRules } from '../assistant-memory.js';
 import { desktopPipelineEpoch, desktopPipelinePaused } from './activity.js';
 import { beginTx, commitTx, db, dbGeneration, onAccountSwitch, rollbackTx } from '../db/index.js';
 import type { Message, ProcessingFailureReason } from '../types.js';
@@ -132,6 +133,7 @@ const reconcileStage: Stage = (b) => {
   // removed evidence from the batch's in-memory copy when the response arrives.
   const present = db.prepare('SELECT 1 FROM messages WHERE group_id=? AND message_id=?');
   if (b.messages.some(message => !present.get(b.groupId, message.message_id))) { b.discarded = true; return; }
+  b.extracted = applyAssistantMemoryRules(b.groupId, b.extracted, b.candidates);
   applyEvents(b.groupId, b.extracted, b.candidates);
 };
 
@@ -247,6 +249,11 @@ async function processBatch(g: PendingGroup, expectedGeneration: number): Promis
               SELECT 1 FROM event_sources es JOIN events e ON e.id = es.event_id
                WHERE COALESCE(NULLIF(es.group_id,''),e.group_id) = messages.group_id AND es.message_id = messages.message_id
             ) THEN 'event_recognized'
+            WHEN EXISTS (
+              SELECT 1 FROM assistant_suppressions s, json_each(s.sources) source
+               WHERE s.group_id = messages.group_id
+                 AND json_extract(source.value, '$.message_id') = messages.message_id
+            ) THEN 'user_preference'
             ELSE 'llm_no_event'
           END
         WHERE group_id = ? AND message_id IN (SELECT value FROM json_each(?))`,

@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import WechatPanel from '../components/WechatPanel';
 import { useConnectStatus } from '../components/ConnectStatus';
-import { deleteGroupData, getGroups, getTimetable, patchGroup, retryGroup } from '../api/client';
+import { deleteGroupData, getGroups, getHealth, getTimetable, patchGroup, retryGroup } from '../api/client';
 import type { GroupDTO } from '../api/types';
 import type { WechatCatalogDTO } from '../../../../shared/wechat';
 import { getWechatIntake } from '../api/client';
@@ -40,6 +40,16 @@ export default function Groups() {
   const platform = params.get('platform') === 'wechat' ? 'wechat' : params.get('platform') === 'other' ? 'other' : 'qq';
   const { data: connection, refresh } = useConnectStatus();
   const workspace = connection?.workspace;
+  const [installationId, setInstallationId] = useState<string>();
+  const [installationChecked, setInstallationChecked] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void getHealth().then(health => {
+      if (active && typeof health.installation_id === 'string' && health.installation_id) setInstallationId(health.installation_id);
+    }).catch(() => { /* Manual entry remains available without a storage identity. */ })
+      .finally(() => { if (active) setInstallationChecked(true); });
+    return () => { active = false; };
+  }, []);
   return <section>
     <h1 className="text-2xl font-bold text-slate-900 sm:text-3xl">群管理</h1>
     <div role="tablist" aria-label="群来源" className="mt-5 flex gap-6 border-b border-slate-200">
@@ -47,9 +57,10 @@ export default function Groups() {
         <button key={id} role="tab" aria-selected={platform === id} onClick={() => setParams({ platform: id })}
           className={`border-b-2 px-1 py-3 text-sm ${platform === id ? 'border-blue-600 font-semibold text-blue-700' : 'border-transparent text-slate-500'}`}>{label}</button>)}
     </div>
-    {platform === 'wechat' && (workspace && connection ? <WechatPanel mode="groups" available={workspace.wechat_available}
+    {platform === 'wechat' && (workspace && connection && installationChecked ? <WechatPanel mode="groups" available={workspace.wechat_available}
       unavailableReason={workspace.wechat_unavailable_reason} local={['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname)}
       epoch={connection.account_epoch}
+      installationId={installationId}
         account={workspace.current?.bindings.find(b => b.platform === 'wechat')?.account_id}
       onChanged={refresh} renderGroups={(catalog, reload) => <GroupList platform="wechat" wechat={{ catalog, reload,
         epoch: connection.account_epoch, account: workspace.current?.bindings.find(b => b.platform === 'wechat')?.account_id }} />} />

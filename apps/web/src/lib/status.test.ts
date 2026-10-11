@@ -20,6 +20,14 @@ it('未完成账号连接显示连接入口，不要求选择空间；连接页�
 });
 
 describe('状态灯', () => {
+  it('微信尚未采集与 QQ 未连接一样显示红色，仅正在采集时为绿色', () => {
+    for (const state of ['idle', 'opening', 'error', 'collecting'] as const) {
+      const light = lightsFromHealth(health({ wechat: state })).find((l) => l.key === 'wechat');
+      expect(light?.color).toBe(state === 'collecting' ? 'green' : 'red');
+      expect(light?.tip).toContain('微信采集');
+    }
+  });
+
   it('未启用快判：前三个绿，快判灰色', () => {
     const l = lightsFromHealth(health());
     expect(l.map((x) => [x.label, x.color])).toEqual([

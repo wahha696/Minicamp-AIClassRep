@@ -29,15 +29,25 @@ interface Props {
   itemsByDay: WeekItem[][];
   onPick: (id: number) => void;
   readonly?: boolean;
+  completionFor?: (occurrence: Occurrence) => CourseCompletionControl;
+}
+export interface CourseCompletionControl {
+  done: boolean;
+  busy?: boolean;
+  disabled?: boolean;
+  error?: string;
+  onToggle?: () => void;
 }
 export function CourseCard({
   occurrence: o,
   conflicts = [],
   names = new Map(),
+  completion,
 }: {
   occurrence: Occurrence;
   conflicts?: Conflict[];
   names?: Map<string, string>;
+  completion?: CourseCompletionControl;
 }) {
   const c = o.course;
   const relevant = conflicts.filter((x) => x.left === o.id || x.right === o.id);
@@ -47,6 +57,7 @@ export function CourseCard({
     >
       <summary className="cursor-pointer break-words font-medium leading-relaxed">
         {c.name}
+        {completion?.done && <span className="ml-1 rounded bg-emerald-100 px-1.5 py-0.5 text-emerald-800">本次已完成</span>}
         <span className="mt-1 block font-normal">
           {hhmm(o.start)}–{hhmm(o.end)} · {periods(c).join('–')} 节
         </span>
@@ -62,6 +73,15 @@ export function CourseCard({
         <p>
           第 {c.weeks.join(',')} 周 · {o.date}
         </p>
+        {completion && <div className="space-y-1 border-t border-slate-200 pt-2">
+          <p className="text-slate-600">仅记录 {o.date} {hhmm(o.start)}–{hhmm(o.end)} 这一课次，不改变整学期或未来课程。</p>
+          {completion.onToggle && <button type="button" disabled={completion.busy || completion.disabled}
+            aria-label={`${completion.done ? '撤销完成' : '完成这节课'}：${c.name} ${o.date} ${hhmm(o.start)}`}
+            className="rounded border border-slate-300 bg-white px-2 py-1.5 text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+            onClick={completion.onToggle}>{completion.busy ? '正在保存…' : completion.done ? '撤销本次完成' : '标记这节课已完成'}</button>}
+          {completion.onToggle && completion.disabled && !completion.busy && !completion.error && <p className="text-slate-500">正在核对课程完成状态，核对成功后可操作。</p>}
+          {completion.error && <p role="alert" className="text-rose-700">{completion.error}</p>}
+        </div>}
         {o.exception && (
           <p>
             本次例外：{o.exception.kind} {o.exception.note}
@@ -102,6 +122,7 @@ export default function WeekGrid({
   allEvents,
   onPick,
   readonly,
+  completionFor,
 }: Props) {
   const [list, setList] = useState(false);
   if (!days.length) return null;
@@ -125,9 +146,10 @@ export default function WeekGrid({
     ...sourceEvents.map((e) => [`event-${e.id}`, e.title] as const),
   ]);
   const inDay = (d: GridDay) => occurrences.filter((o) => o.start < d.from + DAY && o.end > d.from);
-  const render = (o: Occurrence) => (
-    <CourseCard key={o.id} occurrence={o} conflicts={conflicts} names={names} />
-  );
+  const render = (o: Occurrence) => {
+    const completion = completionFor?.(o);
+    return <CourseCard key={o.id} occurrence={o} conflicts={conflicts} names={names} completion={readonly && completion ? { ...completion, onToggle: undefined } : completion} />;
+  };
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2 text-sm">

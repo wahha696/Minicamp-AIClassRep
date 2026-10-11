@@ -205,7 +205,7 @@ export default function TimetableEditor({
   useEffect(() => {
     if (jumpCourse) revealEditor(`${editorId}-course-${jumpCourse}`);
   }, [jumpCourse, editorId]);
-  const [start, setStart] = useState(parsed.semesterStart || saved?.semester_start || '');
+  const [start, setStart] = useState(parsed.semesterStart || saved?.semester_start || '2026-09-07');
   const [config, setConfig] = useState({
     term_name: saved?.term_name ?? '',
     school: saved?.school ?? '',

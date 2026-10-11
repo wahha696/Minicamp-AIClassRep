@@ -9,6 +9,8 @@ const ACCOUNT_DATA_PREFIXES = [
   '/api/demo',
   '/api/import',
   '/api/sync',
+  '/api/history-jobs',
+  '/api/assistant',
   '/api/todos',
   '/api/timetable',
   '/api/settings/memory',
@@ -56,6 +58,15 @@ export function accountMutationGuard(): MiddlewareHandler {
     const lease = tryAcquireAccountMutationLease(rawEpoch || undefined);
     if (lease === null) {
       return c.json({ error: '账号已切换或正在切换，请刷新后重试' }, 409);
+    }
+    // Assistant orchestration cannot hold a shared lease across model calls or
+    // delegated operations (e.g. workspace.rename itself enters a transition).
+    // Admission still validates epoch; every internal API checks its own frozen
+    // epoch and obtains its own lease. Confirmation consumes its plan once.
+    if (c.req.method === 'POST' && (c.req.path === '/api/assistant/chat'
+      || /^\/api\/assistant\/plans\/[^/]+\/confirm$/.test(c.req.path))) {
+      lease.release();
+      return next();
     }
     try {
       await next();

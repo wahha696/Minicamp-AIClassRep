@@ -31,6 +31,7 @@ function fixture() {
   const scope = { ...context, dataRoot: 'C:\\synthetic\\xwechat_files', groups: [{ group_id: 'synthetic_A@chatroom', name: '人工群 😀' }] };
   const selection = new WechatSelectionStore('synthetic-space', context.account, () => current);
   selection.apply(scope, ['synthetic_A@chatroom']);
+  const receive = bindWechatDestination('synthetic-space', context.account, ['synthetic_A@chatroom']);
   const options = {
     executable: process.env.WECHAT4_TEST_PYTHON ?? 'unused.exe',
     entry: fileURLToPath(new URL('../../../../tools/wechat4-read-probe/message_worker_fixture.py', import.meta.url)),
@@ -41,7 +42,7 @@ function fixture() {
     approveMessageRead: true, approveKeyRead: true, approveSelectedStorage: true,
     signal: new AbortController().signal, proof: vi.fn(async () => current),
     activated: vi.fn((group: string, activation: string) => selection.activated(context, group, activation)),
-    receive: vi.fn(bindWechatDestination('synthetic-space', context.account, ['synthetic_A@chatroom'])),
+    receive: vi.fn((batch: unknown) => receive(batch)),
   };
   return { options, selection, setCurrent: (value: typeof current) => { current = value; } };
 }
@@ -130,6 +131,20 @@ describe('owned WeChat selected-message pipe', () => {
     const rejected = expect(result).rejects.toThrow('TIMEOUT');
     await vi.advanceTimersByTimeAsync(180_000); await rejected;
     expect(worker.child.kill).toHaveBeenCalledTimes(1);
+  });
+  it('keeps a healthy long history command alive across many former total deadlines', async () => {
+    const f = fixture(), worker = fake(f); await worker.channel.start(); vi.useFakeTimers();
+    const result = worker.channel.history('synthetic_A@chatroom', 30, true);
+    const completed = result.then(value => ({ value }), error => ({ error }));
+    for (let i = 0; i < 8; i++) {
+      await vi.advanceTimersByTimeAsync(150_000);
+      worker.reply(1, { kind: 'heartbeat' });
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    worker.reply(1, { kind: 'result', result: { inserted: 9, has_more: false } });
+    expect(await completed).toEqual({ value: { inserted: 9, has_more: false } });
+    expect(worker.child.kill).not.toHaveBeenCalled();
+    await worker.channel.close();
   });
   it.skipIf(!process.env.WECHAT4_TEST_PYTHON)('real portable pipes commit synthetic selected text and resume without duplicates', async () => {
     const f = fixture(); const first = new WechatMessageChannel(f.options);

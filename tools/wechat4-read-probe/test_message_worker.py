@@ -3,6 +3,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 import uuid
 from dataclasses import replace
@@ -55,6 +56,35 @@ class MessageWorkerTests(unittest.TestCase):
         self.assertEqual([m['text'] for m in delivered], ['new selected 😀'])
         self.assertEqual(self.output[3]['result']['status'][GROUP_A], {'pending': 0, 'deferred': 0})
         self.assertTrue(self.capture.closed)
+    def test_slow_history_sends_private_pipe_heartbeat_and_uses_saved_window(self):
+        pulse = threading.Event()
+        reading_history = [False]
+        original_capture = self.capture.capture
+        def capture():
+            if reading_history[0]:
+                self.assertTrue(pulse.wait(2), 'long snapshot must retain a live pipe heartbeat')
+            return original_capture()
+        self.capture.capture = capture
+        def emit(value):
+            if value['kind'] == 'ready':
+                self.output.append(value)
+                reading_history[0] = True
+                self.command(1, 'history_start', dict(group_id=GROUP_A, days=1,
+                    approve_history_read=True, now_seconds=1700000001))
+            elif value['kind'] == 'heartbeat':
+                self.output.append(value)
+                self.assertEqual(set(value), {'v', 'token', 'seq', 'kind'})
+                pulse.set()
+            else: self.emit(value)
+        self.assertEqual(serve(input_stream=self.input, emit=emit, create_capture=self.factory,
+            create_decoder=lambda: None, clock=lambda: 1800000000, heartbeat_seconds=0.005), 0)
+        kinds = [value['kind'] for value in self.output]
+        self.assertIn('heartbeat', kinds)
+        self.assertEqual(kinds[-1], 'stopped')
+        # The requested original window includes the synthetic old row; current
+        # wall time would exclude it and break resume after an app restart.
+        result = next(value['result'] for value in self.output if value['kind'] == 'result')
+        self.assertEqual(result['inserted'], 1)
     def test_sender_names_come_from_contacts_with_rate_limited_refresh_and_id_fallback(self):
         lookup = Mock(side_effect=[OSError('synthetic contact read failed'), {'wxid_member': '班长备注', self.config['account']: '自己'}])
         self.capture.contact_names = lookup

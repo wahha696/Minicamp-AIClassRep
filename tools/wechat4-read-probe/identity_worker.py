@@ -10,12 +10,41 @@ import json
 import re
 import sys
 
-from identity_calibration_probe import read_json
-from identity_discovery import discover_target
-from identity_snapshot import observe_identity_snapshot, require_account_snapshot
-from native import ProcessIdentity, ModuleIdentity
-from reader import ReadError
-from static_type_probe import inspect_program
+_RUNTIME_IMPORT_FAILED = False
+try:
+    from identity_calibration_probe import read_json
+    from identity_discovery import discover_target
+    from identity_snapshot import observe_identity_snapshot, require_account_snapshot
+    from native import ProcessIdentity, ModuleIdentity
+    from reader import ReadError
+    from static_type_probe import inspect_program
+except (ImportError, OSError):
+    # Keep the private protocol alive long enough to report a category, never a
+    # traceback, module filename, account or path. This is not a version failure.
+    _RUNTIME_IMPORT_FAILED = True
+    ReadError = RuntimeError
+    read_json = discover_target = observe_identity_snapshot = inspect_program = None
+
+
+def safe_failure(error):
+    """Finite diagnostic categories; unknown failures retain generic handling."""
+    if isinstance(error, (ImportError, OSError)):
+        return 'runtime_failed'
+    code = str(error)
+    if code in {'STATIC_PROGRAM_HASH_CHANGED', 'STATIC_PROGRAM_VERSION_CHANGED',
+                'STATIC_AMD64_PE_REQUIRED', 'STATIC_CLASS_STRING_MISSING_OR_AMBIGUOUS',
+                'STATIC_QT_STRING_HEADER_MISSING_OR_AMBIGUOUS', 'STATIC_QT_METAOBJECT_MISSING_OR_AMBIGUOUS'}:
+        return 'module_unsupported'
+    if code in {'MANAGED_STATIC_PROFILE_INVALID', 'MANAGED_RUNTIME_PROFILE_CHANGED', 'ACCOUNT_STRING_LAYOUT_UNSUPPORTED'}:
+        return 'module_unsupported'
+    if code in {'PROCESS_QUERY_ACCESS_FAILED', 'PROCESS_READ_ACCESS_FAILED',
+                'PROCESS_VERSION_FAILED', 'PROCESS_MODULE_METADATA_FAILED',
+                'PROCESS_CHANGED_OR_EXITED', 'FILE_OPEN_READ_FAILED',
+                'DISCOVERY_PROCESS_CHANGED', 'EXPLICIT_MODULE_MISSING'}:
+        return 'process_unavailable'
+    if code == 'WINDOWS_X64_REQUIRED':
+        return 'runtime_failed'
+    return None
 
 
 def request(stream, token=None, seq=0, initialize=False):
@@ -46,8 +75,17 @@ def serve(*, metadata_path, input_stream, emit, inspect=inspect_program, observe
     token = first['token']
     def send(kind, seq, **fields):
         emit(dict(v=1, token=token, seq=seq, kind=kind, **fields))
+    if _RUNTIME_IMPORT_FAILED:
+        send('unavailable', 0, reason='runtime_failed')
+        return 2
     if metadata_path is None:
-        target = discover()
+        try:
+            target = discover()
+        except Exception as error:
+            reason = safe_failure(error)
+            if reason is None: raise
+            send('unavailable', 0, reason=reason)
+            return 2
         if target.state != 'found':
             if target.state not in ('not_running', 'unsupported', 'ambiguous', 'main_process_unavailable'):
                 raise ReadError('IDENTITY_CHANNEL_DISCOVERY_INVALID')
@@ -59,8 +97,14 @@ def serve(*, metadata_path, input_stream, emit, inspect=inspect_program, observe
     if set(metadata) != {'process', 'module', 'sha256'}:
         raise ReadError('IDENTITY_CHANNEL_METADATA_INVALID')
     process, module = ProcessIdentity(**metadata['process']), ModuleIdentity(**metadata['module'])
-    report = inspect(path=module.path, expected_sha256=metadata['sha256'], expected_version=module.version,
-        max_bytes=268435456, max_seconds=30, max_references=500000, max_functions=1000000)
+    try:
+        report = inspect(path=module.path, expected_sha256=metadata['sha256'], expected_version=module.version,
+            max_bytes=268435456, max_seconds=30, max_references=500000, max_functions=1000000)
+    except Exception as error:
+        reason = safe_failure(error)
+        if reason is None: raise
+        send('unavailable', 0, reason=reason)
+        return 2
     send('ready', 0)
     anchor, seq = None, 1
     while True:
@@ -71,9 +115,15 @@ def serve(*, metadata_path, input_stream, emit, inspect=inspect_program, observe
             send('stopped', seq)
             return 0
         cached = anchor is not None
-        result = observe(expected_process=process, expected_module=module, report=report,
-            expected_sha256=metadata['sha256'], approve_joint_read=True, accept_os_memory_limit=True,
-            anchor_rva=anchor, max_bytes=1048576 if cached else 268435456, max_seconds=5 if cached else 15)
+        try:
+            result = observe(expected_process=process, expected_module=module, report=report,
+                expected_sha256=metadata['sha256'], approve_joint_read=True, accept_os_memory_limit=True,
+                anchor_rva=anchor, max_bytes=1048576 if cached else 268435456, max_seconds=5 if cached else 15)
+        except Exception as error:
+            reason = safe_failure(error)
+            if reason is None: raise
+            send('unavailable', seq, reason=reason)
+            return 2
         if result.state == 'main_and_account_observed':
             if type(result.account_id) is not str or not re.fullmatch(r'wxid_[A-Za-z0-9_-]{1,120}', result.account_id):
                 raise ReadError('IDENTITY_CHANNEL_ACCOUNT_INVALID')

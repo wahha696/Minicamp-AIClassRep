@@ -59,7 +59,12 @@ describe('opt-in WeChat route contract (not mounted in production, synthetic cal
   it('provides useful safe errors without reflecting private paths or account values', async () => {
     const f = fixture(); const input = { expected_account_epoch: 'e', approve_identity_read: true };
     f.connect.mockRejectedValueOnce(new Error('WECHAT_VERSION_UNSUPPORTED'));
-    expect(await (await f.request('connect', input)).json()).toEqual({ error: '当前微信版本尚未通过兼容验证' });
+    expect(await (await f.request('connect', input)).json()).toMatchObject({ error: expect.stringContaining('尚未实现 3.x 或其他 4.x') });
+    for (const [code, phrase] of [['WECHAT_MODULE_UNSUPPORTED', '程序模块'], ['WECHAT_PROCESS_UNAVAILABLE', '不一定是版本问题'],
+      ['WECHAT_RUNTIME_FAILED', '无需更换微信版本'], ['WECHAT_RUNTIME_MISSING', 'Python']]) {
+      f.connect.mockRejectedValueOnce(new Error(code));
+      expect(await (await f.request('connect', input)).json()).toMatchObject({ error: expect.stringContaining(phrase!) });
+    }
     f.connect.mockRejectedValueOnce(new Error('private native path / account'));
     const response = await f.request('connect', input);
     expect(response.status).toBe(409); expect(JSON.stringify(await response.json())).not.toContain('private');

@@ -117,6 +117,11 @@ def discover_target(*, enumerate_candidates=candidate_pids, query_factory=QueryP
     if before != after:
         raise ReadError('DISCOVERY_CANDIDATES_CHANGED')
     guard()
+    # A supported core alongside an unsupported candidate is still ambiguous;
+    # do not incorrectly tell the user that the supported installation changed
+    # version. We still refuse to pick either process or read account memory.
+    if unsupported and targets:
+        return Discovery('ambiguous')
     if unsupported:
         return Discovery('unsupported')
     if len(targets) > 1:

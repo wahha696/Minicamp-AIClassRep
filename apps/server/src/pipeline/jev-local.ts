@@ -61,6 +61,7 @@ export function getFastjudgePython(): string {
 
 /** 模型文件存在才算本地已配置（不检查 python/依赖；也不看退避） */
 export function localJevAvailable(): boolean {
+  if (process.env.CLASSREP_PYTHON_SETUP_FAILED === '1') return false;
   const model = getLocalModelPath();
   return model !== '' && existsSync(model);
 }
@@ -95,6 +96,8 @@ function pythonUsable(py: string, root: string): Promise<boolean> {
  * （Windows 便携 embed / POSIX venv）。打包版没有 scripts/——环境应随包预装，直接跳过。
  */
 export function ensureFastjudgeRuntime(): void {
+  // Launcher already attempted provisioning; do not silently download a second time.
+  if (process.env.CLASSREP_PYTHON_SETUP_FAILED === '1') return;
   const root = getFastjudgeRoot();
   if (!root || !localJevAvailable()) return;
   const py = getFastjudgePython();

@@ -11,10 +11,77 @@ import { ingestMessages } from './index.js';
 import { callAction, getGroupNameCached, isMentionOther, segmentsToText, toMessage } from '../napcat/onebot.js';
 import { redactSensitive } from '../redact.js';
 import type { Message } from '../types.js';
+import type { HistoryJobDTO } from '../../../../shared/history-jobs.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const PAGE_SIZE = 200;
 const MAX_PAGES = 60;
+
+/** One durable-job page. This deliberately has no total page/time cap. The
+ * caller commits messages and its next cursor in one local DB transaction. */
+export interface QQHistoryPage {
+  messages: Message[];
+  next: number | null;
+  oldestAt: number | null;
+  complete: boolean;
+}
+export async function readQQHistoryPage(groupId: string, since: number, cursor: number | null,
+  isCurrent: () => boolean, signal?: AbortSignal, onLongWait?: () => void): Promise<QQHistoryPage> {
+  const context = captureSyncAccountContext();
+  const valid = () => context !== null && syncAccountIsCurrent(context) && isCurrent()
+    && !!db.prepare("SELECT 1 FROM groups WHERE group_id=? AND enabled=1 AND adapter='onebot'").get(groupId);
+  if (!valid()) throw new Error('HISTORY_SCOPE_CHANGED');
+  const params: Record<string, unknown> = { group_id: Number(groupId), count: PAGE_SIZE };
+  if (cursor !== null) { params.message_seq = cursor; params.reverse_order = true; }
+  let items: unknown[];
+  try {
+    // NapCat offers no page progress signal. Keep the original echo indefinitely;
+    // silence only changes the UI hint, never discards a legitimate late page.
+    const response = await callAction<unknown>('get_group_msg_history', params, null, signal, onLongWait);
+    if (signal?.aborted) throw new Error('HISTORY_CANCELLED');
+    if (!valid()) throw new Error('HISTORY_SCOPE_CHANGED');
+    if (!Array.isArray(response) && (!response || typeof response !== 'object'
+        || !Array.isArray((response as Record<string, unknown>).messages))) throw new Error('HISTORY_INVALID_PAGE');
+    items = extractMessages(response);
+  } catch (error) {
+    if (signal?.aborted) throw new Error('HISTORY_CANCELLED');
+    if (!valid()) throw new Error('HISTORY_SCOPE_CHANGED');
+    if (error instanceof Error && error.message.includes('不存在')) return { messages: [], next: null, oldestAt: null, complete: true };
+    throw new Error(error instanceof Error && error.message === 'HISTORY_INVALID_PAGE' ? error.message : 'HISTORY_PAGE_UNAVAILABLE');
+  }
+  if (!items.length) return { messages: [], next: null, oldestAt: null, complete: true };
+  const messages: Message[] = [];
+  let oldestAt = Infinity, next: number | null = null;
+  for (const item of items) {
+    if (!item || typeof item !== 'object') throw new Error('HISTORY_INVALID_PAGE');
+    const raw = item as Record<string, unknown>, at = Number(raw.time) * 1000, id = Number(raw.message_id);
+    if (!Number.isFinite(at) || !Number.isSafeInteger(id)) throw new Error('HISTORY_INVALID_PAGE');
+    if (at < oldestAt || (at === oldestAt && (next === null || id < next))) { oldestAt = at; next = id; }
+    if (!isMentionOther(item)) {
+      const message = toMessage(withEventFields(item, groupId), () => getGroupNameCached(groupId));
+      if (message && message.sent_at >= since) messages.push(message);
+    }
+  }
+  const complete = oldestAt < since;
+  // The protocol includes its anchor. A single anchor row means end-of-history;
+  // a full repeated page is a stalled cursor, not successful completion.
+  if (!complete && next === cursor && items.length > 1) throw new Error('HISTORY_CURSOR_STALLED');
+  return { messages, next, oldestAt, complete: complete || (next === cursor && items.length === 1) };
+}
+
+export async function readQQHistoryEssence(groupId: string, since: number, isCurrent: () => boolean,
+  signal?: AbortSignal, onLongWait?: () => void): Promise<Message[]> {
+  const context = captureSyncAccountContext();
+  const selected = () => !!db.prepare("SELECT 1 FROM groups WHERE group_id=? AND enabled=1 AND adapter='onebot'").get(groupId);
+  if (!context || !isCurrent() || !selected()) throw new Error('HISTORY_SCOPE_CHANGED');
+  const messages = await fetchGroupEssence(groupId, since, context, signal, onLongWait, true);
+  if (signal?.aborted) throw new Error('HISTORY_CANCELLED');
+  if (!syncAccountIsCurrent(context) || !isCurrent() || !selected()) throw new Error('HISTORY_SCOPE_CHANGED');
+  return messages;
+}
+
+/** Avoid racing a login-triggered legacy sync; already committed rows dedupe. */
+export async function waitForAutomaticHistorySync(): Promise<void> { await inflight?.promise.catch(() => undefined); }
 
 /** R03：一群一次补齐的结果（写进 group_sync，前端能报告「哪群补到哪 / 为什么没补全」） */
 type GroupFetch = {
@@ -24,11 +91,31 @@ type GroupFetch = {
   reason: 'ok' | 'page_cap' | 'page_error';
 };
 
-type SyncResult = { groups: number; messages: number; failures: number };
+export type SyncResult = { groups: number; messages: number; failures: number };
 type SyncAccountContext = { generation: number; accountEpoch: string; captureEpoch: number };
 let captureEpoch = 0;
+interface HistoryCoordinator { start(days: 1 | 7 | 30): HistoryJobDTO; sync(days: number): Promise<SyncResult>; cancel(): void }
+let coordinator: HistoryCoordinator | null = null;
+const legacyRequests = new Set<AbortController>();
+/** The application installs its durable task owner before opening OneBot. Tests
+ * and standalone consumers may keep using the compatibility implementation. */
+export function setHistorySyncCoordinator(value: HistoryCoordinator | null): void {
+  captureEpoch++;
+  for (const controller of legacyRequests) controller.abort();
+  inflight = null;
+  coordinator = value;
+}
+/** HTTP compatibility entry point: admission returns a task, never a long lease. */
+export function startHistorySync(days: 1 | 7 | 30 = 7): HistoryJobDTO {
+  if (!coordinator) throw new Error('HISTORY_COORDINATOR_UNAVAILABLE');
+  return coordinator.start(days);
+}
 /** Cancel old page requests before QQ is handed back; late replies cannot write into a resumed session. */
-export function cancelHistorySync(): void { captureEpoch++; inflight = null; }
+export function cancelHistorySync(): void {
+  captureEpoch++; inflight = null;
+  for (const controller of legacyRequests) controller.abort();
+  coordinator?.cancel();
+}
 let inflight: { days: number; context: SyncAccountContext; promise: Promise<SyncResult> } | null = null;
 const EMPTY_RESULT: SyncResult = { groups: 0, messages: 0, failures: 0 };
 
@@ -55,6 +142,7 @@ function syncAccountIsCurrent(context: SyncAccountContext): boolean {
 // inflight 标记清掉，新号点「同步历史」重新拉
 onAccountSwitch(() => {
   inflight = null;
+  for (const controller of legacyRequests) controller.abort();
 });
 
 /**
@@ -64,6 +152,7 @@ onAccountSwitch(() => {
  * 入库完就返回，不等流水线整理完（前端用 health.pending 看进度）。
  */
 export function syncHistory(days = 7): Promise<SyncResult> {
+  if (coordinator) return coordinator.sync(days);
   const context = captureSyncAccountContext();
   if (context === null) return Promise.resolve(EMPTY_RESULT);
   const running =
@@ -183,7 +272,7 @@ async function fetchGroupHistory(groupId: string, since: number, context: SyncAc
     for (let attempt = 0; attempt < 2 && items === undefined; attempt++) {
       if (!syncAccountIsCurrent(context)) break;
       try {
-        items = extractMessages(await callAction<unknown>('get_group_msg_history', params));
+        items = extractMessages(await legacyAction('get_group_msg_history', params));
         if (!syncAccountIsCurrent(context)) break;
       } catch (e) {
         if (!syncAccountIsCurrent(context)) break;
@@ -256,10 +345,13 @@ async function fetchGroupHistory(groupId: string, since: number, context: SyncAc
  * 群精华消息。NapCat get_essence_msg_list 返回真实 message_id，
  * 和实时流/漫游拉到的同一条天然去重；失败返回空（精华是补充通道，不拖垮主同步）。
  */
-async function fetchGroupEssence(groupId: string, since: number, context: SyncAccountContext): Promise<Message[]> {
+async function fetchGroupEssence(groupId: string, since: number, context: SyncAccountContext, signal?: AbortSignal,
+  onLongWait?: () => void, durable = false): Promise<Message[]> {
   if (!syncAccountIsCurrent(context)) return [];
   try {
-    const data = await callAction<unknown>('get_essence_msg_list', { group_id: Number(groupId) });
+    const data = durable
+      ? await callAction<unknown>('get_essence_msg_list', { group_id: Number(groupId) }, null, signal, onLongWait)
+      : await legacyAction('get_essence_msg_list', { group_id: Number(groupId) });
     if (!syncAccountIsCurrent(context)) return [];
     const items = Array.isArray(data) ? data : [];
     const out: Message[] = [];
@@ -285,8 +377,17 @@ async function fetchGroupEssence(groupId: string, since: number, context: SyncAc
     }
     return out;
   } catch {
+    if (durable) throw new Error(signal?.aborted ? 'HISTORY_CANCELLED' : 'HISTORY_PAGE_UNAVAILABLE');
     return [];
   }
+}
+
+/** Compatibility reads also keep their echo until a reply, real disconnect or
+ * explicit owner cancellation; they never turn elapsed processing into failure. */
+async function legacyAction(action: string, params: object): Promise<unknown> {
+  const abort = new AbortController(); legacyRequests.add(abort);
+  try { return await callAction(action, params, null, abort.signal); }
+  finally { legacyRequests.delete(abort); }
 }
 
 /** NapCat 返回形态兜底：data 本身是数组，或 { messages: [...] } */

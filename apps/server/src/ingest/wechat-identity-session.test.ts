@@ -30,6 +30,19 @@ function fixture() {
 }
 
 describe('explicit WeChat identity session lifecycle (synthetic only)', () => {
+  it.each(['unsupported_version', 'module_unsupported', 'runtime_failed', 'process_unavailable'] as const)(
+    'does not lose startup diagnostic %s when channel invalidation closes the session', async reason => {
+      const codes = { unsupported_version: 'WECHAT_VERSION_UNSUPPORTED', module_unsupported: 'WECHAT_MODULE_UNSUPPORTED',
+        runtime_failed: 'WECHAT_RUNTIME_FAILED', process_unavailable: 'WECHAT_PROCESS_UNAVAILABLE' };
+      const verified = vi.fn();
+      const session = new WechatIdentitySession({ root: 'synthetic', onVerified: verified, onRevoked: vi.fn(),
+        createChannel: invalidate => ({ current: () => null, isCurrent: () => false, close: async () => {},
+          sample: async () => { invalidate(reason); throw new Error('generic closed channel'); } }),
+      });
+      sessions.push(session);
+      await expect(session.start(true)).rejects.toThrow(codes[reason]);
+      expect(verified).not.toHaveBeenCalled();
+    });
   it('requires consent before creating any worker and never starts from construction', async () => {
     const f = fixture(); expect(f.create).not.toHaveBeenCalled();
     await expect(f.session.start(false)).rejects.toThrow('WECHAT_IDENTITY_CONSENT_REQUIRED');

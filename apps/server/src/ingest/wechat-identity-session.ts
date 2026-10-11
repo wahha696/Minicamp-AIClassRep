@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { WechatIdentityChannel, type WechatIdentityEvidence, type WechatIdentityFailure } from './wechat-identity-channel.js';
+import { WechatIdentityChannel, wechatIdentityFailureCode, type WechatIdentityEvidence, type WechatIdentityFailure } from './wechat-identity-channel.js';
 import { wechatIdentityRuntime, wechatPythonArgs } from './wechat-python.js';
 
 type Channel = Pick<WechatIdentityChannel, 'sample' | 'current' | 'isCurrent' | 'close'>;
@@ -34,6 +34,7 @@ export class WechatIdentitySession {
   private recovering: Promise<void> | null = null;
   private recoveries: number[] = [];
   private unknownSince: number | null = null;
+  private initialFailure: WechatIdentityFailure | null = null;
 
   constructor(private readonly options: Options, private readonly clock: () => number = Date.now) {}
 
@@ -44,6 +45,7 @@ export class WechatIdentitySession {
       if (this.closed) return;
       // Events from a channel already replaced by recovery are ignored.
       if (channel !== undefined && this.channel !== null && channel !== this.channel) return;
+      if (this.account === null) this.initialFailure = failure;
       if (this.account !== null && RECOVERABLE.has(failure)) { void this.recover(failure); return; }
       void this.close(failure);
     };
@@ -96,6 +98,10 @@ export class WechatIdentitySession {
       if (this.closed) throw new Error('WECHAT_IDENTITY_SESSION_CLOSED');
     } catch (error) {
       await this.close();
+      if (this.initialFailure) {
+        const code = wechatIdentityFailureCode(this.initialFailure);
+        if (code !== 'WECHAT_IDENTITY_CHANNEL_CLOSED') throw new Error(code);
+      }
       throw error;
     }
   }

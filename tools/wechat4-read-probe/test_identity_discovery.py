@@ -105,6 +105,17 @@ class DiscoveryTests(unittest.TestCase):
         p = Query(1); p.current = replace(p.current, version='4.2.0.1')
         result = discover_target(enumerate_candidates=lambda **_: (1,), query_factory=lambda _: p)
         self.assertEqual(result.state, 'unsupported'); self.assertIsNone(result.process)
+    def test_legacy_3x_is_unsupported_and_mixed_supported_legacy_is_ambiguous(self):
+        legacy = Query(1)
+        legacy.current = replace(legacy.current, executable=r'c:\synthetic\wechat.exe', version='3.9.12.51')
+        legacy.module = Mock(side_effect=AssertionError('legacy module must not be inspected'))
+        result = discover_target(enumerate_candidates=lambda **_: (1,), query_factory=lambda _: legacy)
+        self.assertEqual(result.state, 'unsupported')
+        legacy.module.assert_not_called()
+        modern = Query(2)
+        result = discover_target(enumerate_candidates=lambda **_: (1, 2), query_factory=lambda pid: legacy if pid == 1 else modern)
+        self.assertEqual(result.state, 'ambiguous')
+        self.assertIsNone(result.process)
     def test_inaccessible_or_ambiguous_module_is_not_treated_as_a_helper(self):
         for error in ('EXPLICIT_MODULE_AMBIGUOUS', 'PROCESS_MODULE_METADATA_FAILED'):
             p = Query(1); p.module = Mock(side_effect=ReadError(error))

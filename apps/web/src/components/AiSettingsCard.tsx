@@ -11,7 +11,10 @@ type LlmStatus = AiSettingsDTO['deepseek'];
 
 const input = 'w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm outline-none focus:border-slate-500';
 
-export default function AiSettingsCard() {
+export default function AiSettingsCard({ onConfigured, submitLabel = '测试并保存' }: {
+  onConfigured?: () => void;
+  submitLabel?: string;
+} = {}) {
   const toast = useToast();
   const [info, setInfo] = useState<AiSettingsDTO | null>(null);
 
@@ -24,7 +27,10 @@ export default function AiSettingsCard() {
 
   return (
     <div className="rounded-2xl border border-slate-200 bg-white px-6 py-6 text-left shadow-sm">
-      <LlmRow status={info?.deepseek} onSaved={setInfo} />
+      <LlmRow status={info?.deepseek} submitLabel={submitLabel} onSaved={(next) => {
+        setInfo(next);
+        onConfigured?.();
+      }} />
       <p className="mt-4 text-xs text-slate-400">群消息经本地快判模型过滤后再交 AI 整理，无需配置。</p>
       {info?.deepseek.protection === 'plain' && (
         <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800">
@@ -36,7 +42,11 @@ export default function AiSettingsCard() {
   );
 }
 
-function LlmRow({ status, onSaved }: { status?: LlmStatus; onSaved: (next: AiSettingsDTO) => void }) {
+function LlmRow({ status, onSaved, submitLabel }: {
+  status?: LlmStatus;
+  onSaved: (next: AiSettingsDTO) => void;
+  submitLabel: string;
+}) {
   const toast = useToast();
   const savedProvider: LlmProvider = status?.provider ?? 'deepseek';
   const [provider, setProvider] = useState<LlmProvider>(savedProvider);
@@ -191,7 +201,7 @@ function LlmRow({ status, onSaved }: { status?: LlmStatus; onSaved: (next: AiSet
               disabled={busy}
               className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-60"
             >
-              {busy ? '校验中…' : '测试并保存'}
+              {busy ? '校验中…' : submitLabel}
             </button>
           </div>
           {result && <p>{resultText}</p>}

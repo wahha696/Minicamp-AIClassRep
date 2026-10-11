@@ -6,8 +6,17 @@ import { wechatPythonEnv } from './wechat-python.js';
 
 export type WechatIdentityEvidence = Readonly<{ account: string; generation: number }>;
 export type WechatIdentityFailure = 'worker_closed' | 'worker_failed' | 'worker_timeout' | 'invalid_response' | 'identity_unavailable'
-  | 'wechat_not_running' | 'unsupported_version' | 'multiple_clients';
+  | 'wechat_not_running' | 'unsupported_version' | 'multiple_clients'
+  | 'module_unsupported' | 'process_unavailable' | 'runtime_failed';
 type Failure = WechatIdentityFailure;
+export function wechatIdentityFailureCode(reason: Failure): string {
+  return reason === 'unsupported_version' ? 'WECHAT_VERSION_UNSUPPORTED'
+    : reason === 'wechat_not_running' ? 'WECHAT_NOT_RUNNING'
+    : reason === 'module_unsupported' ? 'WECHAT_MODULE_UNSUPPORTED'
+    : reason === 'process_unavailable' ? 'WECHAT_PROCESS_UNAVAILABLE'
+    : reason === 'runtime_failed' ? 'WECHAT_RUNTIME_FAILED'
+    : reason === 'multiple_clients' ? 'WECHAT_MULTIPLE_CLIENTS' : 'WECHAT_IDENTITY_CHANNEL_CLOSED';
+}
 interface Options {
   executable: string;
   args: readonly string[];
@@ -85,13 +94,11 @@ export class WechatIdentityChannel {
     clearTimeout(this.timer);
     this.invalidate(reason);
     this.buffer = Buffer.alloc(0);
-    const code = reason === 'unsupported_version' ? 'WECHAT_VERSION_UNSUPPORTED'
-      : reason === 'wechat_not_running' ? 'WECHAT_NOT_RUNNING'
-      : reason === 'multiple_clients' ? 'WECHAT_MULTIPLE_CLIENTS' : 'WECHAT_IDENTITY_CHANNEL_CLOSED';
+    const code = wechatIdentityFailureCode(reason);
     this.readyReject(new Error(code));
     const pending = this.pending;
     this.pending = null;
-    pending?.reject(new Error('WECHAT_IDENTITY_CHANNEL_CLOSED'));
+    pending?.reject(new Error(code));
     this.child.stdin.destroy();
     this.child.stdout.destroy();
     this.child.stderr.destroy();
@@ -120,9 +127,11 @@ export class WechatIdentityChannel {
       if (!this.ready && item.kind === 'ready' && item.seq === 0 && keys === 'kind,seq,token,v') {
         this.ready = true; clearTimeout(this.timer); this.readyResolve(); continue;
       }
-      if (!this.ready && item.kind === 'unavailable' && item.seq === 0 && keys === 'kind,reason,seq,token,v') {
+      if (item.kind === 'unavailable' && ((!this.ready && item.seq === 0)
+        || (this.ready && this.pending && item.seq === this.pending.seq)) && keys === 'kind,reason,seq,token,v') {
         const failures: Record<string, Failure> = { not_running: 'wechat_not_running', unsupported: 'unsupported_version',
-          ambiguous: 'multiple_clients', main_process_unavailable: 'worker_failed' };
+          ambiguous: 'multiple_clients', main_process_unavailable: 'process_unavailable',
+          module_unsupported: 'module_unsupported', process_unavailable: 'process_unavailable', runtime_failed: 'runtime_failed' };
         const reason = typeof item.reason === 'string' ? failures[item.reason] : undefined;
         this.fail(reason ?? 'invalid_response'); return;
       }

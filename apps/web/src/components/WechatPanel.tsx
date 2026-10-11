@@ -5,23 +5,17 @@ import type { WechatUnavailableReason } from '../../../../shared/workspaces';
 import { connectWechat, disconnectWechat, getWechatGroups, getWechatStatus, refreshWechatGroups, selectWechatGroups } from '../api/client';
 import WechatMessagesPanel from './WechatMessagesPanel';
 import { loadWechatDataRoot, saveWechatDataRoot, validWechatDataRoot } from '../lib/wechat-data-root';
-
-const errors: Record<string, string> = {
-  WECHAT_NOT_RUNNING: '请先打开并登录电脑微信。',
-  WECHAT_VERSION_UNSUPPORTED: '当前微信版本尚未支持，请保留原有数据，等待兼容更新。',
-  WECHAT_IDENTITY_LOST: '微信登录状态已变化，请检查电脑微信后重新连接。',
-  WECHAT_RUNTIME_MISSING: '微信读取组件不完整，请重新安装课代表。',
-};
+import { wechatErrorText } from '../lib/wechat-errors';
 const button = 'rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700 disabled:opacity-40';
 const emptyCatalog: WechatCatalogDTO = { state: 'idle', error: null, collecting: false, scope: null, catalog: null, selected_group_ids: [] };
 
 /** Mounting a disabled/remote panel never calls even a status endpoint.
  */
-export default function WechatPanel({ available, unavailableReason, local, epoch, account, onChanged, mode = 'connection', renderGroups }: {
+export default function WechatPanel({ available, unavailableReason, local, epoch, account, installationId, onChanged, mode = 'connection', renderGroups }: {
   available: boolean; unavailableReason?: WechatUnavailableReason;
   mode?: 'connection' | 'groups';
   renderGroups?: (catalog: WechatCatalogDTO, reload: () => Promise<void>) => ReactNode;
-  local: boolean; epoch: string; account?: string; onChanged(): Promise<unknown> | void;
+  local: boolean; epoch: string; account?: string; installationId?: string; onChanged(): Promise<unknown> | void;
 }) {
   const title = mode === 'groups' ? '微信采集' : '微信连接';
   if (!available) return <section aria-label={title} className="space-y-3 border-t border-slate-200 pt-5 text-left">
@@ -29,7 +23,7 @@ export default function WechatPanel({ available, unavailableReason, local, epoch
     <p className="text-sm text-slate-500" role="status">{unavailableReason === 'platform_unsupported'
       ? '微信采集目前仅支持 Windows 电脑。'
       : unavailableReason === 'runtime_missing'
-        ? '微信读取组件不完整，请补齐组件后重启课代表。'
+        ? wechatErrorText('WECHAT_RUNTIME_MISSING')
         : '微信连接暂不可用，请重启课代表后重试。'}</p>
     {mode === 'connection' && <button type="button" disabled className={button}>连接电脑微信</button>}
     {mode === 'groups' && renderGroups?.(emptyCatalog, async () => {})}
@@ -39,15 +33,16 @@ export default function WechatPanel({ available, unavailableReason, local, epoch
     <p className="text-sm text-slate-500">请在电脑本机管理微信连接和所选群。</p>
     {mode === 'groups' && renderGroups?.(emptyCatalog, async () => {})}
   </section>;
-  return <LocalWechatPanel key={JSON.stringify([epoch, mode, account])} epoch={epoch} account={account} onChanged={onChanged} mode={mode} renderGroups={renderGroups} />;
+  return <LocalWechatPanel key={JSON.stringify([epoch, mode, account, installationId])} epoch={epoch} account={account} installationId={installationId} onChanged={onChanged} mode={mode} renderGroups={renderGroups} />;
 }
 
-function LocalWechatPanel({ epoch, account, onChanged, mode, renderGroups }: { epoch: string; account?: string; onChanged(): Promise<unknown> | void; mode: 'connection' | 'groups'; renderGroups?: (catalog: WechatCatalogDTO, reload: () => Promise<void>) => ReactNode }) {
+function LocalWechatPanel({ epoch, account, installationId, onChanged, mode, renderGroups }: { epoch: string; account?: string; installationId?: string; onChanged(): Promise<unknown> | void; mode: 'connection' | 'groups'; renderGroups?: (catalog: WechatCatalogDTO, reload: () => Promise<void>) => ReactNode }) {
   const [connection, setConnection] = useState<WechatConnectionDTO | null>(null);
   const [catalog, setCatalog] = useState<WechatCatalogDTO | null>(null);
   const [identityConsent, setIdentityConsent] = useState(false);
   const [catalogConsent, setCatalogConsent] = useState(false);
-  const [dataRoot, setDataRoot] = useState(() => mode === 'groups' ? loadWechatDataRoot(account) : '');
+  const [dataRoot, setDataRoot] = useState(() => mode === 'groups' ? loadWechatDataRoot(installationId, account) : '');
+  const [restoredPath, setRestoredPath] = useState(() => mode === 'groups' && !!loadWechatDataRoot(installationId, account));
   const [picked, setPicked] = useState<string[]>([]);
   const [search, setSearch] = useState('');
   const [busy, setBusy] = useState(false);
@@ -132,17 +127,17 @@ function LocalWechatPanel({ epoch, account, onChanged, mode, renderGroups }: { e
   return <section aria-label={mode === 'groups' ? '微信采集' : '微信连接'} className="space-y-4 border-t border-slate-200 pt-5 text-left">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <h3 className="font-semibold text-slate-900">{mode === 'groups' ? '微信采集' : '微信连接'}</h3>
-      <span className="rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-500">已验证 4.1.15.50</span>
+      <span className="rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-500">读取适配基线：4.1.15.50 指定构建</span>
     </div>
     {connection?.state === 'identified' && <p className="break-all text-sm text-slate-600">
       {connection?.state === 'identified' && connection.nickname?.trim() || '微信用户'}
     </p>}
-    {!connection ? <p className="text-sm text-slate-500">正在核对连接状态…</p> : connection.state !== 'identified' && mode === 'groups' ? <>
+    {connection?.error && connection.state !== 'identified' && <p role="alert" className="text-sm text-rose-600">{wechatErrorText(connection.error)}</p>}
+    {!connection ? <p className="text-sm text-slate-500">{readError ? '连接状态暂时无法读取，将自动重试状态检查。' : '正在核对连接状态…'}</p> : connection.state !== 'identified' && mode === 'groups' ? <>
       <p className="text-sm text-slate-600">微信尚未连接。</p>
       <Link to="/connect" className="text-sm text-blue-600 underline">连接微信</Link>
     </> : connection.state !== 'identified' ? <>
       <p className="text-sm text-slate-600">先登录电脑微信，再连接课代表。</p>
-      {connection.error && <p role="alert" className="text-sm text-rose-600">{errors[connection.error] ?? '微信暂时无法连接，请检查登录后重试。'}</p>}
       <label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={identityConsent} disabled={busy}
         onChange={(event) => setIdentityConsent(event.target.checked)} />
         <span>允许本机持续核对微信账号与登录状态，退出或换号即停止；账号不上传。</span></label>
@@ -161,10 +156,17 @@ function LocalWechatPanel({ epoch, account, onChanged, mode, renderGroups }: { e
         <label className="block space-y-1 text-sm">微信存储位置
           <input aria-label="微信存储位置" value={dataRoot} disabled={busy || reading} maxLength={4096}
             onChange={(event) => {
-              setDataRoot(event.target.value); setCatalogConsent(false);
-              saveWechatDataRoot(account, event.target.value);
+              setDataRoot(event.target.value); setCatalogConsent(false); setRestoredPath(false);
+              saveWechatDataRoot(installationId, account, event.target.value);
             }} placeholder="以 xwechat_files 结尾，可从微信复制：设置 → 账号与存储 → 存储位置"
             className="w-full rounded-lg border border-slate-300 p-2" /></label>
+        <p className="text-xs text-slate-500">{restoredPath
+          ? '已回填此浏览器为当前安装和账号保存的路径。路径不来自仓库，也不代表已授权读取。'
+          : installationId && account ? '有效路径仅在此浏览器按当前安装和账号保存；读取仍需单独允许。'
+            : '尚未确认安装或账号身份，路径不会保存；你仍可手动输入。'}</p>
+        {dataRoot && <button type="button" className="text-xs text-slate-600 underline disabled:opacity-40" disabled={busy || reading}
+          onClick={() => { setDataRoot(''); setRestoredPath(false); setCatalogConsent(false); saveWechatDataRoot(installationId, account, ''); }}>
+          清除当前路径记忆</button>}
         {dataRoot.trim() && !validWechatDataRoot(dataRoot.trim()) && <p role="alert" className="text-sm text-rose-600">请输入以 xwechat_files 结尾的完整 Windows 路径。</p>}
         <label className="flex items-start gap-2 text-sm"><input aria-label="允许读取微信群目录" type="checkbox" checked={catalogConsent} disabled={busy || reading}
           onChange={(event) => setCatalogConsent(event.target.checked)} />
@@ -172,7 +174,7 @@ function LocalWechatPanel({ epoch, account, onChanged, mode, renderGroups }: { e
         <button type="button" className={button} disabled={busy || reading || !catalogConsent || !validWechatDataRoot(dataRoot.trim())}
           onClick={() => void act(() => refreshWechatGroups({ expected_account_epoch: epoch, data_root: dataRoot.trim(), approve_key_read: true, approve_contact_read: true }))}>
           {reading || busy ? '正在处理，请稍候…' : '读取群列表'}</button>
-        {catalog.state === 'error' && <p role="alert" className="text-sm text-rose-600">群列表读取失败，请核对存储位置后重试。</p>}
+        {catalog.state === 'error' && <p role="alert" className="text-sm text-rose-600">{wechatErrorText(catalog.error, 'catalog')}</p>}
         </div></details>
         {offer && <>
           {!renderGroups && <>
@@ -207,7 +209,9 @@ function LocalWechatPanel({ epoch, account, onChanged, mode, renderGroups }: { e
     <details className="text-xs text-slate-500">
       <summary className="cursor-pointer">兼容与读取说明</summary>
       <ul className="mt-2 list-disc space-y-1 pl-4 leading-relaxed">
-        <li>仅支持已验证版本；其他版本暂停连接，等待兼容更新。</li>
+        <li>当前适配 Windows x64 微信 4.1.15.50 的指定程序构建；还会核对实际模块，版本号相同也可能有不同构建。</li>
+        <li>读取依赖版本对应的程序结构，旧版不一定更兼容。微信 3.x 和其他 4.x 尚需独立适配，请勿仅凭一次连接失败升降级微信。</li>
+        <li>未登录、多个实例、进程权限、组件或依赖缺失会分别提示；普通连接失败不等于版本不支持。</li>
         <li>不自动回复，不点击或切换微信窗口。</li>
         <li>选择保存在当前空间。断开保留数据，QQ 可继续使用。</li>
       </ul>

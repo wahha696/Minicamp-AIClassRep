@@ -27,6 +27,9 @@ import { registerBusinessRoutes } from './routes/business.js';
 import { registerConnectRoutes } from './routes/connect.js';
 import { registerMemoryRoutes } from './routes/memory.js';
 import { registerPetChatRoutes } from './routes/pet-chat.js';
+import { registerAssistantRoutes } from './routes/assistant.js';
+import { registerAssistantMemoryRoutes } from './routes/assistant-memory.js';
+import { registerHistoryJobRoutes } from './routes/history-jobs.js';
 import { registerSetupRoutes } from './routes/setup.js';
 import { registerSettingsRoutes } from './routes/settings.js';
 import { registerTimetableRoutes } from './routes/timetable.js';
@@ -135,6 +138,7 @@ registerWorkspaceRoutes(app, async () => { wechat.invalidate(); await wechat.int
 registerWechatConnectionRoutes(app, wechat.connection);
 registerWechatGroupRoutes(app, wechat.catalog);
 registerWechatMessageRoutes(app, wechat.intake, wechat.catalog);
+registerHistoryJobRoutes(app, wechat.intake);
 // 局域网只读开关：启动时读一次决定监听地址；默认只监听本机
 const LISTEN_LAN = lanEnabledAtBoot();
 let listenPort = START_PORT;
@@ -142,6 +146,8 @@ registerSetupRoutes(app);
 registerSettingsRoutes(app, { listening: LISTEN_LAN, port: () => listenPort });
 registerReminderRoutes(app);
 registerPetChatRoutes(app);
+registerAssistantMemoryRoutes(app);
+registerAssistantRoutes(app);
 registerTodoRoutes(app);
 registerTimetableRoutes(app);
 registerMemoryRoutes(app);
@@ -257,7 +263,9 @@ listenPort = port;
 console.log(`ClassRep 已启动：http://localhost:${port}${LISTEN_LAN ? '（已开启局域网只读访问）' : ''}`);
 if (env.FASTJUDGE_MODE !== 'jev') {
   const fjRoot = getFastjudgeRoot();
-  console.log(`本地快判：${!fjRoot
+  console.log(`本地快判：${process.env.CLASSREP_PYTHON_SETUP_FAILED === '1'
+    ? '本次 Python 准备失败，暂不可用；消息继续交由已配置的 AI 处理，请修复运行时后重启'
+    : !fjRoot
     ? '未配置（把 classrep-fastjudge 放到项目根目录即自动启用）'
     : localJevAvailable() ? `就绪（${fjRoot}）` : `已找到 ${fjRoot}，但模型文件缺失`}`);
   ensureFastjudgeRuntime(); // 模型在、python 环境缺时后台供给（克隆版开箱即用）

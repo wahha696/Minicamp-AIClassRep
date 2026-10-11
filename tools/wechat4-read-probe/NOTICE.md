@@ -25,9 +25,14 @@ textdecode.py independently binds the stable Zstandard C API described in
 facebook/zstd v1.5.7 lib/zstd.h and doc/zstd_compression_format.md. Candidate
 WeChat Zstandard field knowledge also comes from the fixed db.py source above;
 its lossy UTF-8, guessed-offset salvage and placeholder heuristics are not used.
-No libzstd binary or Zstandard source code is copied or distributed here. An
-operator-supplied local library is required for compressed decoding; choosing
-and licensing the product's distribution dependency remains future work.
+No standalone libzstd DLL or Zstandard source code is copied into this tool.
+Production compressed-text decoding uses python-zstandard 0.25.0 through
+zstd_package.py, installed into the portable Python runtime by
+scripts/fastjudge-setup.mjs from classrep-fastjudge/requirements.txt. Users do not
+need to locate a DLL on the developer's machine. Package distributions include
+their own native decoder and license notices. The operator-supplied-library
+path in textdecode.py is only used by optional native-API tests; it is not the
+production worker dependency.
 
 account_candidate.py independently implements the experimental global_config
 landmark, pointer chain and wxid string-layout knowledge from the same pinned

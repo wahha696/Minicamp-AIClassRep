@@ -12,6 +12,7 @@ export const DECISION_EXPLANATIONS = {
   jev_below_threshold: '本地快判认为不是日程通知，未发送给大模型',
   llm_no_event: '大模型看过，但没有返回需要新增或修改的事项',
   event_recognized: '已识别并关联到日程',
+  user_preference: '已按你保存的当前空间偏好排除；可在助手长期偏好中查看来源',
   pending_confirmation: '识别到低置信度或与人工修改冲突的变更，等待用户确认',
   pipeline_error: '处理过程中发生非网络错误，未生成可靠日程',
   legacy_filtered: '旧版本曾过滤，升级前未记录更细原因',

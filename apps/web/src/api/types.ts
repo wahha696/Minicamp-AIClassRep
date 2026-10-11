@@ -265,6 +265,7 @@ export interface PipelineStats {
 }
 
 export interface HealthDTO extends PipelineStats {
+  installation_id?: string;
   wechat?: 'idle' | 'opening' | 'collecting' | 'error';
   status: 'ok' | 'degraded';
   db: 'ok' | 'error';

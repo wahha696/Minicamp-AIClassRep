@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import type { Hono } from 'hono';
 import { z } from 'zod';
 import { db } from '../db/index.js';
-import { syncHistory } from '../ingest/history.js';
+import { startHistorySync } from '../ingest/history.js';
 import { QRCODE_PATH } from '../napcat/paths.js';
 import { isOnline } from '../napcat/onebot.js';
 import { logoutNapcat, restartNapcat } from '../napcat/index.js';
@@ -87,7 +87,8 @@ export function registerConnectRoutes(app: Hono, options: { wechatState?: () => 
   });
 
   // POST /api/sync：未连接时 409；online 时往前补拉群历史（FR-16）。
-  // body 可选 {days: 1|7|30}，缺省/空 body 都按 7 天（登录后自动补齐就是走这个）。入库完即返回。
+  // Compatibility admission only: return the durable job immediately so the
+  // account mutation lease is not held across an indefinitely slow source read.
   app.post('/api/sync', async (c) => {
     if (!isOnline()) return c.json({ error: 'QQ 未连接' }, 409);
 
@@ -105,7 +106,7 @@ export function registerConnectRoutes(app: Hono, options: { wechatState?: () => 
     }
 
     try {
-      return c.json(await syncHistory(days));
+      return c.json({ job: startHistorySync(days) }, 202);
     } catch (err) {
       return c.json({ error: `同步失败：${err instanceof Error ? err.message : String(err)}` }, 500);
     }

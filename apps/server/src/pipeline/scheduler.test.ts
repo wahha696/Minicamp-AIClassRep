@@ -17,6 +17,7 @@ import { llmStats } from './stats.js';
 import { LLM_RETRY_MS, quiesceScheduler, resetLlmRetry, resumeScheduler, runPipelineNow, runPipelineGroupNow, tick } from './scheduler.js';
 import { getGroupFailure } from './failures.js';
 import { setDesktopPipelinePaused } from './activity.js';
+import { assistantMemoryState, assistantSuppression, saveAssistantMemory, deleteAssistantMemory } from '../assistant-memory.js';
 
 vi.mock('./extract.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./extract.js')>()),
@@ -77,6 +78,47 @@ const created = (input: ExtractInput): ExtractedEvent => ({
 
 const count = (where: string) =>
   (db.prepare(`SELECT COUNT(*) AS n FROM messages WHERE ${where}`).get() as { n: number }).n;
+
+it('explicit memory excludes only future matching homework, records sources and keeps other notices', async () => {
+  ingestMessages(chat('demo-physics', 2, '物理作业周五提交'), 'demo');
+  db.prepare("UPDATE groups SET course_name='物理' WHERE group_id='demo-physics'").run();
+  saveAssistantMemory({ text: '人工测试偏好', action: 'exclude_calendar', course: '物理', event_types: ['assignment'] });
+  extract.mockImplementation(async input => [
+    { ...created(input), type: 'assignment', title: '物理作业' },
+    { ...created(input), title: '物理考试', source_message_ids: [input.candidates[1]!.message_id] },
+  ]);
+  await runPipelineNow();
+  expect(db.prepare('SELECT title FROM events').all()).toEqual([{ title: '物理考试' }]);
+  expect(count('processed = 1')).toBe(2);
+  expect(count("decision_reason = 'user_preference'")).toBe(1);
+  expect(assistantSuppression(assistantMemoryState().recent_suppressions[0]!.id)?.sources[0]?.text).toBe('物理作业周五提交');
+});
+
+it('edits, disabling and deletion of preferences affect subsequent real pipeline runs', async () => {
+  const rule = saveAssistantMemory({ text: 'Synthetic explicit preference', action: 'exclude_calendar', course: 'Physics', event_types: ['assignment'] });
+  extract.mockImplementation(async input => [{ ...created(input), type: 'assignment',
+    title: `Synthetic assignment ${input.candidates[0]!.message_id}`,
+    start_at: input.candidates[0]!.sent_at + 86400_000 }]);
+  async function processNext(n: number) {
+    ingestMessages([{ ...chat('synthetic-physics', 1, '作业通知：请完成教材练习')[0]!,
+      message_id: `future-${n}`, sent_at: NOW + n * 7 * 86400_000 }], 'demo');
+    db.prepare("UPDATE groups SET course_name='Physics' WHERE group_id='synthetic-physics'").run();
+    await runPipelineNow();
+    return db.prepare('SELECT decision_reason FROM messages WHERE message_id=?').get(`future-${n}`)?.decision_reason;
+  }
+  expect(await processNext(1)).toBe('user_preference');
+  saveAssistantMemory({ course: 'Chemistry' }, rule.id);
+  expect(await processNext(2)).toBe('event_recognized');
+  saveAssistantMemory({ course: 'Physics', enabled: false }, rule.id);
+  expect(await processNext(3)).toBe('event_recognized');
+  saveAssistantMemory({ enabled: true }, rule.id);
+  deleteAssistantMemory(rule.id);
+  expect(await processNext(4)).toBe('event_recognized');
+  expect(count('processed = 1')).toBe(4);
+  expect(assistantMemoryState().rules).toEqual([]);
+  expect(assistantMemoryState().recent_suppressions).toHaveLength(1);
+  expect(assistantSuppression(assistantMemoryState().recent_suppressions[0]!.id)?.sources[0]?.message_id).toBe('future-1');
+});
 
 beforeEach(() => {
   setDesktopPipelinePaused(false);

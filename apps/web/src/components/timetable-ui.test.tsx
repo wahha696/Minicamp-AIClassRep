@@ -26,6 +26,24 @@ const course: CourseDTO = {
 const monday = dateStamp('2026-09-07');
 const days = Array.from({ length: 7 }, (_, i) => ({ from: monday + i * 86400000, isToday: false }));
 describe('课程可以访问，而不只是数组返回成功', () => {
+  it('未提供学期日期时默认 2026-09-07，可修改且后续重渲染不覆盖草稿', () => {
+    const props = { parsed: { courses: [course], warnings: [] }, saved: null, onSaved: () => {}, onCancel: () => {} };
+    const { rerender } = render(<TimetableEditor {...props} />);
+    const date = screen.getByLabelText('第一周周一') as HTMLInputElement;
+    expect(date.value).toBe('2026-09-07');
+    fireEvent.change(date, { target: { value: '2026-09-14' } });
+    rerender(<TimetableEditor {...props} />);
+    expect(date.value).toBe('2026-09-14');
+  });
+  it.each([
+    { parsedStart: undefined, savedStart: '2027-03-01', expected: '2027-03-01' },
+    { parsedStart: '2027-02-22', savedStart: '2027-03-01', expected: '2027-02-22' },
+  ])('默认日期不覆盖导入日期或已保存日期：$expected', ({ parsedStart, savedStart, expected }) => {
+    render(<TimetableEditor parsed={{ courses: [course], warnings: [], semesterStart: parsedStart }}
+      saved={{ courses: [course], semester_start: savedStart }} onSaved={() => {}} onCancel={() => {}} />);
+    expect((screen.getByLabelText('第一周周一') as HTMLInputElement).value).toBe(expected);
+  });
+
   it('集中展示待处理事项，定位展开原文，补课自动展开编辑，忽略后更新计数', () => {
     const parsed = parseTimetable([['', '周一', '周二'], ['1-2', '课程A\n张老师\n1[周]\nA101', '待补课程原文']]);
     render(<TimetableEditor parsed={parsed} saved={null} onSaved={() => {}} onCancel={() => {}} />);

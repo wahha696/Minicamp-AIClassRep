@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+import { Hono } from 'hono';
 
 vi.mock('./manager.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('./manager.js')>();
@@ -15,8 +16,12 @@ vi.mock('./manager.js', async (importOriginal) => {
   };
 });
 
-import { currentAccount, setAccountsDirForTest, switchAccount } from '../accounts.js';
+import { accountEpoch, currentAccount, setAccountsDirForTest, switchAccount } from '../accounts.js';
 import { db } from '../db/index.js';
+import { HistoryJobs } from '../ingest/history-jobs.js';
+import { setHistorySyncCoordinator, syncHistory } from '../ingest/history.js';
+import { accountMutationGuard } from '../account-request-guard.js';
+import { registerConnectRoutes } from '../routes/connect.js';
 import { setDesktopRecoveryDoneHandler, setDesktopRecoveryHandler } from './desktop-recovery.js';
 import {
   getOnebotFacts,
@@ -24,6 +29,7 @@ import {
   startOnebotClient,
   stopOnebotClient,
   resetAfterRestart,
+  callAction,
 } from './onebot.js';
 
 interface SentAction {
@@ -105,6 +111,7 @@ function reply(call: SentAction, data: unknown): void {
 }
 
 afterEach(async () => {
+  setHistorySyncCoordinator(null);
   setDesktopRecoveryHandler(() => null);
   setDesktopRecoveryDoneHandler(() => {});
   stopOnebotClient();
@@ -123,6 +130,150 @@ afterAll(() => {
 });
 
 describe('OneBot 迟到响应的账号隔离', () => {
+  it('cancels a long read without retaining its pending echo or accepting its late reply', async () => {
+    await setupAccountA();
+    const controller = new AbortController();
+    const pending = callAction('get_group_msg_history', { group_id: 9001 }, null, controller.signal);
+    const rejected = expect(pending).rejects.toThrow('ONEBOT_REQUEST_CANCELLED');
+    const call = await actionAt('get_group_msg_history', 0);
+    controller.abort(); await rejected;
+    expect(() => reply(call, { messages: [] })).not.toThrow();
+    // The next explicit request is independent of the cancelled request/echo.
+    const next = callAction('get_group_msg_history', { group_id: 9001 }, null);
+    reply(await actionAt('get_group_msg_history', 1), { messages: [] });
+    expect(await next).toEqual({ messages: [] });
+  });
+  it('retains a history echo and its durable task for 20-minute pages and essence reads without retrying', async () => {
+    await setupAccountA();
+    reply(await actionAt('get_login_info', 0), { nickname: 'Synthetic' });
+    reply(await actionAt('get_group_list', 0), []);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    db.prepare("INSERT INTO groups(group_id,name,enabled,adapter,created_at) VALUES ('9001','Synthetic',1,'onebot',?)").run(Date.now());
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const jobs = new HistoryJobs({ historyContext: () => null, history: async () => { throw new Error('unused'); } });
+      const request = { platform: 'qq' as const, days: 7 as const, expected_account_epoch: accountEpoch() };
+      const job = jobs.create(request);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const first = await actionAt('get_group_msg_history', 0);
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
+      expect(jobs.get(job.id)).toMatchObject({ status: 'running', retryable: false, messages: 0, pages: 0 });
+      expect(jobs.get(job.id)?.waiting_since).toBeTypeOf('number');
+      expect(jobs.create(request).id).toBe(job.id);
+      expect(sent.filter((item) => item.action === 'get_group_msg_history')).toHaveLength(1);
+      const messages = [{ message_id: 901, group_id: 9001, time: Math.floor(Date.now() / 1000) - 10,
+        sender: { nickname: 'Synthetic' }, message: [{ type: 'text', data: { text: 'Synthetic long page' } }] }];
+      reply(first, { messages });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const last = await actionAt('get_group_msg_history', 1);
+      expect(jobs.get(job.id)).toMatchObject({ messages: 1, pages: 1, waiting_since: null });
+      reply(last, { messages: [] });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const essence = await actionAt('get_essence_msg_list', 0);
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
+      expect(jobs.get(job.id)).toMatchObject({ status: 'running', retryable: false, messages: 1 });
+      expect(jobs.get(job.id)?.waiting_since).toBeTypeOf('number');
+      expect(sent.filter((item) => item.action === 'get_essence_msg_list')).toHaveLength(1);
+      reply(essence, [{ message_id: 902, sender_time: Math.floor(Date.now() / 1000), content: 'Synthetic essence' }]);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      reply(first, { messages }); // A duplicate late echo cannot ingest again.
+      expect(jobs.get(job.id)).toMatchObject({ status: 'completed', messages: 2, pages: 2, waiting_since: null });
+      expect(db.prepare('SELECT COUNT(*) n FROM messages').get()?.n).toBe(2);
+    } finally { vi.useRealTimers(); }
+  });
+  it('login automatic backfill shares its indefinitely waiting task with manual and legacy requests', async () => {
+    await setupAccountA();
+    const jobs = new HistoryJobs({ historyContext: () => null, history: async () => { throw new Error('unused'); } });
+    jobs.coordinateQQ();
+    db.prepare("INSERT INTO groups(group_id,name,enabled,adapter,created_at) VALUES ('9001','Synthetic',1,'onebot',?)").run(Date.now());
+    reply(await actionAt('get_login_info', 0), { nickname: 'Synthetic' });
+    const groupList = await actionAt('get_group_list', 0);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      reply(groupList, []);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const page = await actionAt('get_group_msg_history', 0);
+      const id = jobs.list()[0]!.id;
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
+      expect(jobs.list()[0]).toMatchObject({ id, status: 'running', retryable: false });
+      expect(jobs.list()[0]?.waiting_since).toBeTypeOf('number');
+      handleOnebotMessage(lifecycle('11111'));
+      expect(jobs.create({ platform: 'qq', days: 7, expected_account_epoch: accountEpoch() }).id).toBe(id);
+      const legacy = syncHistory(7);
+      expect(sent.filter((call) => call.action === 'get_group_msg_history')).toHaveLength(1);
+      reply(page, { messages: [{ message_id: 991, group_id: 9001, time: Math.floor(Date.now() / 1000) - 8 * 86400,
+        sender: { nickname: 'Synthetic' }, message: [{ type: 'text', data: { text: 'Window boundary' } }] }] });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const essence = await actionAt('get_essence_msg_list', 0);
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
+      expect(jobs.list()[0]).toMatchObject({ status: 'running', pages: 1 });
+      expect(sent.filter((call) => call.action === 'get_essence_msg_list')).toHaveLength(1);
+      reply(essence, [{ message_id: 992, sender_time: Math.floor(Date.now() / 1000), content: 'Synthetic long automatic notice' }]);
+      expect(await legacy).toEqual({ groups: 1, messages: 1, failures: 0 });
+      expect(jobs.list()[0]).toMatchObject({ id, status: 'completed', messages: 1, waiting_since: null });
+      expect(db.prepare('SELECT COUNT(*) n FROM messages').get()?.n).toBe(1);
+      expect(sent.filter((call) => call.action === 'get_group_msg_history')).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
+  it('legacy HTTP admission releases its account lease while the source page is still pending', async () => {
+    await setupAccountA();
+    const jobs = new HistoryJobs({ historyContext: () => null, history: async () => { throw new Error('unused'); } });
+    jobs.coordinateQQ();
+    db.prepare("INSERT INTO groups(group_id,name,enabled,adapter,created_at) VALUES ('9001','Synthetic',1,'onebot',?)").run(Date.now());
+    const app = new Hono(); app.use('*', accountMutationGuard()); registerConnectRoutes(app);
+    const response = await app.request('/api/sync', { method: 'POST', headers: {
+      'Content-Type': 'application/json', 'X-ClassRep-Account-Epoch': accountEpoch(),
+    }, body: JSON.stringify({ days: 7 }) });
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({ job: { status: 'running' } });
+    const pendingPage = await actionAt('get_group_msg_history', 0);
+    // This exclusive transition would deadlock if /api/sync retained its lease.
+    await switchAccount('22222');
+    expect(currentAccount()).toBe('22222');
+    reply(pendingPage, { messages: [] });
+    expect(db.prepare('SELECT COUNT(*) n FROM messages').get()?.n).toBe(0);
+  });
+  it('reconnect resumes the saved cursor then catches new offline arrivals under the same task ID', async () => {
+    await setupAccountA();
+    const jobs = new HistoryJobs({ historyContext: () => null, history: async () => { throw new Error('unused'); } });
+    jobs.coordinateQQ();
+    db.prepare("INSERT INTO groups(group_id,name,enabled,adapter,created_at) VALUES ('9001','Synthetic',1,'onebot',?)").run(Date.now());
+    const message = (id: number, age: number) => ({ message_id: id, group_id: 9001,
+      time: Math.floor(Date.now() / 1000) - age, raw_message: 'Synthetic offline notice', sender: { nickname: 'Synthetic' } });
+    reply(await actionAt('get_login_info', 0), { nickname: 'Synthetic' });
+    reply(await actionAt('get_group_list', 0), []);
+    reply(await actionAt('get_group_msg_history', 0), { messages: [message(51, 100)] });
+    const oldPending = await actionAt('get_group_msg_history', 1);
+    const id = jobs.list()[0]!.id;
+    stopOnebotClient();
+    await vi.waitFor(() => expect(jobs.get(id)?.status).toBe('failed'));
+    resetAfterRestart(); handleOnebotMessage(lifecycle('11111'));
+    reply(await actionAt('get_login_info', 1), { nickname: 'Synthetic' });
+    reply(await actionAt('get_group_list', 1), []);
+    const resumed = await actionAt('get_group_msg_history', 2);
+    expect(resumed.params.message_seq).toBe(51);
+    reply(resumed, { messages: [] });
+    reply(await actionAt('get_essence_msg_list', 0), []);
+    const head = await actionAt('get_group_msg_history', 3);
+    expect(head.params.message_seq).toBeUndefined();
+    handleOnebotMessage(lifecycle('11111'));
+    const joining = syncHistory(7);
+    expect(jobs.create({ platform: 'qq', days: 7, expected_account_epoch: accountEpoch() }).id).toBe(id);
+    expect(sent.filter((call) => call.action === 'get_group_msg_history')).toHaveLength(4);
+    reply(oldPending, { messages: [message(999, 1)] }); // Rejected old socket echo.
+    reply(head, { messages: [message(52, 1), message(50, 8 * 86400)] });
+    reply(await actionAt('get_essence_msg_list', 1), []);
+    expect(await joining).toEqual({ groups: 1, messages: 2, failures: 0 });
+    expect(jobs.get(id)).toMatchObject({ status: 'completed', messages: 2 });
+    expect(db.prepare('SELECT message_id FROM messages ORDER BY message_id').all()).toEqual([{ message_id: '51' }, { message_id: '52' }]);
+    expect(sent.filter((call) => call.action === 'get_group_msg_history')).toHaveLength(4);
+  });
+  it('an indefinite read still rejects on real connection close', async () => {
+    await setupAccountA();
+    const result = callAction('get_essence_msg_list', { group_id: 9001 }, null);
+    const rejected = expect(result).rejects.toThrow('连接已关闭');
+    stopOnebotClient(); await rejected;
+  });
   it('same-account desktop return backfills its gap once and deduplicates repeated lifecycle events', async () => {
     await setupAccountA();
     reply(await actionAt('get_login_info', 0), { nickname: 'A' });

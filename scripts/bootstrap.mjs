@@ -1,5 +1,5 @@
 // 克隆即用的启动链路（问题 2）：启动.bat 保证 Node 后调这里，五步自检安装 + 启动。
-//   [1/5] Node 可用性（node:sqlite，即 ≥22.15；启动.bat 已保证，这里再验一次给友好报错）
+//   [1/5] Node ≥22.16 且 SQLite 事务状态接口可用（与启动.bat 共用检查）
 //   [2/5] 包管理器与依赖：pnpm 不在 PATH 就用 Node 自带 corepack 装到 .corepack/bin（免管理员），
 //         node_modules 落后于 pnpm-lock.yaml 才 install（平时秒过）
 //   [3/5] NapCat 采集端运行包：缺失就跑 scripts/fetch-napcat.mjs（官方 Release 自动下载）
@@ -20,7 +20,9 @@ import {
   startServerChild,
 } from './lib/start-server.mjs';
 import { webBuildFresh } from './lib/build-cache.mjs';
-import { corepackEnv, resolvePnpm } from './lib/pnpm.mjs';
+import { resolvePnpm } from './lib/pnpm.mjs';
+import { checkNodeRuntime } from './lib/node-runtime.mjs';
+import { preparePythonRuntime } from './lib/python-runtime.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const argv = process.argv.slice(2);
@@ -31,10 +33,9 @@ const log = console.log;
 const step = (n, msg) => log(`[${n}/5] ${msg}`);
 
 // ---------- [1/5] Node ----------
-try {
-  await import('node:sqlite');
-} catch {
-  console.error(`[ClassRep] ❌ 当前 Node ${process.version} 没有 node:sqlite（需要 ≥22.15）。`);
+const nodeCheck = await checkNodeRuntime();
+if (!nodeCheck.ok) {
+  console.error(`[ClassRep] ❌ ${nodeCheck.error}。`);
   console.error('   删除仓库下 runtime\\node.exe 后重新双击 启动.bat 可自动下载新版；或自行升级 Node。');
   process.exit(1);
 }
@@ -53,7 +54,7 @@ if (!depsFresh() || forceDeps) {
     stdio: 'inherit',
     shell: pnpm.shell,
     windowsHide: true,
-    env: { ...process.env, ...corepackEnv() },
+    env: pnpm.env,
   });
   if (r.status !== 0) {
     console.error('\n[ClassRep] ❌ 依赖安装失败。请把上面的报错发给开发同学，或手动执行 pnpm install 后重试。');
@@ -82,14 +83,7 @@ if (isWin() && !existsSync(join(ROOT, 'napcat', 'NapCatWinBootMain.exe'))) {
 
 // Windows 微信固定使用受控便携 Python，与用户系统 Python 和快判模式无关。
 if (isWin()) {
-  log('[ClassRep] 检查微信与本地快判共享 Python 运行时…');
-  const prepared = spawnSync(process.execPath, [join(ROOT, 'scripts', 'fastjudge-setup.mjs')], {
-    cwd: ROOT, stdio: 'inherit', windowsHide: true,
-  });
-  if (prepared.status !== 0) {
-    console.error('[ClassRep] Python 准备失败；请检查网络后运行 node scripts/fastjudge-setup.mjs 再启动。');
-    process.exit(1);
-  }
+  preparePythonRuntime(ROOT);
 }
 
 // ---------- [4/5] 前端产物（增量构建缓存） ----------
@@ -100,6 +94,7 @@ if (!webBuildFresh(ROOT) || forceBuild) {
     stdio: 'inherit',
     shell: pnpm.shell,
     windowsHide: true,
+    env: pnpm.env,
   });
   if (r.status !== 0) {
     console.error('\n[ClassRep] ❌ 前端构建失败，请把上面的报错发给开发同学。');
@@ -119,6 +114,15 @@ if (running !== null) {
 }
 killOldBackends({ log });
 const { child, launchId } = startServerChild({ root: ROOT });
+// Attach before waiting for health: an immediate crash must keep its failure code.
+child.on('error', error => {
+  console.error(`[ClassRep] 后端无法启动：${error.message}`);
+  process.exit(1);
+});
+child.on('exit', (code) => {
+  log(`后端已退出（${code ?? 1}）`);
+  process.exit(code ?? 1);
+});
 
 const port = await findHealthyPort(90_000, launchId);
 if (port !== null) {
@@ -127,11 +131,6 @@ if (port !== null) {
 } else {
   log('本次后端 90 秒内没有就绪，请查看启动日志中的地址或错误。');
 }
-
-child.on('exit', (code) => {
-  log(`后端已退出（${code ?? 0}）`);
-  process.exit(code ?? 0);
-});
 
 // ===== helpers =====
 
