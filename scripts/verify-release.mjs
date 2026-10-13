@@ -5,6 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { WECHAT_IDENTITY_FILES } from './lib/wechat-runtime.mjs';
 
 const repo = dirname(dirname(fileURLToPath(import.meta.url)));
 const zip = resolve(process.argv[2] ?? join(repo, 'release', 'ClassRep.zip'));
@@ -32,6 +33,7 @@ try {
     'app/version.json', 'napcat/NapCatWinBootMain.exe', 'napcat/NapCatWinBootHook.dll',
     'napcat/napcat.mjs', 'classrep-fastjudge/py/python.exe',
     'classrep-fastjudge/models/local-jev-v1.joblib',
+    ...WECHAT_IDENTITY_FILES.map((name) => `tools/wechat4-read-probe/${name}`),
   ]) assert.ok(existsSync(join(install, file)), `Extracted release missing ${file}`);
   const version = JSON.parse(readFileSync(join(install, 'app/version.json'), 'utf8')).version;
   if (expectedVersion) assert.equal(version, expectedVersion, 'ZIP version does not match tag');
@@ -110,7 +112,22 @@ stopper.unref();
   assert.equal(scores.length, 4);
   assert.ok(scores[2] >= 0.2, `Exam message score too low: ${scores}`);
   assert.ok(scores[1] < 0.2, `Chat message score too high: ${scores}`);
-  console.log(`Release v${version} OK: ZIP filenames, batch startup, browser, DB, web assets, local model`);
+  const wechatRuntime = join(install, 'tools', 'wechat4-read-probe');
+  for (const [worker, expectedOption] of [
+    ['identity_worker.py', '--discover'],
+    ['catalog_worker.py', '--approve-contact-read'],
+    ['message_worker.py', '--approve-selected-storage'],
+  ]) {
+    const entry = join(wechatRuntime, worker);
+    const help = spawnSync(join(install, 'classrep-fastjudge/py/python.exe'), [
+      '-I', '-X', 'utf8', '-B', '-c',
+      'import os,runpy,sys;sys.argv=sys.argv[1:];sys.path.insert(0,os.path.dirname(sys.argv[0]));runpy.run_path(sys.argv[0],run_name="__main__")',
+      entry, '--help',
+    ], { cwd: install, encoding: 'utf8', windowsHide: true, timeout: 30_000 });
+    assert.equal(help.status, 0, `${worker}: ${help.stderr || help.stdout}`);
+    assert.match(help.stdout, new RegExp(expectedOption), `${worker} help missing ${expectedOption}`);
+  }
+  console.log(`Release v${version} OK: ZIP filenames, batch startup, browser, DB, web assets, local model, WeChat runtime`);
 } finally {
   if (launcher?.pid) {
     // Graceful shutdown also works where Windows process-control tools are restricted.

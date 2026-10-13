@@ -19,7 +19,8 @@ function fixture() {
   let current: WechatReadContext | null = context;
   const controller = new AbortController(); const launch = vi.fn(() => child);
   const proof = vi.fn(async () => current);
-  const options = { executable: 'not executed', entry: 'C:\\synthetic\\catalog_worker.py', context,
+  const options = { executable: 'not executed',
+    entry: fileURLToPath(new URL('synthetic-catalog-worker.py', import.meta.url)), context,
     metadata: { expected_account: context.account }, approveContactRead: true, approveKeyRead: true,
     proof, signal: controller.signal, launch };
   const reply = (patch: object = {}) => {

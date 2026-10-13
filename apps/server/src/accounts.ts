@@ -9,7 +9,7 @@
 // 否则半截批次会把旧账号的消息写进新账号的库。切库期间新到的消息由 onebot.ts 攒着，
 // 切完按序入库（攒不下就丢，历史补齐会兜回来）。
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
 import { DB_FILE, db, dbGeneration, notifyAccountSwitch, openDb } from './db/index.js';
@@ -255,6 +255,11 @@ export function accountDbPath(uin: string): string {
   return join(accountsDir, uin, 'classrep.db');
 }
 
+function canonicalDatabasePath(path: string): string {
+  try { return realpathSync(path); }
+  catch { return resolve(path); }
+}
+
 /** Authoritative business path; never derive a workspace target from the QQ login. */
 export function currentBackupDatabase(): string | null {
   if (workspaceController) {
@@ -262,7 +267,11 @@ export function currentBackupDatabase(): string | null {
     if (!id || accessBlocked || !workspaceRegistry) return null;
     const target = workspaceRegistry.businessDbPath(id, { spaces: workspaceSpacesDir, accounts: accountsDir });
     const mounted = db?.isOpen ? db.prepare('PRAGMA database_list').all().find(row => row.name === 'main')?.file : null;
-    return typeof mounted === 'string' && resolve(mounted) === resolve(target) ? target : null;
+    // macOS reports /private/var/... for a database opened through /var/...;
+    // Windows may likewise normalize junctions. Compare the existing files,
+    // not their caller-visible spellings, or a valid mounted space loses its
+    // backup/restore entry points.
+    return typeof mounted === 'string' && canonicalDatabasePath(mounted) === canonicalDatabasePath(target) ? target : null;
   }
   const uin = accountControlUin();
   return uin === null ? null : accountDbPath(uin);
@@ -406,7 +415,8 @@ export function restoreCurrentAccountBackup(expectedEpoch: string, candidate: st
   }
   const accountDir = dirname(targetDatabase);
   const resolvedCandidate = resolve(candidate);
-  if (dirname(resolvedCandidate) !== resolve(accountDir) || !existsSync(resolvedCandidate)) {
+  if (!existsSync(resolvedCandidate)
+      || canonicalDatabasePath(dirname(resolvedCandidate)) !== canonicalDatabasePath(accountDir)) {
     return Promise.reject(new Error('恢复候选文件不在当前账号目录'));
   }
   validateBackupDatabase(resolvedCandidate);
