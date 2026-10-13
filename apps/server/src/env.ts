@@ -93,6 +93,12 @@ function parseFastjudgeRoute(raw: string | undefined): 'jev' | 'local' {
   return v === 'local' ? 'local' : 'jev';
 }
 
+
+function parseExtractMode(raw: string | undefined): 'cloud' | 'local' {
+  const v = (raw ?? 'cloud').trim().toLowerCase();
+  return v === 'local' ? 'local' : 'cloud';
+}
+
 export function buildEnv(src: Record<string, string | undefined>) {
   return {
     LLM_BASE_URL: src.LLM_BASE_URL ?? '',
@@ -115,6 +121,18 @@ export function buildEnv(src: Record<string, string | undefined>) {
     // B10：演示模式默认关闭（演示数据会进真实群列表），开发者要用在 .env 里显式开
     DEMO_MODE: (src.DEMO_MODE ?? 'false').trim() === 'true',
     RAW_MSG_TTL_DAYS: positiveNum(src.RAW_MSG_TTL_DAYS, 7),
+    /** 提取后端：cloud（默认，OpenAI 兼容 LLM）| local（本机 Unsloth v4-DFG worker） */
+    EXTRACT_MODE: parseExtractMode(src.EXTRACT_MODE),
+    /** classrep-extractor 根目录；local 模式须显式配置 */
+    EXTRACTOR_ROOT: src.EXTRACTOR_ROOT?.trim() || '',
+    /** 调 infer_serve.py 的 Python；空则优先 ROOT/env/Scripts/python.exe（Win）或 env/bin/python */
+    EXTRACTOR_PYTHON: src.EXTRACTOR_PYTHON?.trim() || '',
+    /** LoRA adapter 路径；空则 ROOT/runs/qwen3-1.7b-qlora-v4-time */
+    EXTRACT_ADAPTER: src.EXTRACT_ADAPTER?.trim() || '',
+    /** 基座；默认 unsloth/Qwen3-1.7B-bnb-4bit */
+    EXTRACT_BASE: src.EXTRACT_BASE?.trim() || '',
+    /** 本地提取单次超时（含首轮 GPU 加载）；默认 120s */
+    EXTRACT_TIMEOUT_MS: positiveNum(src.EXTRACT_TIMEOUT_MS, 120_000),
   };
 }
 
